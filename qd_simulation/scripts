@@ -1,0 +1,9 @@
+/qd_simulation$ source bin/activate
+
+
+tar xzf qd_simulation_package.tar.gz
+cd qd_simulation
+pip install -r requirements.txt     # Installs torch, numpy, scipy, etc.
+python run_all.py --quick            # ~20 min, reduced sweeps
+python run_all.py                    # ~2-3 hours, full balanced mode
+python run_all.py --exp 4 5          # FL + gradient attack only

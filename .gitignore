@@ -1,0 +1,42 @@
+# Claude Code / IDE local settings
+.claude/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Simulation outputs (regenerated on `python run_all.py`)
+qd_simulation/results/*.png
+qd_simulation/results/*.pdf
+qd_simulation/results/summary.json
+qd_simulation/results/data/
+qd_simulation/results/*.log
