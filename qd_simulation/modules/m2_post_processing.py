@@ -15,10 +15,18 @@ from the Leftover Hash Lemma (Renner 2005, Tomamichel 2012): output is
 epsilon-close to uniform if input min-entropy exceeds output length +
 2*log(1/epsilon).
 
-Shared-bit rate: R_shared = R_raw × [1 - beta*H(q) - D_tag - margin/N - bell_duty],
-where beta ≈ 1.15 is LDPC reconciliation efficiency, H(q) is binary entropy
-(syndrome leakage — the only QBER-dependent PA term in the source model),
-and D_tag is the GLLP-style tagged fraction: multi-pair emissions that a
+Shared-bit rate:
+  R_shared = R_raw × [1 - max(beta*H(q), 1-R_code) - D_tag - margin/N]
+                   × (1 - FER) × (1 - bell_duty),
+where the reconciliation leakage is the LARGER of the declared fixed code's
+syndrome fraction (1 - R_code: a rate-0.84 LDPC leaks 16% of every block
+regardless of QBER — which is what fast_ec_simulate actually charges) and
+the rate-adaptive envelope beta*H(q) with beta ≈ 1.15 (the leakage of an
+efficiency-beta code family tuned to q, needed once q exceeds the fixed
+code's design point). The crossover sits at the code's design QBER (~2%
+for rate 0.84). This never claims less leakage than the implemented code
+and never more correction capability than the beta envelope allows.
+D_tag is the GLLP-style tagged fraction: multi-pair emissions that a
 passive beamsplitter could copy WITHOUT disturbance (Gottesman, Lo,
 Lutkenhaus & Preskill 2004). Tagged bits are treated as known to a
 transcript recorder and removed in PA — this is what supports the
@@ -298,19 +306,27 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     Returns dict with each stage's rate and overhead.
     """
     h_q = binary_entropy(qber)
-    beta = 1.15  # Typical LDPC efficiency
+    beta = 1.15  # LDPC reconciliation inefficiency (rate-adaptive envelope)
 
     raw_rate = coincidence_rate_hz
     after_sifting = raw_rate  # Fixed-basis: zero sifting loss
-    
-    h_q = binary_entropy(qber)
-    
+
     # Shared-bit fraction (source model — no eavesdropper term):
-    # shared_fraction = 1 - f*h(q) - D_tag
-    # where f*h(q) = reconciliation syndrome leakage and D_tag is the
-    # GLLP tagged fraction (multi-pair emissions a passive beamsplitter
-    # could copy undetected; removed in PA to support HNDL immunity).
-    syndrome_fraction = h_q * beta  # reconciliation leakage
+    #   shared_fraction = 1 - max(beta*h(q), 1 - code_rate) - D_tag
+    # Reconciliation leakage is the LARGER of:
+    #   (a) the declared FIXED code's syndrome fraction (1 - code_rate):
+    #       rate-0.84 LDPC leaks 16% of every block regardless of QBER —
+    #       this is what fast_ec_simulate actually charges; and
+    #   (b) the rate-adaptive envelope beta*h(q): what an efficiency-beta
+    #       code family tuned to q would leak, which a real system needs
+    #       once q exceeds the fixed code's design point (~2% for 0.84).
+    # max(a, b) never claims less leakage than the implemented code and
+    # never more correction capability than the envelope allows (Gate-1 F1;
+    # the previous pure-beta*h(q) charge was 9.5% optimistic at the
+    # operating QBER of 0.0085).
+    # D_tag is the GLLP tagged fraction (multi-pair emissions a passive
+    # beamsplitter could copy undetected; removed in PA for HNDL immunity).
+    syndrome_fraction = max(h_q * beta, 1.0 - code_rate)  # reconciliation leakage
     if tagged_fraction is None:
         tagged_fraction = default_tagged_fraction()
     pa_compression_fraction = tagged_fraction
