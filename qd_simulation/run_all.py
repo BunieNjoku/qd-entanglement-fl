@@ -120,6 +120,8 @@ def print_comm_summary(fl_result, label=""):
         return sum(f(r) for r in rounds) / n
 
     nc = max(rounds[0].n_clients, 1)
+    mult = max((getattr(r, 'max_payload_multiplicity', 1) for r in rounds),
+               default=1)
     up = _mean(lambda r: r.uplink_bytes()) / nc
     phases = {
         'payload': _mean(lambda r: r.payload_bytes) / nc,
@@ -132,8 +134,10 @@ def print_comm_summary(fl_result, label=""):
     key_intra = _mean(lambda r: r.key_bits_intra)
     key_inter = _mean(lambda r: r.key_bits_inter)
     tfail = sum(r.threshold_failures for r in rounds)
-    print(f"    [comm{(' ' + label) if label else ''}] per client·round: "
-          f"uplink {up:,.0f} B ("
+    mult_note = (f"; heaviest client sends ×{mult} payloads"
+                 if mult > 1 else "")
+    print(f"    [comm{(' ' + label) if label else ''}] MEAN per client·round"
+          f"{mult_note}: uplink {up:,.0f} B ("
           + ", ".join(f"{k} {v:,.0f}" for k, v in phases.items() if v > 0)
           + f"), downlink {down:,.0f} B")
     print(f"           key bits/round: intra {key_intra:,.0f}, inter {key_inter:,.0f}"
@@ -646,7 +650,9 @@ def run_experiment_4(quick=False):
     # ── Communication accounting (HANDOFF Phase 2) ──
     print("\n  Communication accounting (last repeat per mode; prng/dp/"
           "unmasked count payload+downlink only — faithful classical "
-          "baselines land in Phase 4):")
+          "baselines land in Phase 4;\n  key-distillation classical "
+          "traffic, syndromes ≈0.20 B per secret bit, is excluded from "
+          "the FL-layer ledger by scope — see RoundComm):")
     for mode in modes:
         print_comm_summary(all_runs[mode][-1], label=mode)
 
