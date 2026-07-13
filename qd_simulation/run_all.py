@@ -43,7 +43,8 @@ import matplotlib.patches as mpatches
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(__file__))
-from config import QUANTUM, POST_PROC, MESH, FL, COST, VIZ, RESULTS_DIR
+from config import (QUANTUM, POST_PROC, MESH, FL, COST, VIZ, RESULTS_DIR,
+                    BITS_PER_PARAM, OPERATING_POINT, PROJECTED_OPERATING_POINT)
 
 from modules.m1_quantum_source import (
     simulate_source, compute_chsh_s, werner_state,
@@ -267,46 +268,72 @@ def run_experiment_2(quick=False):
     print("="*70)
 
     qber_sweep = POST_PROC['qber_sweep'] if not quick else np.linspace(0.01, 0.05, 5)
-    base_rate = 1e6  # 1 MHz coincidence rate
+    # Operating points from config — single source of truth (HANDOFF 1.1).
+    # base_rate is the MODELED device's raw edge rate, not an assumed 1 MHz.
+    op = OPERATING_POINT
+    proj = PROJECTED_OPERATING_POINT
+    base_rate = op['raw_edge_rate_hz']
 
-    # ── 2a: Rate waterfall at default QBER ──
-    print("  [2a] Rate waterfall at QBER=0.02...")
-    wf = compute_rate_waterfall(base_rate, 0.02)
+    def _wf(rate_hz, qber):
+        """Waterfall at this config's post-processing parameters."""
+        return compute_rate_waterfall(
+            rate_hz, qber,
+            code_rate=POST_PROC['ldpc_code_rate'],
+            security_margin=POST_PROC['security_margin_bits'],
+            block_size=POST_PROC['block_size'],
+            bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+        )
 
-    stages = ['Raw Rate', 'After\nSifting', 'After\nEC', 'After\nPA',
-              'After\nVerification', 'Final\nSecure Rate']
-    values = [wf['raw_coincidence_rate'], wf['after_sifting'],
-              wf['after_ec'], wf['after_pa'],
-              wf['after_verification'], wf['final_secure_rate']]
-    values_khz = [v/1000 for v in values]
+    # ── 2a: Rate waterfall at both operating points ──
+    print("  [2a] Rate waterfall — modeled device vs labeled projection...")
+    wf = _wf(op['raw_edge_rate_hz'], op['qber'])
+    # Sanity (HANDOFF 1.1.4): this experiment's waterfall input IS the config
+    # operating point, and its output must reproduce config's derived rate —
+    # otherwise the single source of truth has been violated somewhere.
+    assert abs(wf['final_secure_rate'] - op['secret_rate_bps']) < 1e-6, (
+        f"exp2 waterfall ({wf['final_secure_rate']:.3f} bps) diverged from "
+        f"config.OPERATING_POINT ({op['secret_rate_bps']:.3f} bps)")
+    wf_proj = _wf(proj['raw_edge_rate_hz'], proj['qber'])
 
-    fig, ax = plt.subplots(figsize=VIZ['figsize'])
-    bars = ax.bar(stages, values_khz, color=[C['dark'], C['quantum'], C['quantum'],
-                   C['quantum'], C['quantum'], C['pareto']], edgecolor='white', linewidth=1.5)
-    # Add overhead labels
-    overheads = ['', '0%', f'{wf["ec_overhead_pct"]:.1f}%',
-                 f'{wf["pa_overhead_pct"]:.1f}%',
-                 f'{wf["verification_overhead_pct"]:.1f}%',
-                 f'{wf["bell_overhead_pct"]:.1f}%']
-    for bar, oh in zip(bars, overheads):
-        if oh:
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 15,
-                    f'−{oh}', ha='center', va='bottom', fontsize=7, color='gray')
-
-    ax.set_ylabel('Rate (kbit/s)')
-    ax.set_title(f'Experiment 2a: Rate Waterfall — QBER=2%\n'
-                 f'Total overhead: {wf["total_overhead_pct"]:.1f}%  |  '
-                 f'Final rate: {wf["final_secure_rate"]/1000:.0f} kbit/s')
-    ax.grid(True, alpha=0.2, axis='y')
+    stages = ['Raw', 'Sift', 'EC', 'PA', 'Verif', 'Final']
+    fig, axes = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    for ax, w, point in ((axes[0], wf, op), (axes[1], wf_proj, proj)):
+        vals_khz = [w['raw_coincidence_rate']/1000, w['after_sifting']/1000,
+                    w['after_ec']/1000, w['after_pa']/1000,
+                    w['after_verification']/1000, w['final_secure_rate']/1000]
+        bars = ax.bar(stages, vals_khz,
+                      color=[C['dark'], C['quantum'], C['quantum'],
+                             C['quantum'], C['quantum'], C['pareto']],
+                      edgecolor='white', linewidth=1.5)
+        overheads = ['', '0%', f'−{w["ec_overhead_pct"]:.1f}%',
+                     f'−{w["pa_overhead_pct"]:.1f}%',
+                     f'−{w["verification_overhead_pct"]:.1f}%',
+                     f'−{w["bell_overhead_pct"]:.1f}%']
+        for bar, oh in zip(bars, overheads):
+            if oh:
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                        oh, ha='center', va='bottom', fontsize=6, color='gray')
+        ax.set_ylabel('Rate (kbit/s)')
+        ax.set_title(f"{point['label']}\nQBER {point['qber']*100:.2f}% → "
+                     f"{w['final_secure_rate']/1000:.1f} kbit/s", fontsize=8)
+        ax.grid(True, alpha=0.2, axis='y')
+    fig.suptitle('Experiment 2a: Rate waterfall — modeled device vs labeled projection',
+                 fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp2a_rate_waterfall')
+
+    print(f"    modeled device : {op['raw_edge_rate_hz']:>11,.0f} Hz raw → "
+          f"{wf['final_secure_rate']:>9,.0f} bps secret  (QBER {op['qber']:.4f})")
+    print(f"    PROJECTED      : {proj['raw_edge_rate_hz']:>11,.0f} Hz raw → "
+          f"{wf_proj['final_secure_rate']:>9,.0f} bps secret  (QBER {proj['qber']:.4f})"
+          f"  — hypothetical 1 MHz-class, not modeled")
 
     # ── 2b: Final secure rate vs QBER ──
     print("  [2b] Secure rate vs QBER sweep...")
     final_rates = []
     ec_overheads = []
     for q in qber_sweep:
-        wf = compute_rate_waterfall(base_rate, q)
+        wf = _wf(base_rate, q)
         final_rates.append(wf['final_secure_rate'])
         ec_overheads.append(wf['ec_overhead_pct'])
 
@@ -314,8 +341,11 @@ def run_experiment_2(quick=False):
     ax1.plot(qber_sweep*100, np.array(final_rates)/1000, 'o-', color=C['quantum'], linewidth=2)
     ax1.set_xlabel('QBER (%)')
     ax1.set_ylabel('Final Secure Rate (kbit/s)')
-    ax1.set_title('Secure Key Rate vs QBER')
+    ax1.set_title(f'Secure rate vs QBER\n(at modeled-device raw rate '
+                  f'{base_rate/1000:.1f} kHz)', fontsize=8)
     ax1.axvspan(1.5, 4.0, alpha=0.1, color=C['quantum'], label='Expected range (Assumption D)')
+    ax1.axvline(x=op['qber']*100, color=C['dark'], linestyle='--', linewidth=1,
+                label=f"operating point ({op['qber']*100:.2f}%)")
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
@@ -334,8 +364,8 @@ def run_experiment_2(quick=False):
     our_rates = []
     sifting_rates = []
     for q in qber_sweep:
-        our_wf = compute_rate_waterfall(base_rate, q)
-        sift_wf = compute_rate_waterfall(base_rate * 0.5, q)  # 50% sifting loss
+        our_wf = _wf(base_rate, q)
+        sift_wf = _wf(base_rate * 0.5, q)  # 50% sifting loss
         our_rates.append(our_wf['final_secure_rate'])
         sifting_rates.append(sift_wf['final_secure_rate'])
 
@@ -350,8 +380,9 @@ def run_experiment_2(quick=False):
                      label='Rate gain from trusted-source assumption')
     ax.set_xlabel('QBER (%)')
     ax.set_ylabel('Shared bit rate (kbit/s)')
-    ax.set_title('Experiment 2c: Fixed-basis vs sifting rate\n'
-                 '(Fixed-basis requires trusted source; sifting does not)')
+    ax.set_title(f'Experiment 2c: Fixed-basis vs sifting rate at modeled-device '
+                 f'raw rate ({base_rate/1000:.1f} kHz)\n'
+                 f'(Fixed-basis requires trusted source; sifting does not)')
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -381,6 +412,8 @@ def run_experiment_2(quick=False):
 
     print("  ✓ Experiment 2 complete.")
     return {
+        "operating_point_secret_bps": op['secret_rate_bps'],
+        "projected_secret_bps": wf_proj['final_secure_rate'],
         "final_rates": final_rates,
         "qber_sweep": qber_sweep.tolist(),
         "bp_validation": bp_validation,
@@ -399,13 +432,17 @@ def run_experiment_3(quick=False):
     node_counts = MESH['node_counts_sweep'] if not quick else [3, 6, 12, 24, 40]
     model_sizes = [5e4, 1e5, 5e5, 1e6, 2e6] if not quick else [1e5, 5e5, 1e6]
     round_periods = [15, 30, 60, 120, 300] if not quick else [30, 60, 300]
-    secure_rate = 675000  # 675 kbit/s
+    # Operating points from config — single source of truth (HANDOFF 1.1).
+    op_rate = OPERATING_POINT['secret_rate_bps']
+    proj_rate = PROJECTED_OPERATING_POINT['secret_rate_bps']
 
     # ── 3a: Aggregation depth vs node count ──
+    # (Depth and triangle count are geometric — independent of key rate;
+    #  the mesh's latency fields use the modeled-device rate.)
     print("  [3a] Aggregation depth vs node count...")
     depths, n_triangles_list = [], []
     for n in node_counts:
-        mesh = analyze_mesh(n, 1e5, secure_rate, rng=np.random.default_rng(42))
+        mesh = analyze_mesh(n, 1e5, op_rate, rng=np.random.default_rng(42))
         depths.append(mesh.aggregation_depth)
         n_triangles_list.append(mesh.n_triangles)
 
@@ -430,34 +467,54 @@ def run_experiment_3(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp3a_mesh_scaling')
 
-    # ── 3b: Max nodes heatmap ──
-    print("  [3b] Max mesh size heatmap...")
-    heatmap = np.zeros((len(model_sizes), len(round_periods)))
-    for i, ms in enumerate(model_sizes):
-        for j, rp in enumerate(round_periods):
-            max_tri, max_n = compute_max_mesh_size(int(ms), rp, secure_rate)
-            heatmap[i, j] = max_n
-
-    fig, ax = plt.subplots(figsize=VIZ['figsize'])
-    im = ax.imshow(heatmap, aspect='auto', cmap='YlOrBr', interpolation='nearest')
-    ax.set_xticks(range(len(round_periods)))
-    ax.set_xticklabels([f'{r}s' for r in round_periods])
-    ax.set_yticks(range(len(model_sizes)))
-    ax.set_yticklabels([f'{int(ms/1000)}K' for ms in model_sizes])
-    ax.set_xlabel('Training Round Period')
-    ax.set_ylabel('Model Size (parameters)')
-    ax.set_title(f'Experiment 3b: Maximum Feasible Nodes\n(at {secure_rate/1000:.0f} kbit/s secure rate)')
-    for i in range(len(model_sizes)):
-        for j in range(len(round_periods)):
-            val = int(heatmap[i, j])
-            ax.text(j, i, str(val), ha='center', va='center',
-                    color='white' if val > 50 else 'black', fontweight='bold')
-    fig.colorbar(im, ax=ax, label='Max nodes')
+    # ── 3b: Max nodes heatmap — modeled device vs labeled projection ──
+    print("  [3b] Max mesh size heatmap — modeled device vs labeled projection...")
+    rate_points = [
+        (op_rate, f'modeled device ({op_rate/1000:.1f} kbit/s)'),
+        (proj_rate, f'PROJECTED 1 MHz-class ({proj_rate/1000:.0f} kbit/s, hypothetical)'),
+    ]
+    heatmaps = []
+    fig, axes = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    for ax, (rate, rlabel) in zip(axes, rate_points):
+        heatmap = np.zeros((len(model_sizes), len(round_periods)))
+        for i, ms in enumerate(model_sizes):
+            for j, rp in enumerate(round_periods):
+                max_tri, max_n = compute_max_mesh_size(int(ms), rp, rate)
+                heatmap[i, j] = max_n
+        heatmaps.append(heatmap)
+        im = ax.imshow(heatmap, aspect='auto', cmap='YlOrBr', interpolation='nearest')
+        ax.set_xticks(range(len(round_periods)))
+        ax.set_xticklabels([f'{r}s' for r in round_periods])
+        ax.set_yticks(range(len(model_sizes)))
+        ax.set_yticklabels([f'{int(ms/1000)}K' for ms in model_sizes])
+        ax.set_xlabel('Training Round Period')
+        ax.set_ylabel('Model Size (parameters)')
+        ax.set_title(rlabel, fontsize=8)
+        vmax = heatmap.max() if heatmap.max() > 0 else 1
+        for i in range(len(model_sizes)):
+            for j in range(len(round_periods)):
+                val = int(heatmap[i, j])
+                ax.text(j, i, str(val), ha='center', va='center', fontsize=6,
+                        color='white' if val > 0.55 * vmax else 'black',
+                        fontweight='bold')
+        fig.colorbar(im, ax=ax, label='Max nodes')
+    fig.suptitle('Experiment 3b: Maximum feasible nodes — modeled vs projected rate',
+                 fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp3b_max_nodes_heatmap')
 
+    print("    Max nodes (rows = model size), modeled | projected:")
+    header = "  ".join(f"{rp:>9}s" for rp in round_periods)
+    print(f"      {'':>6}  {header}")
+    for i, ms in enumerate(model_sizes):
+        row = "  ".join(f"{int(heatmaps[0][i, j]):>4}|{int(heatmaps[1][i, j]):<5}"
+                        for j in range(len(round_periods)))
+        print(f"      {int(ms/1000):>5}K  {row}")
+
     print("  ✓ Experiment 3 complete.")
-    return {"depths": depths, "heatmap": heatmap.tolist()}
+    return {"depths": depths,
+            "heatmap_modeled": heatmaps[0].tolist(),
+            "heatmap_projected": heatmaps[1].tolist()}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -916,7 +973,15 @@ def run_experiment_6(quick=False):
     print("="*70)
 
     model_sizes = FL['model_sizes_sweep'] if not quick else [5e4, 1e5, 5e5, 1e6]
-    key_rates = [100e3, 300e3, 675e3, 1e6] if not quick else [300e3, 675e3]
+    # Operating points from config — single source of truth (HANDOFF 1.1).
+    # The sweep brackets the two labeled points; no unlabeled rate literals.
+    op_rate = OPERATING_POINT['secret_rate_bps']
+    proj_rate = PROJECTED_OPERATING_POINT['secret_rate_bps']
+    key_rates = [op_rate, 100e3, 300e3, proj_rate] if not quick else [op_rate, proj_rate]
+    rate_labels = {
+        op_rate: f'{op_rate/1000:.1f} kbit/s — modeled device',
+        proj_rate: f'{proj_rate/1000:.0f} kbit/s — PROJECTED 1 MHz-class (hypothetical)',
+    }
 
     # Compute mask generation time and training throughput
     print("  Computing throughput for model size × key rate grid...")
@@ -933,7 +998,7 @@ def run_experiment_6(quick=False):
 
     fig, ax = plt.subplots(figsize=VIZ['figsize'])
     for j, kr in enumerate(key_rates):
-        label = f'{kr/1000:.0f} kbit/s'
+        label = rate_labels.get(kr, f'{kr/1000:.0f} kbit/s')
         ax.plot([int(ms/1000) for ms in model_sizes], rounds_per_hour[:, j],
                 'o-', linewidth=2, label=label)
 
@@ -958,7 +1023,7 @@ def run_experiment_6(quick=False):
         for period_name, period_s in [("30s", 30), ("60s", 60), ("300s", 300)]:
             max_bits = kr * period_s
             max_params = max_bits / 16
-            print(f"    {kr/1000:.0f} kbit/s, {period_name} rounds: "
+            print(f"    {rate_labels.get(kr, f'{kr/1000:.0f} kbit/s')}, {period_name} rounds: "
                   f"max {max_params/1000:.0f}K params ({max_params*16/8/1e6:.1f} MB gradient)")
 
     print("  ✓ Experiment 6 complete.")
@@ -1267,7 +1332,10 @@ def run_experiment_8(quick=False):
 
         # Use Module 3 Delaunay topology for larger scales, hardcoded for small
         if n_clients >= 6:
-            mesh = analyze_mesh(n_clients, 1e5, 675000, rng=np.random.default_rng(42))
+            # Modeled-device rate from config (HANDOFF 1.1) — topology metrics
+            # are geometric; the mesh's latency fields use the honest rate.
+            mesh = analyze_mesh(n_clients, 1e5, OPERATING_POINT['secret_rate_bps'],
+                                rng=np.random.default_rng(42))
             triangles, tree_edges = topology_from_mesh(mesh)
             n_tri = len(triangles)
             tree_depth = mesh.aggregation_depth
@@ -1425,31 +1493,36 @@ def run_experiment_8(quick=False):
     fig.tight_layout(rect=[0, 0, 1, 0.92])
     save_fig(fig, 'exp8b_multitri_scaling_bars')
 
-    # ═══ PLOT 3: Aggregation overhead projection ═══
-    fig, ax = plt.subplots(figsize=VIZ['figsize'])
-
-    secure_rate = 675000  # bits/s
+    # ═══ PLOT 3: Aggregation overhead at both operating points ═══
+    # Modeled device AND the labeled hypothetical projection (HANDOFF 1.1.3).
+    rate_points = [
+        (OPERATING_POINT['secret_rate_bps'], 'modeled device'),
+        (PROJECTED_OPERATING_POINT['secret_rate_bps'],
+         'PROJECTED 1 MHz-class (hypothetical)'),
+    ]
     model_params = [5e4, 1e5, 5e5, 1e6]
 
-    for mp in model_params:
-        gradient_bits = int(mp) * 16
-        mask_time_per_level = gradient_bits / secure_rate
-        overhead_at_depths = [mask_time_per_level * d for d in tree_depths]
-        ax.plot(scales, overhead_at_depths, 'o-', linewidth=2,
-                label=f'{int(mp/1000)}K params ({mask_time_per_level:.1f}s/level)')
-
-    ax.set_xlabel('Number of Clients')
-    ax.set_ylabel('Aggregation Overhead (seconds)')
-    ax.set_title('Experiment 8c: Projected Aggregation Overhead\n'
-                 f'at {secure_rate/1000:.0f} kbit/s secure key rate')
-    ax.legend(fontsize=7)
-    ax.grid(True, alpha=0.3)
-
-    # Add round period reference lines
-    for period, label in [(30, '30s round'), (60, '60s round'), (300, '5min round')]:
-        ax.axhline(y=period, color='gray', linestyle=':', alpha=0.4)
-        ax.text(12.3, period + 2, label, fontsize=8, color='gray')
-
+    fig, axes = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    for ax, (secure_rate, rlabel) in zip(axes, rate_points):
+        for mp in model_params:
+            gradient_bits = int(mp) * 16
+            mask_time_per_level = gradient_bits / secure_rate
+            overhead_at_depths = [mask_time_per_level * d for d in tree_depths]
+            ax.plot(scales, overhead_at_depths, 'o-', linewidth=2,
+                    label=f'{int(mp/1000)}K ({mask_time_per_level:.1f}s/level)')
+        ax.set_xlabel('Number of Clients')
+        ax.set_ylabel('Aggregation Overhead (seconds)')
+        ax.set_yscale('log')
+        ax.set_title(f'{rlabel}\n({secure_rate/1000:.1f} kbit/s)', fontsize=8)
+        ax.legend(fontsize=6)
+        ax.grid(True, alpha=0.3, which='both')
+        # Round period reference lines
+        for period, plabel in [(30, '30s'), (60, '60s'), (300, '5min')]:
+            ax.axhline(y=period, color='gray', linestyle=':', alpha=0.4)
+            ax.text(scales[-1], period * 1.08, plabel, fontsize=6,
+                    color='gray', ha='right')
+    fig.suptitle('Experiment 8c: Projected aggregation overhead — '
+                 'modeled vs projected rate', fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp8c_aggregation_overhead')
 

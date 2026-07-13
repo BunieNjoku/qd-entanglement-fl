@@ -416,7 +416,6 @@ def run_federated_training(
     target_accuracy=0.90,
     quantum_key_bits=None,  # Pre-generated distilled shared bits per round
     dp_epsilon=5.0, dp_delta=1e-5,
-    secure_key_rate_bps=675000,
     device='cpu',
     verbose=True,
 ):
