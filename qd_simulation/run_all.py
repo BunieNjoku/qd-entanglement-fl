@@ -1117,19 +1117,11 @@ def run_experiment_7(quick=False):
     code_rate = POST_PROC['ldpc_code_rate']
     security_margin = POST_PROC['security_margin_bits']
 
-    # Source raw rate (analytical) at default fiber length
-    raw_rate = compute_coincidence_rate(
-        QUANTUM['source_rep_rate_hz'], QUANTUM['source_brightness'],
-        QUANTUM['coupling_efficiency'], QUANTUM['fiber_length_m'],
-        QUANTUM.get('fiber_loss_db_per_km_1550nm', 0.2)
-        if QUANTUM.get('use_qfc', True)
-        else QUANTUM['fiber_loss_db_per_km_780nm'],
-        QUANTUM['spad_efficiency'],
-        colocated=QUANTUM.get('colocated', True),
-        local_optics_efficiency=QUANTUM.get('local_optics_efficiency', 0.90),
-        use_qfc=QUANTUM.get('use_qfc', True),
-        qfc_efficiency=QUANTUM.get('qfc_efficiency', 0.35),
-    )
+    # Modeled-device raw edge rate from config — single source of truth
+    # (HANDOFF 1.1). Identical to m1.compute_coincidence_rate at the config
+    # parameters; derived once in config._derive_operating_point() rather
+    # than re-derived here.
+    raw_rate = OPERATING_POINT['raw_edge_rate_hz']
 
     # For each QBER, compute:
     #   shared_rate_bps: after EC + PA + verification + Bell duty
@@ -1145,25 +1137,33 @@ def run_experiment_7(quick=False):
         rate = waterfall['final_secure_rate']
         shared_rates.append(rate)
 
-        # LHL bound on per-output-bit entropy floor
-        # H_min(input) per bit ~ (1 - h(q)) * (1 - beta * h(q)/(1-h(q)))
-        # Output is epsilon-close to uniform for epsilon = 2^{-security_margin}
-        # We report the gap to uniform (in bits per output bit).
-        h_q = binary_entropy(q)
-        beta = 1.15
-        input_min_entropy_per_bit = max(0, 1 - beta * h_q - h_q)
-        # LHL: H_out >= L - 2*log2(1/epsilon) where L is output length,
-        # 2*log2(1/epsilon) = 2*security_margin. Per output bit:
+        # LHL bound on per-output-bit entropy floor, using the SAME
+        # source-model accounting as the m2 waterfall. (The previous version
+        # subtracted an extra full h(q) term — the stale pre-v2
+        # eavesdropper-style formula the v2 patch removed from m2 but not
+        # from here.) Available min-entropy per input bit =
+        # 1 − β·h(q) − D_tag, with the syndrome fraction β·h(q) and GLLP
+        # tagged fraction D_tag read from the waterfall itself so no β
+        # literal is duplicated.
+        syndrome_fraction = waterfall['ec_overhead_pct'] / 100
+        input_min_entropy_per_bit = max(
+            0, 1 - syndrome_fraction - waterfall['tagged_fraction'])
+        # LHL: H_out >= L - 2*log2(1/ε), with 2*log2(1/ε) = 2*security_margin.
+        # Per output bit:
         gap_per_bit = (2 * security_margin) / max(block_size * input_min_entropy_per_bit, 1)
         per_bit_entropy = max(0, 1 - gap_per_bit)
         mask_entropies.append(per_bit_entropy)
 
-        # Max model parameters at fixed 60s round, 3 pairs per triangle,
-        # 32 bits per param (int32 modular mask).
+        # Max model parameters at a fixed 60 s round — PER-EDGE accounting,
+        # consistent with exp6 and the round-time table: the triangle's
+        # three edge links distill CONCURRENTLY, each at `rate`, and a round
+        # consumes BITS_PER_PARAM bits per parameter per edge. The binding
+        # constraint is the per-edge pool-fill time. (The previous ÷3
+        # silently modeled the three edges sharing ONE rate budget, i.e.
+        # serial keying — inconsistent with the architecture and with exp6.)
         round_s = 60
-        bits_available = rate * round_s
-        bits_per_param_per_round = 32 * 3  # 3 pairs in a triangle
-        max_p = bits_available / bits_per_param_per_round
+        bits_available_per_edge = rate * round_s
+        max_p = bits_available_per_edge / BITS_PER_PARAM
         max_params.append(max_p)
 
     # Find the cutoff QBER where rate falls below 1 kbit/s (practical floor)
