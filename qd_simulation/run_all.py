@@ -53,6 +53,7 @@ from modules.m1_quantum_source import (
 from modules.m2_post_processing import (
     fast_ec_simulate, compute_rate_waterfall, binary_entropy,
     validate_bp_against_statistical, toeplitz_hash, validate_pa_output,
+    estimate_capacity_qber,
 )
 from modules.m3_mesh_topology import (
     generate_campus_mesh, build_aggregation_tree,
@@ -275,7 +276,7 @@ def run_experiment_2(quick=False):
     proj = PROJECTED_OPERATING_POINT
     base_rate = op['raw_edge_rate_hz']
 
-    def _wf(rate_hz, qber):
+    def _wf(rate_hz, qber, **kw):
         """Waterfall at this config's post-processing parameters."""
         return compute_rate_waterfall(
             rate_hz, qber,
@@ -283,7 +284,7 @@ def run_experiment_2(quick=False):
             security_margin=POST_PROC['security_margin_bits'],
             block_size=POST_PROC['block_size'],
             bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
-        )
+            **kw)
 
     # ── 2a: Rate waterfall at both operating points ──
     print("  [2a] Rate waterfall — modeled device vs labeled projection...")
@@ -333,13 +334,23 @@ def run_experiment_2(quick=False):
     print("  [2b] Secure rate vs QBER sweep...")
     final_rates = []
     ec_overheads = []
+    envelope_rates = []
     for q in qber_sweep:
         wf = _wf(base_rate, q)
         final_rates.append(wf['final_secure_rate'])
         ec_overheads.append(wf['ec_overhead_pct'])
+        # HYPOTHETICAL rate-adapted envelope for comparison (labeled).
+        envelope_rates.append(
+            _wf(base_rate, q, assume_rate_adapted=True)['final_secure_rate'])
+    cap_q = estimate_capacity_qber(POST_PROC['ldpc_code_rate'])
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    ax1.plot(qber_sweep*100, np.array(final_rates)/1000, 'o-', color=C['quantum'], linewidth=2)
+    ax1.plot(qber_sweep*100, np.array(final_rates)/1000, 'o-', color=C['quantum'],
+             linewidth=2, label='Declared rate-0.84 code (tier FER)')
+    ax1.plot(qber_sweep*100, np.array(envelope_rates)/1000, '--', color=C['accent'],
+             linewidth=1.5, label='Rate-adapted family (hypothetical envelope)')
+    ax1.axvline(x=cap_q*100, color='gray', linestyle=':', linewidth=1,
+                label=f'0.84-code capacity ({cap_q*100:.1f}%)')
     ax1.set_xlabel('QBER (%)')
     ax1.set_ylabel('Final Secure Rate (kbit/s)')
     ax1.set_title(f'Secure rate vs QBER\n(at modeled-device raw rate '
@@ -1089,7 +1100,7 @@ def run_experiment_6(quick=False):
             max_params = max_bits / BITS_PER_PARAM
             print(f"    {rate_labels.get(kr, f'{kr/1000:.0f} kbit/s (hypothetical sweep point)')}, "
                   f"{period_name} rounds: max {max_params/1000:.0f}K params "
-                  f"({max_params*BITS_PER_PARAM/8/1e6:.1f} MB of key per edge)")
+                  f"({max_params*BITS_PER_PARAM/8/1e6:.2f} MB of key per edge)")
 
     print("  ✓ Experiment 6 complete.")
     return {"rounds_per_hour": rounds_per_hour.tolist()}
@@ -1132,7 +1143,8 @@ def run_experiment_7(quick=False):
     #   shared_rate_bps: after EC + PA + verification + Bell duty
     #   mask_entropy_per_bit: LHL floor on output uniformity
     #   max_model_params @ 60s round (per-edge accounting — see below)
-    shared_rates, mask_entropies, max_params = [], [], []
+    shared_rates, envelope_rates, mask_entropies, max_params = [], [], [], []
+    cap_q = estimate_capacity_qber(code_rate)
     for q in qbers:
         waterfall = compute_rate_waterfall(
             raw_rate, q, code_rate=code_rate,
@@ -1141,6 +1153,16 @@ def run_experiment_7(quick=False):
         )
         rate = waterfall['final_secure_rate']
         shared_rates.append(rate)
+        # HYPOTHETICAL rate-adapted envelope, plotted alongside with an
+        # explicit label: past the declared 0.84 code's capacity the solid
+        # curve collapses (tier FER 0.90) and only this labeled assumption
+        # keeps a usable rate (Gate-1 round-2 finding 4).
+        envelope_rates.append(compute_rate_waterfall(
+            raw_rate, q, code_rate=code_rate,
+            security_margin=security_margin, block_size=block_size,
+            bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+            assume_rate_adapted=True,
+        )['final_secure_rate'])
 
         # LHL bound on per-output-bit entropy floor, using the SAME
         # source-model accounting as the m2 waterfall. (The previous version
@@ -1181,7 +1203,11 @@ def run_experiment_7(quick=False):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
 
     ax1.plot(qbers, np.array(shared_rates) / 1000, 'o-', linewidth=2,
-             color=C['quantum'], label='Shared bit rate (kbit/s)')
+             color=C['quantum'], label='Declared rate-0.84 code (tier FER)')
+    ax1.plot(qbers, np.array(envelope_rates) / 1000, '--', linewidth=1.5,
+             color=C['accent'], label='Rate-adapted family (hypothetical)')
+    ax1.axvline(x=cap_q, color='gray', linestyle=':', linewidth=1,
+                label=f'0.84-code capacity (q={cap_q:.3f})')
     ax1_b = ax1.twinx()
     ax1_b.plot(qbers, mask_entropies, 's--', linewidth=2,
                color=C['accent'], label='Mask entropy floor (bits/bit)')
@@ -1198,6 +1224,10 @@ def run_experiment_7(quick=False):
 
     ax2.plot(qbers, np.array(max_params) / 1000, 'o-', linewidth=2,
              color=C['pareto'])
+    ax2.axvline(x=cap_q, color='gray', linestyle=':', linewidth=1)
+    ax2.text(cap_q, ax2.get_ylim()[0] if ax2.get_ylim()[0] > 0 else 1,
+             ' 0.84-code capacity', fontsize=6, color='gray', rotation=90,
+             va='bottom')
     for ref, lbl in [(50, '50K (ClinicalMLP)'),
                       (150, '150K (SmallCNN)'),
                       (1000, '1M params')]:
@@ -1216,9 +1246,16 @@ def run_experiment_7(quick=False):
     save_fig(fig, 'exp7_qber_privacy')
 
     print("\n  QBER -> Shared rate -> Max model size (60s rounds):")
-    print(f"  {'QBER':>8}  {'Rate':>15}  {'Mask H/bit':>11}  {'Max K params':>14}")
-    for q, r, h, mp in zip(qbers, shared_rates, mask_entropies, max_params):
-        print(f"  {q:>8.4f}  {r/1000:>10.2f} kbit/s  {h:>11.4f}  {mp/1000:>14.1f}")
+    print(f"  {'QBER':>8}  {'Declared rate':>15}  {'Envelope*':>12}  "
+          f"{'Mask H/bit':>11}  {'Max K params':>14}")
+    for q, r, e, h, mp in zip(qbers, shared_rates, envelope_rates,
+                              mask_entropies, max_params):
+        print(f"  {q:>8.4f}  {r/1000:>10.2f} kbit/s  {e/1000:>7.2f} kb/s"
+              f"  {h:>11.4f}  {mp/1000:>14.1f}")
+    print(f"  * envelope = HYPOTHETICAL rate-adapted code family (not "
+          f"implemented); the declared\n    rate-0.84 code's capacity is "
+          f"QBER ≈ {cap_q:.4f} — beyond it the declared-code rate\n    "
+          f"collapses (tier FER 0.90) and max-params follows the collapse.")
     if cutoff_qber:
         print(f"\n  Cutoff QBER (rate < 1 kbit/s): {cutoff_qber:.3f}")
     print("  ✓ Experiment 7 complete.")
