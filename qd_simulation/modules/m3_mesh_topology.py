@@ -164,16 +164,27 @@ def compute_aggregation_latency(
 
 
 def compute_max_mesh_size(
-    model_params, training_round_s, secure_key_rate_bps, bits_per_param=16
+    model_params, training_round_s, secure_key_rate_bps, bits_per_param=None
 ):
     """Compute maximum mesh size for a given model and training round.
 
     K_max ≈ (T / t_per_level)² where t_per_level = gradient_bits / key_rate
 
+    bits_per_param defaults to config.BITS_PER_PARAM (32: the int32 modular
+    masking ring the implementation actually uses; 16-bit BF16-style
+    accounting is not implementable against QUANT_SCALE = 2^20 — see
+    config.py).
+
     Returns:
         max_triangles: Maximum number of triangles.
         max_nodes: Approximate maximum nodes (≈ 2 × max_triangles).
     """
+    if bits_per_param is None:
+        try:
+            from config import BITS_PER_PARAM
+        except ImportError:
+            from ..config import BITS_PER_PARAM
+        bits_per_param = BITS_PER_PARAM
     gradient_bits = model_params * bits_per_param
     t_per_level = gradient_bits / max(secure_key_rate_bps, 1)
 
@@ -201,7 +212,11 @@ def analyze_mesh(n_nodes, model_params, secure_key_rate_bps,
     positions, triangles, graph = generate_campus_mesh(n_nodes, campus_size_m, rng)
     tree, depth = build_aggregation_tree(triangles)
 
-    gradient_bits = model_params * 16  # BF16
+    try:
+        from config import BITS_PER_PARAM
+    except ImportError:
+        from ..config import BITS_PER_PARAM
+    gradient_bits = model_params * BITS_PER_PARAM  # int32 modular masking ring
     per_level, total_time = compute_aggregation_latency(
         len(triangles), depth, gradient_bits, secure_key_rate_bps
     )

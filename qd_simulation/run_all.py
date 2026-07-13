@@ -988,7 +988,7 @@ def run_experiment_6(quick=False):
     rounds_per_hour = np.zeros((len(model_sizes), len(key_rates)))
 
     for i, ms in enumerate(model_sizes):
-        gradient_bits = int(ms) * 16  # BF16
+        gradient_bits = int(ms) * BITS_PER_PARAM
         for j, kr in enumerate(key_rates):
             mask_time_s = gradient_bits / kr
             # Assume computation time per round = 2 seconds (local training)
@@ -1022,9 +1022,10 @@ def run_experiment_6(quick=False):
     for kr in key_rates:
         for period_name, period_s in [("30s", 30), ("60s", 60), ("300s", 300)]:
             max_bits = kr * period_s
-            max_params = max_bits / 16
+            max_params = max_bits / BITS_PER_PARAM
             print(f"    {rate_labels.get(kr, f'{kr/1000:.0f} kbit/s')}, {period_name} rounds: "
-                  f"max {max_params/1000:.0f}K params ({max_params*16/8/1e6:.1f} MB gradient)")
+                  f"max {max_params/1000:.0f}K params "
+                  f"({max_params*BITS_PER_PARAM/8/1e6:.1f} MB of key per edge)")
 
     print("  ✓ Experiment 6 complete.")
     return {"rounds_per_hour": rounds_per_hour.tolist()}
@@ -1505,7 +1506,7 @@ def run_experiment_8(quick=False):
     fig, axes = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     for ax, (secure_rate, rlabel) in zip(axes, rate_points):
         for mp in model_params:
-            gradient_bits = int(mp) * 16
+            gradient_bits = int(mp) * BITS_PER_PARAM
             mask_time_per_level = gradient_bits / secure_rate
             overhead_at_depths = [mask_time_per_level * d for d in tree_depths]
             ax.plot(scales, overhead_at_depths, 'o-', linewidth=2,

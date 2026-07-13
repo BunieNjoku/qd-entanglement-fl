@@ -249,7 +249,11 @@ def full_cost_analysis(n_triangles, n_nodes, model_params,
     )
     energy = compute_energy_per_round(n_triangles, n_nodes, training_round_s, params)
 
-    gradient_bits = model_params * 16
+    try:
+        from config import BITS_PER_PARAM
+    except ImportError:
+        from ..config import BITS_PER_PARAM
+    gradient_bits = model_params * BITS_PER_PARAM  # int32 modular masking ring
     secure_mbits_per_year = secure_key_rate_bps * 8760 * 3600 / 1e6 * 0.5
     cost_per_secure_mbit = annual / max(secure_mbits_per_year, 1)
 
