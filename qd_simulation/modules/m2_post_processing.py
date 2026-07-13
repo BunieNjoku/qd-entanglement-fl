@@ -490,14 +490,14 @@ def validate_bp_against_statistical(qber_values=None, block_size=50000, rng=None
             if bp_success:
                 bp_successes += 1
 
-            # Statistical model prediction
-            capacity_qber = estimate_capacity_qber(code_rate)
-            if qber < capacity_qber * 0.8:
-                stat_successes += (1 if rng.random() < 0.995 else 0)
-            elif qber < capacity_qber:
-                stat_successes += (1 if rng.random() < 0.90 else 0)
-            else:
-                stat_successes += (1 if rng.random() < 0.10 else 0)
+            # Statistical model prediction — via the SAME shared tier
+            # definition the pipeline uses (this validator previously held
+            # a third inline copy of the tiers; when the tiers are tuned,
+            # a stale copy here would silently keep "validating" against
+            # the old values — Gate-1 round-3 finding 1).
+            stat_successes += (
+                1 if rng.random() < 1 - tier_frame_error_rate(qber, code_rate)
+                else 0)
 
         bp_fer = 1.0 - bp_successes / n_blocks_per_qber
         stat_fer = 1.0 - stat_successes / n_blocks_per_qber

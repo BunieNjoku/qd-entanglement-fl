@@ -351,6 +351,8 @@ def run_experiment_2(quick=False):
              linewidth=1.5, label='Rate-adapted family (hypothetical envelope)')
     ax1.axvline(x=cap_q*100, color='gray', linestyle=':', linewidth=1,
                 label=f'0.84-code capacity ({cap_q*100:.1f}%)')
+    ax1.axvspan(0.8*cap_q*100, cap_q*100, alpha=0.08, color=C['unmasked'],
+                label='degraded band (tier FER 0.10)')
     ax1.set_xlabel('QBER (%)')
     ax1.set_ylabel('Final Secure Rate (kbit/s)')
     ax1.set_title(f'Secure rate vs QBER\n(at modeled-device raw rate '
@@ -1208,6 +1210,8 @@ def run_experiment_7(quick=False):
              color=C['accent'], label='Rate-adapted family (hypothetical)')
     ax1.axvline(x=cap_q, color='gray', linestyle=':', linewidth=1,
                 label=f'0.84-code capacity (q={cap_q:.3f})')
+    ax1.axvspan(0.8*cap_q, cap_q, alpha=0.08, color=C['unmasked'],
+                label='degraded band (tier FER 0.10)')
     ax1_b = ax1.twinx()
     ax1_b.plot(qbers, mask_entropies, 's--', linewidth=2,
                color=C['accent'], label='Mask entropy floor (bits/bit)')
