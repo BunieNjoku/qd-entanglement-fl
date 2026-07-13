@@ -62,6 +62,127 @@ POST_PROC = {
 }
 
 # ══════════════════════════════════════════════
+# MASKING WIDTH — single source of truth
+# ══════════════════════════════════════════════
+# The implementation masks int32-quantized gradients in the modular ring
+# Z_{2^32} (m4_federated_learning: QUANT_SCALE = 2^20 → 20 fractional bits
+# plus sign and dynamic range). Every throughput, cost, and feasibility
+# calculation must therefore charge 32 bits of distilled key per parameter
+# per edge per round. A 16-bit (BF16-style) payload is NOT implementable
+# against this construction: QUANT_SCALE = 2^20 does not fit a 16-bit ring.
+# Lowering this constant would require changing the masking ring and
+# QUANT_SCALE in modules/m4_federated_learning.py — never change it in
+# isolation.
+BITS_PER_PARAM = 32
+
+# ══════════════════════════════════════════════
+# DERIVED OPERATING POINTS — single source of truth for key rates
+# ══════════════════════════════════════════════
+# The per-edge secret rate is DERIVED at import time from the m1 device
+# model and the m2 post-processing waterfall, evaluated at the
+# QUANTUM/POST_PROC parameters above. It moves automatically if the physics
+# config changes. Experiments must import OPERATING_POINT (modeled device)
+# or PROJECTED_OPERATING_POINT (labeled hypothetical) — never hardcode a
+# rate literal.
+
+
+def _rate_waterfall_at(raw_edge_rate_hz, qber):
+    """m2 rate waterfall at this config's post-processing parameters."""
+    try:
+        from modules.m2_post_processing import compute_rate_waterfall
+    except ImportError:
+        from .modules.m2_post_processing import compute_rate_waterfall
+    return compute_rate_waterfall(
+        raw_edge_rate_hz, qber,
+        code_rate=POST_PROC['ldpc_code_rate'],
+        security_margin=POST_PROC['security_margin_bits'],
+        block_size=POST_PROC['block_size'],
+        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+        # GLLP tagged fraction made explicit here so the whole derivation is
+        # visible in one place (m2's internal default resolves identically).
+        tagged_fraction=QUANTUM['multi_photon_prob'] / QUANTUM['source_brightness'],
+    )
+
+
+def _derive_operating_point():
+    """Modeled-device operating point (analytic, deterministic).
+
+    Raw edge rate: the symmetric dual-endpoint edge receives ~R/2 from each
+    endpoint's source (m1.edge_key_rate_symmetric), netting one full
+    source-link coincidence rate R = m1.compute_coincidence_rate(...) per
+    edge; the triangle's three edges distill CONCURRENTLY at this rate, so
+    the binding per-round constraint is the per-edge pool-fill time.
+    QBER: m1.compute_qber_analytical at the config fidelity/extinction.
+    Experiment 1 [1d] cross-validates both with Monte Carlo (15,355 Hz,
+    QBER 0.0068 at seed 7 vs analytic ≈15.6 kHz, 0.0085 — the MC includes
+    sampled accidentals/dark counts; agreement within sampling noise, and
+    the analytic QBER is the conservative one).
+
+    All numbers are simulation-grade (m1 device model), not hardware
+    measurements.
+    """
+    try:
+        from modules.m1_quantum_source import (
+            compute_coincidence_rate, compute_qber_analytical)
+    except ImportError:
+        from .modules.m1_quantum_source import (
+            compute_coincidence_rate, compute_qber_analytical)
+
+    raw_edge_rate_hz = compute_coincidence_rate(
+        QUANTUM['source_rep_rate_hz'], QUANTUM['source_brightness'],
+        QUANTUM['coupling_efficiency'], QUANTUM['fiber_length_m'],
+        QUANTUM['fiber_loss_db_per_km_1550nm'] if QUANTUM['use_qfc']
+        else QUANTUM['fiber_loss_db_per_km_780nm'],
+        QUANTUM['spad_efficiency'],
+        colocated=QUANTUM['colocated'],
+        local_optics_efficiency=QUANTUM['local_optics_efficiency'],
+        use_qfc=QUANTUM['use_qfc'],
+        qfc_efficiency=QUANTUM['qfc_efficiency'],
+    )
+    qber = compute_qber_analytical(
+        QUANTUM['fidelity'], pbs_extinction=QUANTUM['pbs_extinction_ratio'],
+    )
+    wf = _rate_waterfall_at(raw_edge_rate_hz, qber)
+    return {
+        "label": "modeled device (m1+m2 derived, simulation-grade)",
+        "raw_edge_rate_hz": raw_edge_rate_hz,
+        "qber": qber,
+        "secret_rate_bps": wf["final_secure_rate"],
+        "tagged_fraction": wf["tagged_fraction"],
+        "waterfall": wf,
+    }
+
+
+def _derive_projected_operating_point():
+    """HYPOTHETICAL 1 MHz-class source — NOT produced by the m1 device model.
+
+    Retained as the explicitly-labeled optimistic projection: raw
+    coincidence rate 1 MHz at QBER 2% — the assumption formerly smuggled
+    into exps 2/3/6/8 as a hardcoded 675000 bps literal. (That legacy
+    literal additionally baked in the superseded pre-GLLP waterfall; run
+    through the corrected waterfall, the same 1 MHz / 2% assumption yields
+    ≈0.81 Mbps.) Sources of this brightness class are plausible for
+    state-of-the-art entangled-pair hardware but are hypothetical here:
+    nothing in m1 produces this rate at the config above. Every result
+    computed at this point MUST carry the "projected" label.
+    """
+    raw_edge_rate_hz = 1e6   # hypothetical 1 MHz-class raw coincidence rate
+    qber = 0.02              # exp2's historical Assumption-D midpoint
+    wf = _rate_waterfall_at(raw_edge_rate_hz, qber)
+    return {
+        "label": "projected 1 MHz-class source (hypothetical, not modeled)",
+        "raw_edge_rate_hz": raw_edge_rate_hz,
+        "qber": qber,
+        "secret_rate_bps": wf["final_secure_rate"],
+        "tagged_fraction": wf["tagged_fraction"],
+        "waterfall": wf,
+    }
+
+
+OPERATING_POINT = _derive_operating_point()
+PROJECTED_OPERATING_POINT = _derive_projected_operating_point()
+
+# ══════════════════════════════════════════════
 # MODULE 3: MESH TOPOLOGY PARAMETERS
 # ══════════════════════════════════════════════
 MESH = {
