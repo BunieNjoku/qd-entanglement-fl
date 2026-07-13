@@ -177,10 +177,13 @@ def _derive_projected_operating_point():
     into exps 2/3/6/8 as a hardcoded 675000 bps literal. (That legacy
     literal additionally baked in the superseded pre-GLLP waterfall; run
     through the corrected waterfall, the same 1 MHz / 2% assumption yields
-    ≈0.81 Mbps.) Sources of this brightness class are plausible for
-    state-of-the-art entangled-pair hardware but are hypothetical here:
-    nothing in m1 produces this rate at the config above. Every result
-    computed at this point MUST carry the "projected" label.
+    ≈0.73 Mbps — ≈0.81 Mbps before charging the EC tier model's 10% FER,
+    which applies because 2% QBER sits in the declared rate-0.84 code's
+    degraded band, 0.8×capacity ≤ q < capacity.) Sources of this
+    brightness class are plausible for state-of-the-art entangled-pair
+    hardware but are hypothetical here: nothing in m1 produces this rate
+    at the config above. Every result computed at this point MUST carry
+    the "projected" label.
     """
     raw_edge_rate_hz = 1e6   # hypothetical 1 MHz-class raw coincidence rate
     qber = 0.02              # exp2's historical Assumption-D midpoint
@@ -192,6 +195,15 @@ def _derive_projected_operating_point():
         "secret_rate_bps": wf["final_secure_rate"],
         "tagged_fraction": wf["tagged_fraction"],
         "waterfall": wf,
+        # Same honesty caveat as OPERATING_POINT — and it bites harder
+        # here: at 2% QBER the declared rate-0.84 code sits in the tier
+        # model's DEGRADED band, so this point is charged FER 0.10
+        # (Gate-1 round-2 finding 1).
+        "ec_model_caveat": "EC modeled by statistical placeholder "
+                           "(m2.fast_ec_simulate tier model; FER 0.10 at "
+                           "this QBER — the declared rate-0.84 code is in "
+                           "its degraded band at 2%); BP-decoder "
+                           "validation pending — see exp2d",
     }
 
 

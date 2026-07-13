@@ -231,15 +231,11 @@ def fast_ec_simulate(alice_bits, bob_bits, qber_estimate, code_rate=0.84,
             beta = 1.0
 
         # Frame success probability (modeled from LDPC performance curves)
-        # At QBER << design capacity, success rate > 99%
-        # At QBER near capacity, success drops sharply
-        capacity_qber = estimate_capacity_qber(code_rate)
-        if actual_qber < capacity_qber * 0.8:
-            frame_success = rng.random() < 0.995
-        elif actual_qber < capacity_qber:
-            frame_success = rng.random() < 0.90
-        else:
-            frame_success = rng.random() < 0.10
+        # via the shared tier model — a SINGLE definition, also used by
+        # compute_rate_waterfall, so rate budgets can never disagree with
+        # the block-level EC model (Gate-1 round-2 finding 1).
+        frame_success = rng.random() < (
+            1.0 - tier_frame_error_rate(actual_qber, code_rate))
 
         if frame_success:
             # After successful EC, both parties hold identical bits
@@ -297,12 +293,43 @@ def estimate_capacity_qber(code_rate):
     return mid
 
 
+def tier_frame_error_rate(qber, code_rate=0.84):
+    """Frame-error rate of the declared fixed-rate code under the SAME
+    statistical tier model fast_ec_simulate uses (placeholder tiers — not
+    density evolution; see that function's honesty note):
+
+        q < 0.8 × capacity  →  FER 0.005
+        q <       capacity  →  FER 0.10   (degraded band)
+        q ≥       capacity  →  FER 0.90   (the fixed code effectively fails)
+
+    Single source of the tiers so the rate waterfall can never claim EC
+    performance the block-level model doesn't deliver (Gate-1 round-2
+    finding 1: the old fixed 0.005 constant overstated the projected
+    operating point, which sits in the 0.10 band, by ~10%).
+    """
+    capacity_qber = estimate_capacity_qber(code_rate)
+    if qber < capacity_qber * 0.8:
+        return 0.005
+    if qber < capacity_qber:
+        return 0.10
+    return 0.90
+
+
 def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
                            security_margin=128, block_size=50000,
-                           bell_duty_cycle=0.02, frame_error_rate=0.005,
-                           tagged_fraction=None):
+                           bell_duty_cycle=0.02, frame_error_rate=None,
+                           tagged_fraction=None, assume_rate_adapted=False):
     """Compute the complete rate waterfall from raw to final secure rate.
-    
+
+    frame_error_rate=None (default) derives the FER from the declared
+    code's tier model (tier_frame_error_rate) at this qber, keeping the
+    waterfall consistent with the block-level EC model at every QBER.
+
+    assume_rate_adapted=True computes the HYPOTHETICAL rate-adapted-family
+    envelope instead: leakage β·h(q) and design-band FER 0.005 — for
+    explicitly-labeled comparison curves only, never for headline numbers
+    (the repo implements one fixed rate-0.84 code).
+
     Returns dict with each stage's rate and overhead.
     """
     h_q = binary_entropy(qber)
@@ -326,7 +353,15 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     # operating QBER of 0.0085).
     # D_tag is the GLLP tagged fraction (multi-pair emissions a passive
     # beamsplitter could copy undetected; removed in PA for HNDL immunity).
-    syndrome_fraction = max(h_q * beta, 1.0 - code_rate)  # reconciliation leakage
+    if assume_rate_adapted:
+        # HYPOTHETICAL envelope: an efficiency-beta code family tuned to q.
+        syndrome_fraction = h_q * beta
+        if frame_error_rate is None:
+            frame_error_rate = 0.005  # adapted code at its design band
+    else:
+        syndrome_fraction = max(h_q * beta, 1.0 - code_rate)  # reconciliation leakage
+        if frame_error_rate is None:
+            frame_error_rate = tier_frame_error_rate(qber, code_rate)
     if tagged_fraction is None:
         tagged_fraction = default_tagged_fraction()
     pa_compression_fraction = tagged_fraction
@@ -349,6 +384,8 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
         "after_pa": after_pa,
         "pa_overhead_pct": pa_overhead_pct,
         "tagged_fraction": tagged_fraction,
+        "frame_error_rate": frame_error_rate,
+        "assume_rate_adapted": assume_rate_adapted,
         "after_verification": after_verification,
         "verification_overhead_pct": frame_error_rate * 100,
         "final_secure_rate": after_bell,
