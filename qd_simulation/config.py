@@ -82,6 +82,11 @@ POST_PROC = {
 # isolation.
 BITS_PER_PARAM = 32
 
+# Classical-network reference bandwidth for communication-latency modeling
+# (single source of truth: m3's aggregation-latency model and m4's
+# round-latency decomposition both consume this).
+CLASSICAL_LINK_BPS = 1e9  # 1 Gbps campus LAN reference
+
 # ══════════════════════════════════════════════
 # DERIVED OPERATING POINTS — single source of truth for key rates
 # ══════════════════════════════════════════════

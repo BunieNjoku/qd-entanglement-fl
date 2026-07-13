@@ -46,7 +46,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 import time
 
 
@@ -326,6 +326,79 @@ def add_dp_noise(gradient_flat, epsilon, delta, max_grad_norm=1.0):
 # FEDERATED LEARNING ENGINE
 # ══════════════════════════════════════════════
 
+# ── Communication byte model (HANDOFF Phase 2) ──
+# Documented wire-format assumptions behind every bytes/client/round
+# figure. Gate 2 audits these against the protocol steps in
+# secure_aggregation_round; change them only together with the protocol.
+BYTES_PER_MASKED_WORD = 4    # one uint32 word of masked payload
+BYTES_PER_MODEL_WORD = 4     # one float32 word of broadcast global model
+BYTES_PER_SHAMIR_SHARE = 6   # 4 B value in the 31-bit Mersenne prime field
+                             # (_SHAMIR_PRIME = 2^31 - 1) + 2 B share index
+BYTES_PER_SELFMASK_SEED = 4  # survivor's self-mask disclosure: the seed
+                             # (< _SHAMIR_PRIME). The self-mask is
+                             # PRG-expanded from this seed — which is
+                             # exactly why the self-mask leg is only
+                             # computationally protected (report §6.3);
+                             # the pairwise leg carries the HNDL claim.
+
+
+@dataclass
+class RoundComm:
+    """Per-round communication and latency accounting (HANDOFF Phase 2).
+
+    Uplink phases (client → aggregator), bytes summed over clients:
+      payload           survivors' masked int32 gradients (dropped clients
+                        never send)
+      shares            per-round Shamir distribution — happens BEFORE
+                        dropout, so all n members send n−1 shares of their
+                        fresh self-mask seed
+      selfmask          survivors' own seed disclosures
+      recovery_shares   threshold-many shares per dropped client's seed
+      reveals           each survivor reveals its full pairwise bit-string
+                        with each dropped partner: n_params×4 B per
+                        (survivor, dropped) pair — THE byte cost of
+                        reveal-based recovery
+      inter_triangle    masked triangle aggregates on tree edges
+    Downlink: global-model broadcast to every client.
+
+    Latency decomposition: key_wait_s is MODELED from the config operating
+    point (per-edge pool-fill time; the triangle's edges distill
+    concurrently); comm_s is MODELED from config.CLASSICAL_LINK_BPS; the
+    others are measured wall-clock on this machine.
+    """
+    round_idx: int = 0
+    n_clients: int = 0
+    payload_bytes: int = 0
+    share_bytes: int = 0
+    selfmask_bytes: int = 0
+    recovery_share_bytes: int = 0
+    reveal_bytes: int = 0
+    inter_triangle_bytes: int = 0
+    downlink_bytes: int = 0
+    key_bits_intra: int = 0
+    key_bits_inter: int = 0
+    key_bits_per_edge: Dict = field(default_factory=dict)
+    threshold_failures: int = 0
+    aggregator_time_s: float = 0.0
+    key_wait_s: float = 0.0
+    local_compute_s: float = 0.0
+    masking_s: float = 0.0
+    comm_s: float = 0.0
+
+    def uplink_bytes(self):
+        """Total uplink bytes this round, all phases, all clients."""
+        return (self.payload_bytes + self.share_bytes + self.selfmask_bytes
+                + self.recovery_share_bytes + self.reveal_bytes
+                + self.inter_triangle_bytes)
+
+    def uplink_per_client(self):
+        return self.uplink_bytes() / max(self.n_clients, 1)
+
+    def recovery_bytes(self):
+        """Bytes attributable to dropout recovery alone."""
+        return self.recovery_share_bytes + self.reveal_bytes
+
+
 @dataclass
 class FLResult:
     """Results from one FL training run."""
@@ -338,6 +411,7 @@ class FLResult:
     mask_gen_times_s: List[float]
     n_params: int
     quantum_bits_consumed: List[int] = field(default_factory=list)
+    comm_rounds: List = field(default_factory=list)  # RoundComm per round
 
 
 def train_local(model, dataset, epochs, batch_size, lr, device='cpu'):
@@ -504,18 +578,31 @@ def run_federated_training(
                     rng.integers(0, 2, size=shortfall, dtype=np.int8)
                 ])
 
+    # Communication accounting (HANDOFF Phase 2); modeled-latency inputs
+    # from the config single source of truth (lazy import, m5-style).
+    comm_rounds = []
+    try:
+        from config import (OPERATING_POINT as _OP,
+                            CLASSICAL_LINK_BPS as _LINK_BPS)
+    except ImportError:
+        from ..config import (OPERATING_POINT as _OP,
+                              CLASSICAL_LINK_BPS as _LINK_BPS)
+    _secret_rate_bps = _OP['secret_rate_bps']
+
     for round_idx in range(num_rounds):
         round_mask_time = 0
         client_updates = []
         global_params = get_model_params(global_model)
 
         # ── Local training ──
+        _t_local0 = time.perf_counter()
         for c in range(num_clients):
             local_model = model_fn()
             set_model_params(local_model, global_params.clone())
             train_local(local_model, client_datasets[c], local_epochs, batch_size, lr, device)
             update = get_gradient_update(global_model, local_model)
             client_updates.append(update)
+        _local_compute_s = time.perf_counter() - _t_local0
 
         # ── Masking & Aggregation ──
         mask_start = time.time()
@@ -605,6 +692,40 @@ def run_federated_training(
         round_mask_time = time.time() - mask_start
         mask_gen_times.append(round_mask_time)
 
+        # ── Round communication/latency record (HANDOFF Phase 2) ──
+        if mode == "entangled":
+            cc = agg_res.comm
+            rc = RoundComm(
+                round_idx=round_idx, n_clients=num_clients,
+                payload_bytes=cc["payload_bytes"],
+                share_bytes=cc["share_bytes"],
+                selfmask_bytes=cc["selfmask_bytes"],
+                recovery_share_bytes=cc["recovery_share_bytes"],
+                reveal_bytes=cc["reveal_bytes"],
+                key_bits_per_edge=dict(cc["key_bits_per_edge"]),
+                key_bits_intra=sum(cc["key_bits_per_edge"].values()),
+                aggregator_time_s=cc["aggregator_time_s"],
+            )
+            rc.key_wait_s = bits_per_mask / _secret_rate_bps
+            rc.masking_s = max(0.0, round_mask_time - rc.aggregator_time_s)
+        else:
+            # Non-entangled modes: payload + downlink only. The prng mode
+            # as implemented PRE-SHARES symmetric seeds (no per-round share
+            # traffic), so its accounting here is NOT a faithful classical
+            # secure-aggregation baseline — the Phase-4 Bonawitz-DH and
+            # Flamingo-PRF baselines carry the faithful byte models.
+            rc = RoundComm(
+                round_idx=round_idx, n_clients=num_clients,
+                payload_bytes=(num_clients * n_params
+                               * BYTES_PER_MASKED_WORD),
+            )
+            rc.masking_s = round_mask_time
+        rc.downlink_bytes = num_clients * n_params * BYTES_PER_MODEL_WORD
+        rc.local_compute_s = _local_compute_s
+        rc.comm_s = ((rc.uplink_bytes() + rc.downlink_bytes) * 8
+                     / _LINK_BPS)
+        comm_rounds.append(rc)
+
         # ── Apply aggregate update ──
         new_params = global_params + aggregate
         set_model_params(global_model, new_params)
@@ -633,6 +754,7 @@ def run_federated_training(
         mask_gen_times_s=mask_gen_times,
         n_params=n_params,
         quantum_bits_consumed=quantum_bits_consumed,
+        comm_rounds=comm_rounds,
     )
 
 
@@ -650,6 +772,7 @@ class AggregateResult:
     bits_consumed_self: int          # local QRNG bits per survivor
     recovery_invoked: bool
     eavesdrop_distinguishable: bool  # honest-but-curious aggregator gain
+    comm: Dict = field(default_factory=dict)  # per-phase bytes + agg time
 
 
 def _slice_pool(pool, offset, n_bits):
@@ -774,9 +897,11 @@ def secure_aggregation_round(
         masked_payloads[c] = payload
 
     # Step 5: Aggregator sums.
+    _t_agg0 = time.perf_counter()
     agg = np.zeros(n_params, dtype=np.uint32)
     for c, pl in masked_payloads.items():
         agg = (agg + pl).astype(np.uint32)
+    _t_agg1 = time.perf_counter()
 
     # Honest-but-curious distinguisher trial: can the aggregator tell
     # any single survivor's payload from uniform noise?
@@ -784,6 +909,7 @@ def secure_aggregation_round(
     distinguishable = _chi2_distinguishable(sample, aggregator_rng)
 
     # Step 6: Cancel masks.
+    _t_agg2 = time.perf_counter()
     bits_self = 0
     recovery_invoked = bool(dropouts)
     for c in cluster_clients:
@@ -834,6 +960,22 @@ def secure_aggregation_round(
     # possible if many gradients sum to magnitudes > 2^31; in practice
     # gradient updates are small.
     aggregate = dequantize_gradient(agg)
+    _t_agg3 = time.perf_counter()
+
+    # ── Communication accounting for this cluster round (HANDOFF Phase 2).
+    # Wire model documented at the BYTES_PER_* constants; phase semantics
+    # at RoundComm. The distinguisher trial between _t_agg1 and _t_agg2 is
+    # instrumentation, not protocol, and is excluded from aggregator time.
+    comm = {
+        "payload_bytes": len(survivors) * n_params * BYTES_PER_MASKED_WORD,
+        "share_bytes": n_cluster * (n_cluster - 1) * BYTES_PER_SHAMIR_SHARE,
+        "selfmask_bytes": len(survivors) * BYTES_PER_SELFMASK_SEED,
+        "recovery_share_bytes": len(dropouts) * threshold * BYTES_PER_SHAMIR_SHARE,
+        "reveal_bytes": (len(dropouts) * len(survivors)
+                         * n_params * BYTES_PER_MASKED_WORD),
+        "key_bits_per_edge": {pair: bits_per_mask for pair in pair_masks},
+        "aggregator_time_s": (_t_agg1 - _t_agg0) + (_t_agg3 - _t_agg2),
+    }
 
     return AggregateResult(
         aggregate=aggregate,
@@ -843,6 +985,7 @@ def secure_aggregation_round(
         bits_consumed_self=bits_self,
         recovery_invoked=recovery_invoked,
         eavesdrop_distinguishable=distinguishable,
+        comm=comm,
     )
 
 
@@ -1098,10 +1241,21 @@ def run_multitriangle_fl(
     start_time = time.time()
     intra_off, inter_off = 0, 0
 
+    # Communication accounting (HANDOFF Phase 2). Modeled-latency inputs
+    # come from the config single source of truth; lazy import keeps m4
+    # free of import-order coupling with config.
+    comm_rounds = []
+    try:
+        from config import OPERATING_POINT, CLASSICAL_LINK_BPS
+    except ImportError:
+        from ..config import OPERATING_POINT, CLASSICAL_LINK_BPS
+    secret_rate_bps = OPERATING_POINT['secret_rate_bps']
+
     for round_idx in range(num_rounds):
         global_params = get_model_params(global_model)
 
         # ── Step 1: Local training ──
+        _t_local0 = time.perf_counter()
         client_updates = {}
         for tri in triangles:
             for c in tri:
@@ -1115,6 +1269,7 @@ def run_multitriangle_fl(
                 upd = get_gradient_update(global_model, local_model)
                 upd = upd * (1.0 / client_triangle_count.get(c, 1))
                 client_updates[c] = upd
+        _local_compute_s = time.perf_counter() - _t_local0
 
         # ── Step 2: Sample dropouts ──
         round_dropouts = set()
@@ -1128,6 +1283,8 @@ def run_multitriangle_fl(
         triangle_aggs = []
         round_distinguishable = False
         any_recovery = False
+        _t_step3 = time.perf_counter()
+        rc = RoundComm(round_idx=round_idx, n_clients=len(client_updates))
         for tri in triangles:
             cluster = list(tri)
             cluster_pool = _slice_pool(pool_intra, intra_off, 3 * bits_per_mask)
@@ -1139,6 +1296,8 @@ def run_multitriangle_fl(
             # dropped clients' self-masks. Triangle contributes zero this round.
             if survivors_count < 2:
                 triangle_aggs.append(torch.zeros(n_params))
+                # Quantified for exp5's recovery-cost analysis (HANDOFF 3.6).
+                rc.threshold_failures += 1
                 continue
             agg_res = secure_aggregation_round(
                 client_gradients=client_updates,
@@ -1152,6 +1311,19 @@ def run_multitriangle_fl(
             triangle_aggs.append(agg_res.aggregate)
             round_distinguishable = round_distinguishable or agg_res.eavesdrop_distinguishable
             any_recovery = any_recovery or agg_res.recovery_invoked
+            # Accumulate this cluster's communication accounting.
+            cc = agg_res.comm
+            rc.payload_bytes += cc["payload_bytes"]
+            rc.share_bytes += cc["share_bytes"]
+            rc.selfmask_bytes += cc["selfmask_bytes"]
+            rc.recovery_share_bytes += cc["recovery_share_bytes"]
+            rc.reveal_bytes += cc["reveal_bytes"]
+            rc.aggregator_time_s += cc["aggregator_time_s"]
+            for edge, bits in cc["key_bits_per_edge"].items():
+                rc.key_bits_per_edge[edge] = (
+                    rc.key_bits_per_edge.get(edge, 0) + bits)
+                rc.key_bits_intra += bits
+        _step3_s = time.perf_counter() - _t_step3
         distinguisher_log.append(round_distinguishable)
         recovery_log.append(any_recovery)
 
@@ -1164,6 +1336,13 @@ def run_multitriangle_fl(
             for parent, child in reversed(tree_edges):
                 edge_bits = _slice_pool(pool_inter, inter_off, bits_per_mask)
                 inter_off += bits_per_mask
+                # Inter-triangle leg: one masked aggregate on the wire and
+                # one edge-pool consumption per tree edge per round.
+                rc.inter_triangle_bytes += n_params * BYTES_PER_MASKED_WORD
+                rc.key_bits_inter += bits_per_mask
+                _tri_edge = ("tree", parent, child)
+                rc.key_bits_per_edge[_tri_edge] = (
+                    rc.key_bits_per_edge.get(_tri_edge, 0) + bits_per_mask)
                 mask = derive_modular_mask(n_params, edge_bits)
                 # Child quantizes, modular-masks, sends to parent. Parent un-masks.
                 q_child = quantize_gradient(agg_by_tri[child])
@@ -1179,6 +1358,19 @@ def run_multitriangle_fl(
         if total_clients > 0:
             new_params = global_params + global_aggregate / total_clients
             set_model_params(global_model, new_params)
+
+        # ── Round communication/latency record (HANDOFF Phase 2) ──
+        rc.downlink_bytes = (len(client_updates) * n_params
+                             * BYTES_PER_MODEL_WORD)
+        rc.local_compute_s = _local_compute_s
+        rc.masking_s = max(0.0, _step3_s - rc.aggregator_time_s)
+        # Key-distillation wait: per-edge pool-fill time at the modeled
+        # secret rate. All edges distill concurrently, so the round waits
+        # for one edge's fill (every edge consumes bits_per_mask/round).
+        rc.key_wait_s = bits_per_mask / secret_rate_bps
+        rc.comm_s = ((rc.uplink_bytes() + rc.downlink_bytes) * 8
+                     / CLASSICAL_LINK_BPS)
+        comm_rounds.append(rc)
 
         acc, loss = evaluate(global_model, test_dataset, device)
         accuracies.append(acc)
@@ -1203,6 +1395,7 @@ def run_multitriangle_fl(
         wall_clock_s=wall_clock,
         mask_gen_times_s=[],
         n_params=n_params,
+        comm_rounds=comm_rounds,
     )
     aux = {
         "dropouts_per_round": dropout_log,

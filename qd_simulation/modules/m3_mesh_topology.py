@@ -154,7 +154,11 @@ def compute_aggregation_latency(
         total_time: Total aggregation time.
     """
     mask_gen_time = gradient_bits / max(secure_key_rate_bps, 1)
-    communication_time = gradient_bits / 1e9  # 1 Gbps classical link
+    try:
+        from config import CLASSICAL_LINK_BPS
+    except ImportError:
+        from ..config import CLASSICAL_LINK_BPS
+    communication_time = gradient_bits / CLASSICAL_LINK_BPS
     per_level = mask_gen_time + fpga_latency_s + communication_time
 
     per_level_latencies = [per_level] * max(aggregation_depth, 1)
