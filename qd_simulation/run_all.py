@@ -103,6 +103,52 @@ def save_fig(fig, name):
     print(f"    Saved: {name}.png/pdf")
 
 
+def print_comm_summary(fl_result, label=""):
+    """Per-client per-round communication summary (HANDOFF Phase 2).
+
+    Means over rounds; uplink split by phase. key_wait and wire latency
+    are MODELED (config operating point / CLASSICAL_LINK_BPS); local,
+    masking, and aggregator times are measured on this machine.
+    """
+    rounds = getattr(fl_result, 'comm_rounds', None)
+    if not rounds:
+        print(f"    [comm{(' ' + label) if label else ''}] no accounting recorded")
+        return None
+    n = len(rounds)
+
+    def _mean(f):
+        return sum(f(r) for r in rounds) / n
+
+    nc = max(rounds[0].n_clients, 1)
+    up = _mean(lambda r: r.uplink_bytes()) / nc
+    phases = {
+        'payload': _mean(lambda r: r.payload_bytes) / nc,
+        'shares': _mean(lambda r: r.share_bytes) / nc,
+        'selfmask': _mean(lambda r: r.selfmask_bytes) / nc,
+        'recovery+reveal': _mean(lambda r: r.recovery_bytes()) / nc,
+        'inter-tri': _mean(lambda r: r.inter_triangle_bytes) / nc,
+    }
+    down = _mean(lambda r: r.downlink_bytes) / nc
+    key_intra = _mean(lambda r: r.key_bits_intra)
+    key_inter = _mean(lambda r: r.key_bits_inter)
+    tfail = sum(r.threshold_failures for r in rounds)
+    print(f"    [comm{(' ' + label) if label else ''}] per client·round: "
+          f"uplink {up:,.0f} B ("
+          + ", ".join(f"{k} {v:,.0f}" for k, v in phases.items() if v > 0)
+          + f"), downlink {down:,.0f} B")
+    print(f"           key bits/round: intra {key_intra:,.0f}, inter {key_inter:,.0f}"
+          f"  |  threshold-failed triangle-rounds: {tfail}")
+    print(f"           latency/round: key_wait {_mean(lambda r: r.key_wait_s):.2f}s (modeled), "
+          f"local {_mean(lambda r: r.local_compute_s)*1e3:.0f}ms, "
+          f"masking {_mean(lambda r: r.masking_s)*1e3:.0f}ms, "
+          f"aggregator {_mean(lambda r: r.aggregator_time_s)*1e3:.1f}ms, "
+          f"wire {_mean(lambda r: r.comm_s)*1e3:.2f}ms (modeled)")
+    return {"uplink_bytes_per_client_round": up,
+            "downlink_bytes_per_client_round": down,
+            "recovery_bytes_per_client_round": phases['recovery+reveal'],
+            "threshold_failed_triangle_rounds": tfail}
+
+
 # ═══════════════════════════════════════════════════════════
 # EXPERIMENT 1: QUANTUM SOURCE CHARACTERIZATION
 # ═══════════════════════════════════════════════════════════
@@ -597,6 +643,13 @@ def run_experiment_4(quick=False):
             "all_accuracies": [r.accuracies for r in all_runs[mode]],
         }
 
+    # ── Communication accounting (HANDOFF Phase 2) ──
+    print("\n  Communication accounting (last repeat per mode; prng/dp/"
+          "unmasked count payload+downlink only — faithful classical "
+          "baselines land in Phase 4):")
+    for mode in modes:
+        print_comm_summary(all_runs[mode][-1], label=mode)
+
     # ── Plot: Training curves with error bands ──
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     colors = {"entangled": C['quantum'], "prng": C['prng'],
@@ -706,6 +759,9 @@ def run_experiment_5(quick=False):
             dropout_rate=dr, verbose=False,
         )
         results[dr] = (res, aux)
+        # Per-phase byte accounting — the recovery+reveal column is the
+        # actual byte cost of reveal-based dropout recovery (HANDOFF P2).
+        print_comm_summary(res, label=f"dropout {int(dr*100)}%")
         print(f"    final acc={res.final_accuracy:.4f}  "
               f"rounds_to_target={res.rounds_to_target}  "
               f"recovery_rounds={sum(aux['recovery_invoked_per_round'])}  "
@@ -1488,6 +1544,7 @@ def run_experiment_8(quick=False):
               f"{sum(aux['distinguishable_per_round'])}/{num_rounds}")
         print(f"    entangled-key bits consumed (intra/inter): "
               f"{aux['bits_intra_consumed']:,} / {aux['bits_inter_consumed']:,}")
+        print_comm_summary(result, label=f"{n_clients}c")
 
     # ═══ PLOT 1: Training convergence across scales ═══
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
