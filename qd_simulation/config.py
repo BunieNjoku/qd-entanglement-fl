@@ -36,6 +36,13 @@ QUANTUM = {
     "coincidence_window_ns": 2.0,
     "multi_photon_prob": 8e-5,      # Schimpf 2021
     "pbs_extinction_ratio": 1000,   # 1000:1
+    # Fixed conservative allowance for residual birefringence in the
+    # ANALYTIC QBER model (m1.compute_qber_analytical). The Monte Carlo
+    # derives birefringence from fiber_birefringence_rad_per_km_per_C ×
+    # length × ΔT; for campus links (≤3 km) this allowance upper-bounds
+    # that contribution. Config-visible so OPERATING_POINT moves with
+    # declared physics (Gate-1 F4).
+    "analytic_qber_birefringence_allowance": 0.001,
     "fiber_birefringence_rad_per_km_per_C": 0.01,  # Compensated SMF (pol. controller)
     "temperature_variation_C": 2.0,
     # CHSH measurement angles (radians) — optimal for |Φ+⟩
@@ -141,6 +148,7 @@ def _derive_operating_point():
     )
     qber = compute_qber_analytical(
         QUANTUM['fidelity'], pbs_extinction=QUANTUM['pbs_extinction_ratio'],
+        bire_contribution=QUANTUM['analytic_qber_birefringence_allowance'],
     )
     wf = _rate_waterfall_at(raw_edge_rate_hz, qber)
     return {
@@ -150,6 +158,14 @@ def _derive_operating_point():
         "secret_rate_bps": wf["final_secure_rate"],
         "tagged_fraction": wf["tagged_fraction"],
         "waterfall": wf,
+        # Honesty caveat (Gate-1 F11): the reconciliation stage behind this
+        # rate is the statistical placeholder m2.fast_ec_simulate (its FER
+        # tiers are asserted, not derived); the repo's real BP decoder
+        # currently fails frames at low QBER in exp2d. Rates are
+        # simulation-grade pending EC validation.
+        "ec_model_caveat": "EC modeled by statistical placeholder "
+                           "(m2.fast_ec_simulate); BP-decoder validation "
+                           "pending — see exp2d",
     }
 
 
