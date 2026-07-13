@@ -190,6 +190,12 @@ def compute_max_mesh_size(
 
     if t_per_level <= 0 or training_round_s <= 0:
         return 0, 0
+    # Infeasible: a single level's mask-generation time already exceeds the
+    # whole round period. The previous max(1, ...) clamp converted this into
+    # a fabricated "2-node feasible mesh" — at honest rates most of exp3b's
+    # modeled panel was that artifact (Gate-1 F2). Report 0.
+    if t_per_level > training_round_s:
+        return 0, 0
 
     max_depth = max(1, int(training_round_s / t_per_level))
     # NOTE: max_triangles ~ depth^2 is a heuristic motivated by planar Delaunay
@@ -198,7 +204,9 @@ def compute_max_mesh_size(
     # or non-Euclidean topologies will deviate. exp3 measures the empirical
     # exponent over random placements.
     max_triangles = max_depth ** 2
-    max_nodes = int(max_triangles * 2)
+    # A single triangle needs 3 nodes; the 2×triangles heuristic undercounts
+    # below that (Gate-1 F2).
+    max_nodes = max(3, int(max_triangles * 2))
 
     return max_triangles, max_nodes
 

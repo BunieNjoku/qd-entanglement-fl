@@ -442,6 +442,10 @@ def run_federated_training(
     rounds_to_target = num_rounds
     start_time = time.time()
     rng = np.random.default_rng(42)
+    # Seed torch too: model init and DataLoader shuffling otherwise inherit
+    # whatever global state earlier experiments left behind, making training
+    # metrics irreproducible across suite compositions (Gate-1 F12).
+    torch.manual_seed(42)
 
     # Pre-generate PRNG seeds for PRNG mode — symmetric: seed(a,b) == seed(b,a)
     prng_seeds = rng.integers(0, 2**31, size=(num_rounds, num_clients, num_clients))
@@ -1074,6 +1078,10 @@ def run_multitriangle_fl(
             client_triangle_count[c] = client_triangle_count.get(c, 0) + 1
 
     rng = np.random.default_rng(42)
+    # Seed torch too: model init and DataLoader shuffling otherwise inherit
+    # whatever global state earlier experiments left behind, making training
+    # metrics irreproducible across suite compositions (Gate-1 F12).
+    torch.manual_seed(42)
 
     # Pre-allocate distilled-key pools — assertion in `_slice_pool` enforces no reuse.
     bits_per_mask = n_params * 32

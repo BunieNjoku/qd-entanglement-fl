@@ -246,7 +246,8 @@ def run_experiment_1(quick=False):
         ) for ce in coupling_effs]
         ax.semilogy(coupling_effs, rates_c, 'o-', linewidth=2, label=f'{fl}m fiber')
 
-    ax.axhline(y=1e6, color='gray', linestyle=':', alpha=0.5)
+    ax.axhline(y=1e6, color='gray', linestyle=':', alpha=0.5,
+               label='1 MHz-class (hypothetical projection)')
     ax.set_xlabel('Source-to-Fiber Coupling Efficiency')
     ax.set_ylabel('Coincidence Rate (Hz)')
     ax.set_title('Experiment 1c: Rate Sensitivity to Coupling Efficiency')
@@ -498,7 +499,8 @@ def run_experiment_3(quick=False):
                         color='white' if val > 0.55 * vmax else 'black',
                         fontweight='bold')
         fig.colorbar(im, ax=ax, label='Max nodes')
-    fig.suptitle('Experiment 3b: Maximum feasible nodes — modeled vs projected rate',
+    fig.suptitle('Experiment 3b: Maximum feasible nodes — modeled vs projected rate\n'
+                 '(0 = infeasible: per-level mask time exceeds the round period)',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp3b_max_nodes_heatmap')
@@ -754,7 +756,7 @@ def run_experiment_5(quick=False):
     _grads = {c: _torch.tensor(np.random.default_rng(100 + c).normal(0, 0.05, _npar),
                                dtype=_torch.float32) for c in _tri}
     _seeds = {c: 7000 + c for c in _tri}
-    _need = 3 * _npar * 32
+    _need = 3 * _npar * BITS_PER_PARAM
     _pools = [
         ("entangled (source-model keys)",
          np.random.default_rng(11).integers(0, 2, size=_need, dtype=np.int8),
@@ -886,7 +888,7 @@ def run_experiment_5_legacy(quick=False):
         # ── Attack on QUANTUM-MASKED gradient ──
         # Use quantum-derived mask (Box-Muller from random bits, same as FL pipeline)
         from modules.m4_federated_learning import generate_gaussian_mask_legacy
-        qbits = np.random.default_rng(img_idx).integers(0, 2, size=n_params*32, dtype=np.int8)
+        qbits = np.random.default_rng(img_idx).integers(0, 2, size=n_params*BITS_PER_PARAM, dtype=np.int8)
         q_mask = generate_gaussian_mask_legacy(n_params, qbits) * 10  # Scale for strong masking
         masked_grad = mask_gradient_for_attack(true_grad, q_mask)
         print(f"    [quantum] Running inversion ({attack_iters} iters)...")
@@ -1057,7 +1059,7 @@ def run_experiment_6(quick=False):
 
     fig, ax = plt.subplots(figsize=VIZ['figsize'])
     for j, kr in enumerate(key_rates):
-        label = rate_labels.get(kr, f'{kr/1000:.0f} kbit/s')
+        label = rate_labels.get(kr, f'{kr/1000:.0f} kbit/s (hypothetical sweep point)')
         ax.plot([int(ms/1000) for ms in model_sizes], rounds_per_hour[:, j],
                 'o-', linewidth=2, label=label)
 
@@ -1085,8 +1087,8 @@ def run_experiment_6(quick=False):
         for period_name, period_s in [("30s", 30), ("60s", 60), ("300s", 300)]:
             max_bits = kr * period_s
             max_params = max_bits / BITS_PER_PARAM
-            print(f"    {rate_labels.get(kr, f'{kr/1000:.0f} kbit/s')}, {period_name} rounds: "
-                  f"max {max_params/1000:.0f}K params "
+            print(f"    {rate_labels.get(kr, f'{kr/1000:.0f} kbit/s (hypothetical sweep point)')}, "
+                  f"{period_name} rounds: max {max_params/1000:.0f}K params "
                   f"({max_params*BITS_PER_PARAM/8/1e6:.1f} MB of key per edge)")
 
     print("  ✓ Experiment 6 complete.")
@@ -1097,16 +1099,19 @@ def run_experiment_6(quick=False):
 # EXPERIMENT 7: QBER → PRIVACY-BUDGET CURVE
 # ═══════════════════════════════════════════════════════════
 def run_experiment_7(quick=False):
-    """Map physical QBER to a per-bit mask-entropy floor and a maximum
-    tolerable model size at fixed round budget.
+    """Map physical QBER to the key-rate / capacity envelope: shared-bit
+    rate, the LHL mask-entropy floor, and the maximum maskable model size
+    at a fixed round budget.
 
-    This is the quantum-vs-classical differentiator: classical PRNG masks
-    have no analog (their entropy doesn't depend on channel quality). For
-    entangled-key the LHL bound on PA output is:
-        H_min(output) >= H_min(input) - 2*log(1/epsilon)
-    where H_min(input) approaches (1 - h(QBER)) * block_size after
-    reconciliation. We compute mask entropy per output bit and tie it to
-    the round budget for several model sizes.
+    LHL accounting matches the m2 waterfall (source model, no eavesdropper
+    term): available min-entropy per reconciled input bit is
+        1 − max(β·h(q), 1 − R_code) − D_tag
+    (reconciliation syndrome leakage and the GLLP tagged fraction), and the
+    PA output is ε-close to uniform with per-output-bit gap
+    2·log2(1/ε) / (N · H_min_rate). The entropy floor stays essentially
+    FLAT across QBER — PA compensates; what QBER degrades is the RATE.
+    Supply-depends-on-channel is a cost this experiment prices, not a
+    differentiator claim.
     """
     print("\n" + "="*70)
     print("EXPERIMENT 7: QBER -> privacy-budget curve")
@@ -1126,7 +1131,7 @@ def run_experiment_7(quick=False):
     # For each QBER, compute:
     #   shared_rate_bps: after EC + PA + verification + Bell duty
     #   mask_entropy_per_bit: LHL floor on output uniformity
-    #   max_model_params @ 60s round @ 3 pairs per triangle
+    #   max_model_params @ 60s round (per-edge accounting — see below)
     shared_rates, mask_entropies, max_params = [], [], []
     for q in qbers:
         waterfall = compute_rate_waterfall(
@@ -1606,7 +1611,9 @@ def run_experiment_8(quick=False):
         print("  ✓ converges at ALL scales (3–12 clients)")
         print("  ✓ Tree-of-triangles protocol produces correct global aggregate")
     else:
-        print("  ⚠ Some scales did not converge — investigate")
+        print("  ⚠ Some scales did not converge — note: quick mode runs only "
+              "30 rounds,\n     below convergence at 9–12 clients (full mode "
+              "uses 60 rounds)")
 
     print("  ✓ Experiment 8 complete.")
 
