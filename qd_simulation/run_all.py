@@ -967,6 +967,53 @@ def run_experiment_5_legacy(quick=False):
 # ═══════════════════════════════════════════════════════════
 # EXPERIMENT 6: RATE-CONSTRAINED THROUGHPUT
 # ═══════════════════════════════════════════════════════════
+def measure_local_compute_time(n_params_target, local_epochs=2, batch_size=32,
+                               lr=0.01, reps=3, seed=42):
+    """Measured local-training time for an MLP of ≈n_params_target params.
+
+    Replaces exp6's fabricated 2.0 s constant (HANDOFF 1.3) with a direct
+    measurement: build a width-scaled two-hidden-layer MLP (params ≈
+    h² + (input_dim+4)·h for input_dim features, 2 classes), run the same
+    local step the FL loop performs (local_epochs over one client's share
+    of the clinical dataset), and return the median wall-clock over `reps`
+    rounds on this machine (first warm-up round discarded). Every grid size
+    is measured directly — nothing is extrapolated.
+    """
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader
+    from modules.m4_federated_learning import load_clinical_data
+
+    client_data, _, input_dim = load_clinical_data(3, rng_seed=seed)
+    dataset = client_data[0]
+
+    # Solve h² + (input_dim + 4)·h ≈ target for the hidden width h.
+    b = float(input_dim + 4)
+    h = max(4, int((-b + np.sqrt(b * b + 4.0 * n_params_target)) / 2.0))
+    torch.manual_seed(seed)
+    model = nn.Sequential(
+        nn.Linear(input_dim, h), nn.ReLU(),
+        nn.Linear(h, h), nn.ReLU(),
+        nn.Linear(h, 2),
+    )
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    opt = torch.optim.SGD(model.parameters(), lr=lr)
+    loss_fn = nn.CrossEntropyLoss()
+
+    times = []
+    for _ in range(max(1, reps) + 1):  # +1 warm-up, dropped below
+        t0 = time.perf_counter()
+        for _ in range(local_epochs):
+            for xb, yb in loader:
+                opt.zero_grad()
+                loss = loss_fn(model(xb), yb.long())
+                loss.backward()
+                opt.step()
+        times.append(time.perf_counter() - t0)
+    return float(np.median(times[1:]))
+
+
 def run_experiment_6(quick=False):
     print("\n" + "="*70)
     print("EXPERIMENT 6: Rate-Constrained Training Throughput")
@@ -983,16 +1030,28 @@ def run_experiment_6(quick=False):
         proj_rate: f'{proj_rate/1000:.0f} kbit/s — PROJECTED 1 MHz-class (hypothetical)',
     }
 
+    # ── Measured local compute time per model size (HANDOFF 1.3) ──
+    reps = 1 if quick else 3
+    print(f"  Measuring local compute time per model size (median of {reps} "
+          f"round(s) each, warm-up discarded)...")
+    compute_times = {}
+    for ms in model_sizes:
+        compute_times[int(ms)] = measure_local_compute_time(
+            int(ms), local_epochs=FL['local_epochs'],
+            batch_size=FL['local_batch_size'], lr=FL['learning_rate'],
+            reps=reps)
+        print(f"    {int(ms/1000):>6}K params: "
+              f"{compute_times[int(ms)]:.3f} s/round (measured, this machine)")
+
     # Compute mask generation time and training throughput
     print("  Computing throughput for model size × key rate grid...")
     rounds_per_hour = np.zeros((len(model_sizes), len(key_rates)))
 
     for i, ms in enumerate(model_sizes):
         gradient_bits = int(ms) * BITS_PER_PARAM
+        compute_time_s = compute_times[int(ms)]
         for j, kr in enumerate(key_rates):
             mask_time_s = gradient_bits / kr
-            # Assume computation time per round = 2 seconds (local training)
-            compute_time_s = 2.0
             total_round_time = mask_time_s + compute_time_s
             rounds_per_hour[i, j] = 3600 / total_round_time
 
@@ -1002,16 +1061,19 @@ def run_experiment_6(quick=False):
         ax.plot([int(ms/1000) for ms in model_sizes], rounds_per_hour[:, j],
                 'o-', linewidth=2, label=label)
 
-    # Add unconstrained baseline
-    unconstrained = [3600 / 2.0] * len(model_sizes)  # Only compute time
+    # Unconstrained baseline: measured compute only, no key-rate constraint
+    unconstrained = [3600 / compute_times[int(ms)] for ms in model_sizes]
     ax.plot([int(ms/1000) for ms in model_sizes], unconstrained,
-            'k--', linewidth=1.5, alpha=0.5, label='Unconstrained (compute only)')
+            'k--', linewidth=1.5, alpha=0.5,
+            label='Unconstrained (measured compute only)')
 
     ax.set_xlabel('Model Size (K parameters)')
     ax.set_ylabel('Training Rounds per Hour')
     ax.set_xscale('log')
+    ax.set_yscale('log')
     ax.set_title('Experiment 6: Rate-Constrained Training Throughput\n'
-                 'Quantum mask generation as bottleneck vs. compute')
+                 'Mask time from key rate; local compute measured per size '
+                 'on this machine')
     ax.legend()
     ax.grid(True, alpha=0.3, which='both')
     fig.tight_layout()
