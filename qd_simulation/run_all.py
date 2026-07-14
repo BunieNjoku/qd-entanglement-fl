@@ -50,6 +50,7 @@ from config import (QUANTUM, POST_PROC, MESH, FL, COST, VIZ, RESULTS_DIR,
 from modules.m1_quantum_source import (
     simulate_source, compute_chsh_s, werner_state,
     compute_qber_analytical, compute_coincidence_rate,
+    simulate_symmetric_edge,
 )
 from modules.m2_post_processing import (
     fast_ec_simulate, compute_rate_waterfall, binary_entropy,
@@ -2111,9 +2112,164 @@ def run_experiment_9(quick=False):
     }
 
 
+def run_experiment_10(quick=False):
+    """Availability under single-source failure (HANDOFF 3.4).
+
+    Operationalizes source_symmetry_ratio ≈ 0.5 — previously just a
+    printed number. Every edge is keyed from BOTH endpoints' sources
+    (beamsplitter-multiplexed), so killing one node's source leaves its
+    incident edges keying at ~half rate from the far endpoints, while a
+    fixed-source-per-edge design loses those edges outright and stalls
+    every triangle that needs them. Framed as AVAILABILITY/FAIRNESS, not
+    security: under the trusted-source model there is no 'quasi-dealer'
+    adversary to defeat.
+    """
+    print("\n" + "="*70)
+    print("EXPERIMENT 10: Availability under single-source failure")
+    print("="*70)
+
+    from modules.m4_federated_learning import define_triangle_topology
+
+    # ── (a) Source-level empirical check: an edge with one endpoint's
+    # source dead continues from the far endpoint at ~half rate. ──
+    dur = 0.01 if quick else 0.05
+    kw = dict(fidelity=QUANTUM['fidelity'], fiber_length_m=100)
+    edge_full = simulate_symmetric_edge(
+        duration_s=dur, rng=np.random.default_rng(42), **kw)
+    # One endpoint dead: only the far endpoint's source keeps routing
+    # `switch_split` of its pairs down this edge.
+    edge_degraded = simulate_source(
+        duration_s=dur * 0.5, rng=np.random.default_rng(43), **kw)
+    n_full = len(edge_full.raw_bits_alice)
+    n_deg = len(edge_degraded.raw_bits_alice)
+    ratio = n_deg / max(n_full, 1)
+    print(f"  (a) Edge keyed from both endpoints: {n_full:,} coincidences "
+          f"in {dur}s\n      one source killed: {n_deg:,} "
+          f"({100*ratio:.1f}% of the two-source rate; expected ≈ 50%)\n"
+          f"      QBER {edge_full.qber:.4f} → {edge_degraded.qber:.4f} "
+          f"(unchanged — same physics, fewer pairs)\n"
+          f"      symmetry witness on the healthy edge: "
+          f"{edge_full.params['source_symmetry_ratio']:.3f} (0.5 = no "
+          f"privileged generator)")
+    assert 0.35 <= ratio <= 0.65, (
+        f"degraded-edge rate ratio {ratio} outside the ~half-rate window")
+
+    # ── (b) Modeled round-time impact on the 6-client / 3-triangle
+    # topology (same per-edge demand model as exps 5/8). ──
+    n_clients = 6
+    triangles, _, tree_edges = define_triangle_topology(n_clients)
+    n_params = 28866  # ClinicalMLP — matches exps 4/5/8
+    bits_per_mask = n_params * BITS_PER_PARAM
+    physical_edges = {tuple(sorted((int(t[i]), int(t[j]))))
+                      for t in triangles for i, j in ((0, 1), (1, 2), (0, 2))}
+    demand = {}
+    for t in triangles:
+        for i, j in ((0, 1), (1, 2), (0, 2)):
+            e = tuple(sorted((int(t[i]), int(t[j]))))
+            demand[e] = demand.get(e, 0) + bits_per_mask
+    for parent, child in tree_edges:
+        shared = sorted(set(triangles[parent]) & set(triangles[child]))
+        if len(shared) >= 2:
+            e = (int(shared[0]), int(shared[1]))
+        else:
+            e = min(tuple(sorted((int(a), int(b))))
+                    for a in triangles[parent] for b in triangles[child]
+                    if int(a) != int(b)
+                    and tuple(sorted((int(a), int(b)))) in physical_edges)
+        demand[e] = demand.get(e, 0) + bits_per_mask
+
+    r = OPERATING_POINT['secret_rate_bps']
+    kill_node = 1  # shared vertex of T0 and T1 — the harshest choice
+    num_rounds, kill_round = 20, 10
+
+    def keywait(rates):
+        return max(demand[e] / rates[e] for e in demand)
+
+    rates_healthy = {e: r for e in demand}
+    rates_sym = {e: (r / 2 if kill_node in e else r) for e in demand}
+    rates_fixed = {e: (0.0 if min(e) == kill_node else r) for e in demand}
+
+    kw_before = keywait(rates_healthy)
+    kw_sym = keywait(rates_sym)
+    dead_edges = [e for e, v in rates_fixed.items() if v == 0.0]
+    stalled_tris = [ti for ti, t in enumerate(triangles)
+                    if any(tuple(sorted((int(t[i]), int(t[j])))) in dead_edges
+                           for i, j in ((0, 1), (1, 2), (0, 2)))]
+    wall_sym = kill_round * kw_before + (num_rounds - kill_round) * kw_sym
+    wall_healthy = num_rounds * kw_before
+
+    print(f"\n  (b) Modeled 6c/3t round-time impact, source at node "
+          f"{kill_node} killed at round {kill_round}/{num_rounds}\n"
+          f"      (per-edge demand from the exps-5/8 ledger model, "
+          f"secret rate {r/1000:.1f} kbit/s):")
+    print(f"      symmetric switching (implemented): key_wait "
+          f"{kw_before:.2f}s → {kw_sym:.2f}s "
+          f"(×{kw_sym/kw_before:.2f}); ALL {len(triangles)} triangles "
+          f"continue;\n        20-round key-wait wall-clock "
+          f"{wall_healthy:.0f}s → {wall_sym:.0f}s "
+          f"(+{100*(wall_sym/wall_healthy - 1):.0f}%)")
+    print(f"      fixed-source-per-edge (hypothetical alternative): edges "
+          f"{dead_edges} DEAD;\n        triangles {stalled_tris} stall "
+          f"permanently — {len(stalled_tris)}/{len(triangles)} of the mesh "
+          f"never finishes a round\n        (rounds-to-target: unreachable "
+          f"for any aggregate that needs those clusters)")
+    assert len(stalled_tris) > 0, "kill choice should stall the fixed design"
+
+    # ── Plot ──
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    rounds_x = np.arange(1, num_rounds + 1)
+    kw_sym_series = [kw_before if rd <= kill_round else kw_sym
+                     for rd in rounds_x]
+    kw_fixed_series = [kw_before if rd <= kill_round else np.nan
+                       for rd in rounds_x]
+    ax1.plot(rounds_x, kw_sym_series, 'o-', color=C['quantum'],
+             label='symmetric switching (implemented): ×2 slower, continues')
+    ax1.plot(rounds_x, kw_fixed_series, 's-', color=C['unmasked'],
+             label='fixed source per edge: stalls (no key supply)')
+    ax1.axvline(x=kill_round + 0.5, color='gray', linestyle=':',
+                label=f'node-{kill_node} source dies')
+    _y = kw_sym * 1.06
+    ax1.text(kill_round + 1, _y, 'fixed design: 2/3 of mesh stalled',
+             fontsize=7, color=C['unmasked'])
+    ax1.set_xlabel('Training round')
+    ax1.set_ylabel('Modeled key_wait per round (s)')
+    ax1.set_title('Round key-wait before/after source failure')
+    ax1.legend(fontsize=7)
+    ax1.grid(True, alpha=0.3)
+
+    ax2.bar(['both sources\n(healthy edge)', 'one source killed\n(far endpoint only)'],
+            [n_full / dur, n_deg / (dur * 0.5) * 0.5],
+            color=[C['quantum'], C['accent']])
+    ax2.set_ylabel('Edge coincidence rate (Hz, simulated)')
+    ax2.set_title(f'(a) Source-level: edge continues at '
+                  f'{100*ratio:.0f}% rate')
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle('Experiment 10: availability under single-source failure — '
+                 'an availability/fairness\nproperty of two-endpoint keying '
+                 '(NOT a security mechanism; trusted-source model)',
+                 fontsize=10, fontweight='bold')
+    fig.tight_layout()
+    save_fig(fig, 'exp10_availability')
+
+    print("  ✓ Experiment 10 complete.")
+    return {
+        "source_level": {"full_coincidences": int(n_full),
+                         "degraded_coincidences": int(n_deg),
+                         "rate_ratio": float(ratio),
+                         "qber_full": float(edge_full.qber),
+                         "qber_degraded": float(edge_degraded.qber)},
+        "modeled": {"key_wait_before_s": float(kw_before),
+                    "key_wait_after_symmetric_s": float(kw_sym),
+                    "wall_penalty_pct": float(100 * (wall_sym / wall_healthy - 1)),
+                    "fixed_design_dead_edges": [list(e) for e in dead_edges],
+                    "fixed_design_stalled_triangles": stalled_tris},
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='QD-Entanglement Simulation Runner')
-    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 10)),
+    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 11)),
                         help='Experiment numbers to run (default: all 1-8)')
     parser.add_argument('--quick', action='store_true',
                         help='Quick mode with reduced parameter sweeps')
@@ -2140,6 +2296,7 @@ def main():
         7: run_experiment_7,
         8: run_experiment_8,
         9: run_experiment_9,
+        10: run_experiment_10,
     }
 
     for exp_num in sorted(args.exp):
