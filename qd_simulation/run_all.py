@@ -586,18 +586,36 @@ def run_experiment_3(quick=False):
 # EXPERIMENT 4: FL TRAINING CORRECTNESS
 # ═══════════════════════════════════════════════════════════
 def run_experiment_4(quick=False):
+    """Secure-aggregation fidelity (HEADLINE) + convergence parity (validation).
+
+    HANDOFF 3.5: exact modular masking provably does not change the
+    aggregate, so accuracy parity across modes is a CORRECTNESS CHECK,
+    not a finding. The load-bearing metric is aggregate fidelity:
+      (a) masking exactness — the masked pipeline's integer aggregate
+          equals the direct quantized sum word-for-word (theorem;
+          asserted at zero mismatches over every round of every seed);
+      (b) quantization error — ||dequantized mean − exact float mean||_inf
+          measured in float64, against the 2^-20 truncation bound
+          (int cast toward zero: per-client error < 1/QUANT_SCALE, so
+          the mean-of-n error is < 2^-20 per parameter).
+    >= 10 seeds, paired splits AND paired torch seeds across modes,
+    95% t-confidence intervals on the paired accuracy deltas.
+    """
     print("\n" + "="*70)
-    print("EXPERIMENT 4: FL Training Correctness")
+    print("EXPERIMENT 4: Secure-Aggregation Fidelity (headline) "
+          "+ Convergence Parity (validation)")
     print("="*70)
 
     from modules.m4_federated_learning import (
-        ClinicalMLP, load_clinical_data, run_federated_training,
+        ClinicalMLP, load_clinical_data, run_federated_training, QUANT_SCALE,
     )
 
     num_rounds = 60 if not quick else 30
     num_clients = 3
     target_acc = 0.92
-    num_repeats = FL.get('num_repeats', 10) if not quick else 3
+    # HANDOFF 3.5: >= 10 seeds in BOTH modes (the old quick=3 was
+    # underpowered and quick-mode results were being quoted).
+    num_repeats = max(10, FL.get('num_repeats', 10))
     dirichlet_alpha = FL.get('dirichlet_alpha', 0.5)
 
     modes = ["entangled", "prng", "unmasked", "dp"]
@@ -627,6 +645,7 @@ def run_experiment_4(quick=False):
                 lr=FL['learning_rate'], target_accuracy=target_acc,
                 dp_epsilon=5.0 if mode == "dp" else None,
                 verbose=False,
+                seed=seed,  # paired across modes within a repeat
             )
             all_runs[mode].append(result)
             if mode == "entangled" and result.quantum_bits_consumed:
@@ -647,6 +666,61 @@ def run_experiment_4(quick=False):
             "all_accuracies": [r.accuracies for r in all_runs[mode]],
         }
 
+    # ── HEADLINE: aggregate fidelity of the masked pipeline ──
+    total_mismatches = sum(sum(r.agg_exact_mismatches)
+                           for r in all_runs["entangled"])
+    n_agg_rounds = sum(len(r.agg_exact_mismatches)
+                       for r in all_runs["entangled"])
+    per_seed_max_err = [max(r.agg_error_inf) for r in all_runs["entangled"]]
+    max_err = max(per_seed_max_err)
+    quant_bound = 1.0 / QUANT_SCALE  # 2^-20: truncation bound on the mean
+    print("\n  HEADLINE — aggregate fidelity "
+          f"({num_repeats} seeds x {num_rounds} rounds):")
+    print(f"    Masking exactness: {total_mismatches} mismatched uint32 "
+          f"words out of {n_agg_rounds} aggregation rounds x "
+          f"{all_runs['entangled'][0].n_params:,} params "
+          f"(theorem: must be 0)")
+    print(f"    Max quantization error ||masked mean - float mean||_inf: "
+          f"{max_err:.3e}  vs 2^-20 bound {quant_bound:.3e} "
+          f"({'WITHIN' if max_err < quant_bound else 'EXCEEDS'} bound, "
+          f"headroom x{quant_bound / max(max_err, 1e-300):.1f})")
+    assert total_mismatches == 0, (
+        "masking exactness violated — implementation bug")
+    assert max_err < quant_bound, (
+        f"aggregate error {max_err} exceeds quantization bound {quant_bound}")
+
+    # ── VALIDATION: paired accuracy parity (same seed => same split,
+    # same init, same shuffling; only the masking differs) ──
+    from scipy.stats import t as _t_dist
+    def _paired_ci(deltas):
+        d = np.asarray(deltas, dtype=float)
+        n = len(d)
+        hw = (_t_dist.ppf(0.975, n - 1) * d.std(ddof=1) / np.sqrt(n)
+              if n > 1 else float('nan'))
+        return d.mean(), hw
+    pairs = {}
+    for other in ("entangled", "prng"):
+        deltas = [all_runs[other][i].final_accuracy
+                  - all_runs["unmasked"][i].final_accuracy
+                  for i in range(num_repeats)]
+        pairs[other] = (_paired_ci(deltas), max(abs(d) for d in deltas))
+    print("\n  VALIDATION — paired final-accuracy deltas vs unmasked "
+          "(95% t-CI):")
+    for other, ((mean_d, hw), max_abs) in pairs.items():
+        print(f"    {other:>10} - unmasked: {mean_d:+.4f} ± {hw:.4f} "
+              f"(max |Δ| {max_abs:.4f})")
+        assert max_abs <= 0.05, (
+            f"{other} vs unmasked paired delta {max_abs} exceeds 0.05 — "
+            "masking should not measurably change convergence")
+    print("    (Parity is EXPECTED — exact masking is a theorem; this "
+          "assertion is an\n     implementation check, not a finding.)")
+    print("\n  NOTE — DP is not an alternative to masking: DP bounds what "
+          "the AGGREGATE\n  leaks about any individual; masking hides "
+          "INDIVIDUAL updates from the\n  aggregator. Orthogonal "
+          "protections — a hardened deployment runs DP on top\n  of "
+          "masking. The DP arm is shown only to display its accuracy "
+          "cost.")
+
     # ── Communication accounting (HANDOFF Phase 2) ──
     print("\n  Communication accounting (last repeat per mode; prng/dp/"
           "unmasked count payload+downlink only — faithful classical "
@@ -657,51 +731,53 @@ def run_experiment_4(quick=False):
     for mode in modes:
         print_comm_summary(all_runs[mode][-1], label=mode)
 
-    # ── Plot: Training curves with error bands ──
+    # ── Plot: fidelity headline (left) + accuracy validation (right) ──
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     colors = {"entangled": C['quantum'], "prng": C['prng'],
               "unmasked": C['unmasked'], "dp": C['dp']}
     linestyles = {"entangled": "-", "prng": "--", "unmasked": "-.", "dp": ":"}
+
+    for r in all_runs["entangled"]:
+        ax1.semilogy(np.arange(1, len(r.agg_error_inf) + 1),
+                     np.maximum(r.agg_error_inf, 1e-12),
+                     linewidth=0.8, alpha=0.5, color=C['quantum'])
+    ax1.axhline(y=quant_bound, color='crimson', linestyle='--', linewidth=1.5,
+                label=f'2⁻²⁰ quantization bound ({quant_bound:.1e})')
+    ax1.set_xlabel('Training Round')
+    ax1.set_ylabel('‖masked mean − float mean‖∞ (float64)')
+    ax1.set_title(f'HEADLINE: aggregate fidelity, {num_repeats} seeds\n'
+                  f'(masking exactness: {total_mismatches} mismatched words '
+                  f'— theorem holds)')
+    ax1.legend(fontsize=7, loc='lower right')
+    ax1.grid(True, alpha=0.3, which='both')
 
     for mode in modes:
         all_acc = np.array(results_summary[mode]["all_accuracies"])
         mean_acc = all_acc.mean(axis=0)
         std_acc = all_acc.std(axis=0)
         rounds_x = np.arange(1, len(mean_acc) + 1)
-
-        ax1.plot(rounds_x, mean_acc, linewidth=2, color=colors[mode],
-                linestyle=linestyles[mode], label=mode_labels[mode])
-        ax1.fill_between(rounds_x, mean_acc - std_acc, mean_acc + std_acc,
+        ax2.plot(rounds_x, mean_acc, linewidth=2, color=colors[mode],
+                 linestyle=linestyles[mode], label=mode_labels[mode])
+        ax2.fill_between(rounds_x, mean_acc - std_acc, mean_acc + std_acc,
                          alpha=0.15, color=colors[mode])
-
-        all_losses = np.array([r.losses for r in all_runs[mode]])
-        mean_loss = all_losses.mean(axis=0)
-        clipped = np.maximum(mean_loss, 1e-6)
-        ax2.semilogy(rounds_x, clipped, linewidth=2, color=colors[mode],
-                     linestyle=linestyles[mode], label=mode_labels[mode])
-
-    ax1.set_xlabel('Training Round')
-    ax1.set_ylabel('Test Accuracy')
-    ax1.set_title('Model Accuracy (mean ± 1σ)')
-    ax1.legend(fontsize=7)
-    ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(0.2, 1.02)
-
     ax2.set_xlabel('Training Round')
-    ax2.set_ylabel('Test Loss (log scale)')
-    ax2.set_title('Training Loss (mean)')
+    ax2.set_ylabel('Test Accuracy')
+    ax2.set_title('VALIDATION: convergence parity (mean ± 1σ)\n'
+                  'parity is expected — exact masking is a theorem')
     ax2.legend(fontsize=7)
-    ax2.grid(True, alpha=0.3, which='both')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(0.2, 1.02)
 
-    fig.suptitle(f'Experiment 4: FL Training Convergence — Breast Cancer Classification\n'
-                 f'{num_clients} clients, Dirichlet α={dirichlet_alpha} non-IID, '
-                 f'{num_repeats} repeats, FedAvg',
+    fig.suptitle(f'Experiment 4: Secure-aggregation fidelity — breast-cancer '
+                 f'clinical FL\n{num_clients} clients, Dirichlet '
+                 f'α={dirichlet_alpha} non-IID, {num_repeats} paired seeds, '
+                 f'FedAvg',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp4_training_convergence')
 
-    # ── Summary table ──
-    print(f"\n  SUMMARY ({num_repeats} repeats, mean ± std):")
+    # ── Summary table (validation metrics) ──
+    print(f"\n  SUMMARY ({num_repeats} paired seeds, mean ± std):")
     print(f"  {'Mode':<25} {'Accuracy':>15} {'Rounds to Target':>20}")
     print("  " + "-"*62)
     for mode in modes:
@@ -711,9 +787,22 @@ def run_experiment_4(quick=False):
               f"{s['mean_rounds']:>8.1f} ± {s['std_rounds']:.1f}")
 
     print("  ✓ Experiment 4 complete.")
-    return {m: {"acc_mean": s["mean_acc"], "acc_std": s["std_acc"],
-                "rounds_mean": s["mean_rounds"]}
-            for m, s in results_summary.items()}
+    return {
+        "fidelity": {
+            "exactness_mismatches": int(total_mismatches),
+            "agg_rounds_checked": int(n_agg_rounds),
+            "max_agg_error_inf": float(max_err),
+            "quant_bound": float(quant_bound),
+            "per_seed_max_err": [float(e) for e in per_seed_max_err],
+        },
+        "paired_deltas_vs_unmasked": {
+            other: {"mean": float(ci[0]), "ci95_halfwidth": float(ci[1]),
+                    "max_abs": float(mx)}
+            for other, (ci, mx) in pairs.items()},
+        "modes": {m: {"acc_mean": s["mean_acc"], "acc_std": s["std_acc"],
+                      "rounds_mean": s["mean_rounds"]}
+                  for m, s in results_summary.items()},
+    }
 
 
 # ═══════════════════════════════════════════════════════════

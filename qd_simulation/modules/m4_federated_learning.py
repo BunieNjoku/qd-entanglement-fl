@@ -467,6 +467,14 @@ class FLResult:
     n_params: int
     quantum_bits_consumed: List[int] = field(default_factory=list)
     comm_rounds: List = field(default_factory=list)  # RoundComm per round
+    # Aggregate-fidelity instrumentation (entangled mode; HANDOFF 3.5):
+    # per round, (a) count of uint32 words where the masked pipeline's
+    # integer aggregate differs from the direct quantized sum — the
+    # masking-exactness theorem says every entry must be 0 — and (b) the
+    # float64 sup-norm error of the dequantized mean aggregate vs the
+    # exact float mean, bounded by the 2^-20 truncation bound.
+    agg_exact_mismatches: List[int] = field(default_factory=list)
+    agg_error_inf: List[float] = field(default_factory=list)
 
 
 def train_local(model, dataset, epochs, batch_size, lr, device='cpu'):
@@ -547,6 +555,7 @@ def run_federated_training(
     dp_epsilon=5.0, dp_delta=1e-5,
     device='cpu',
     verbose=True,
+    seed=42,  # torch/np seed — vary across repeats for real replicates
 ):
     """Run complete federated learning training.
 
@@ -557,6 +566,10 @@ def run_federated_training(
         mode: Masking mode.
         num_rounds: Number of training rounds.
         quantum_key_bits: If provided, use these bits for quantum masks.
+        seed: seeds torch (model init, DataLoader order) and the driver's
+            numpy generator. Passing the SAME seed to different modes
+            gives paired runs (identical init/split/shuffling), which is
+            what exp4's paired statistics require (HANDOFF 3.5).
 
     Returns:
         FLResult with training metrics.
@@ -569,15 +582,16 @@ def run_federated_training(
     # compositions and standalone runs (Gate-1 F12; Gate-2 round-2 F5 —
     # seeding after model creation left the initial model OS-entropy-random
     # on the first run in any process).
-    torch.manual_seed(42)
+    torch.manual_seed(seed)
     global_model = model_fn()
     n_params = sum(p.numel() for p in global_model.parameters())
 
     accuracies, losses, mask_gen_times = [], [], []
     quantum_bits_consumed = []
+    agg_exact_mismatches, agg_error_inf = [], []
     rounds_to_target = num_rounds
     start_time = time.time()
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(seed)
 
     # Pre-generate PRNG seeds for PRNG mode — symmetric: seed(a,b) == seed(b,a)
     prng_seeds = rng.integers(0, 2**31, size=(num_rounds, num_clients, num_clients))
@@ -693,6 +707,31 @@ def run_federated_training(
             )
             aggregate = agg_res.aggregate / num_clients
             quantum_bits_consumed.append(agg_res.bits_consumed_pairwise)
+
+            # ── Aggregate-fidelity instrumentation (HANDOFF 3.5) ──
+            # (a) Masking exactness at the INTEGER level: the unmasked
+            #     modular sum from the masked pipeline must equal the
+            #     direct quantized sum word-for-word (theorem — pairwise
+            #     masks cancel exactly in Z_2^32). Zero float rounding in
+            #     this comparison.
+            _direct_q = np.zeros(n_params, dtype=np.uint32)
+            for _c in range(num_clients):
+                _direct_q = (_direct_q
+                             + quantize_gradient(client_updates[_c])
+                             ).astype(np.uint32)
+            agg_exact_mismatches.append(
+                int((agg_res.aggregate_quantized != _direct_q).sum()))
+            # (b) Quantization error of the mean aggregate, measured in
+            #     float64 against the exact float mean. Truncation-based
+            #     quantization (int cast toward zero) bounds each
+            #     client's per-parameter error by 1/QUANT_SCALE, so the
+            #     mean-of-n error is < 2^-20 per parameter.
+            _direct64 = torch.stack(client_updates).to(torch.float64).mean(dim=0)
+            _deq64 = torch.from_numpy(
+                _direct_q.view(np.int32).astype(np.float64)
+                / QUANT_SCALE / num_clients)
+            agg_error_inf.append(
+                float((_deq64 - _direct64).abs().max()))
 
         elif mode == "gaussian-legacy":
             # Legacy: Box-Muller Gaussian masks. Retained for comparison only;
@@ -840,6 +879,8 @@ def run_federated_training(
         n_params=n_params,
         quantum_bits_consumed=quantum_bits_consumed,
         comm_rounds=comm_rounds,
+        agg_exact_mismatches=agg_exact_mismatches,
+        agg_error_inf=agg_error_inf,
     )
 
 
@@ -858,6 +899,10 @@ class AggregateResult:
     recovery_invoked: bool
     eavesdrop_distinguishable: bool  # honest-but-curious aggregator gain
     comm: Dict = field(default_factory=dict)  # per-phase bytes + agg time
+    # Integer-domain modular sum AFTER unmasking — lets callers verify
+    # masking exactness (masked pipeline == direct quantized sum, word
+    # for word) without float rounding in the comparison (HANDOFF 3.5).
+    aggregate_quantized: object = None  # np.uint32 array
 
 
 def _slice_pool(pool, offset, n_bits, auditor=None, base_offset=0):
@@ -1166,6 +1211,7 @@ def secure_aggregation_round(
         recovery_invoked=recovery_invoked,
         eavesdrop_distinguishable=distinguishable,
         comm=comm,
+        aggregate_quantized=agg.copy(),
     )
 
 
@@ -1379,6 +1425,7 @@ def run_multitriangle_fl(
     dropout_rate=0.0,
     pool_intra=None, pool_inter=None,
     device='cpu', verbose=True,
+    seed=42,  # torch/np seed — vary across repeats for real replicates
 ):
     """two-mask hierarchical FL with two-mask design and dropout recovery.
 
@@ -1407,7 +1454,7 @@ def run_multitriangle_fl(
     # compositions and standalone runs (Gate-1 F12; Gate-2 round-2 F5 —
     # seeding after model creation left the initial model OS-entropy-random
     # on the first run in any process).
-    torch.manual_seed(42)
+    torch.manual_seed(seed)
     global_model = model_fn()
     n_params = sum(p.numel() for p in global_model.parameters())
 
@@ -1416,7 +1463,7 @@ def run_multitriangle_fl(
         for c in tri:
             client_triangle_count[c] = client_triangle_count.get(c, 0) + 1
 
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(seed)
 
     # Pre-allocate distilled-key pools. _slice_pool's bound check prevents
     # wrap-around; the PoolAuditors below hard-fail if any offset is ever
