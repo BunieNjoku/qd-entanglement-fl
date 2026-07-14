@@ -422,13 +422,16 @@ def toeplitz_hash(bits, output_length, seed=None, rng=None):
     # Equivalently: first row = toeplitz_seed[m-1 : m-1+n]
     #               first col = toeplitz_seed[m-1 : :-1] (reversed prefix)
 
-    output = np.zeros(m, dtype=np.int8)
-    for i in range(m):
-        row_start = m - 1 - i
-        row = toeplitz_seed[row_start:row_start + n]
-        output[i] = np.sum(bits * row) % 2
-
-    return output
+    # y_i = sum_j seed[(m-1-i)+j] * x_j mod 2 is a correlation — compute
+    # it with one FFT convolution instead of an O(m·n) Python loop (the
+    # SP 800-22 battery hashes ~4e5-bit inputs, HANDOFF 3.2). Integer
+    # counts are exact in float64 up to 2^53; verified bit-identical to
+    # the direct row-by-row product for the same toeplitz_seed.
+    from scipy.signal import fftconvolve
+    c = fftconvolve(toeplitz_seed.astype(np.float64),
+                    bits[::-1].astype(np.float64))
+    idx = (n + m - 2) - np.arange(m)
+    return (np.rint(c[idx]).astype(np.int64) % 2).astype(np.int8)
 
 
 def validate_pa_output(secure_bits, n_samples=5):
@@ -449,6 +452,154 @@ def validate_pa_output(secure_bits, n_samples=5):
     s_obs = abs(np.sum(2 * secure_bits.astype(np.float64) - 1)) / np.sqrt(n)
     p_value = erfc(s_obs / np.sqrt(2))
     return p_value
+
+
+# ══════════════════════════════════════════════
+# NIST SP 800-22 SUBSET BATTERY (HANDOFF 3.2)
+# ══════════════════════════════════════════════
+#
+# The load-bearing quantum-layer property — PA output close to uniform —
+# was previously spot-checked with a single monobit test on 10,000 bits.
+# This battery implements the SP 800-22 subset the work order names
+# (monobit, block-frequency, runs, longest-run-of-ones, serial) plus an
+# autocorrelation test, each returning its standard p-value. Reference:
+# NIST SP 800-22 Rev. 1a (2010), sections 2.1-2.4, 2.11.
+
+def nist_monobit(bits):
+    """SP 800-22 §2.1 frequency (monobit) test. Returns p-value."""
+    from scipy.special import erfc
+    b = np.asarray(bits, dtype=np.int64)
+    n = len(b)
+    s_obs = abs((2 * b - 1).sum()) / np.sqrt(n)
+    return float(erfc(s_obs / np.sqrt(2)))
+
+
+def nist_block_frequency(bits, M=128):
+    """SP 800-22 §2.2 block-frequency test with block size M."""
+    from scipy.special import gammaincc
+    b = np.asarray(bits, dtype=np.int64)
+    N = len(b) // M
+    pi = b[:N * M].reshape(N, M).mean(axis=1)
+    chi2 = 4.0 * M * float(((pi - 0.5) ** 2).sum())
+    return float(gammaincc(N / 2.0, chi2 / 2.0))
+
+
+def nist_runs(bits):
+    """SP 800-22 §2.3 runs test. Returns p-value (0.0 if the monobit
+    prerequisite |pi - 1/2| >= 2/sqrt(n) fails, per the spec)."""
+    from scipy.special import erfc
+    b = np.asarray(bits, dtype=np.int64)
+    n = len(b)
+    pi = b.mean()
+    if abs(pi - 0.5) >= 2.0 / np.sqrt(n):
+        return 0.0
+    v_obs = 1 + int((b[1:] != b[:-1]).sum())
+    num = abs(v_obs - 2.0 * n * pi * (1 - pi))
+    den = 2.0 * np.sqrt(2.0 * n) * pi * (1 - pi)
+    return float(erfc(num / den))
+
+
+def nist_longest_run(bits):
+    """SP 800-22 §2.4 longest-run-of-ones test. Block size auto-selected
+    from n per the spec (M = 8 / 128 / 10^4)."""
+    from scipy.special import gammaincc
+    b = np.asarray(bits, dtype=np.int64)
+    n = len(b)
+    if n < 128:
+        raise ValueError("longest-run test needs n >= 128")
+    if n < 6272:
+        M, cats, pis = 8, [1, 2, 3], [0.2148, 0.3672, 0.2305, 0.1875]
+    elif n < 750000:
+        M, cats, pis = 128, [4, 5, 6, 7, 8], [0.1174, 0.2430, 0.2493,
+                                              0.1752, 0.1027, 0.1124]
+    else:
+        M, cats, pis = 10000, [10, 11, 12, 13, 14, 15], [
+            0.0882, 0.2092, 0.2483, 0.1933, 0.1208, 0.0675, 0.0727]
+    N = n // M
+    K = len(cats)
+    nu = np.zeros(K + 1, dtype=np.int64)
+    blocks = b[:N * M].reshape(N, M)
+    for block in blocks:
+        # longest run of ones in this block
+        longest = best = 0
+        for bit in block:
+            best = best + 1 if bit else 0
+            if best > longest:
+                longest = best
+        if longest <= cats[0]:
+            nu[0] += 1
+        elif longest > cats[-1]:
+            nu[K] += 1
+        else:
+            nu[longest - cats[0]] += 1
+    exp = N * np.asarray(pis)
+    chi2 = float(((nu - exp) ** 2 / exp).sum())
+    return float(gammaincc(K / 2.0, chi2 / 2.0))
+
+
+def _serial_psi_sq(b, m):
+    """psi^2_m statistic over the cyclically-extended sequence (§2.11)."""
+    if m == 0:
+        return 0.0
+    n = len(b)
+    ext = np.concatenate([b, b[:m - 1]]) if m > 1 else b
+    idx = np.zeros(n, dtype=np.int64)
+    for j in range(m):
+        idx = (idx << 1) | ext[j:j + n]
+    counts = np.bincount(idx, minlength=1 << m).astype(np.float64)
+    return float((1 << m) / n * (counts ** 2).sum() - n)
+
+
+def nist_serial(bits, m=8):
+    """SP 800-22 §2.11 serial test. Returns (p_value1, p_value2)."""
+    from scipy.special import gammaincc
+    b = np.asarray(bits, dtype=np.int64)
+    psi_m = _serial_psi_sq(b, m)
+    psi_m1 = _serial_psi_sq(b, m - 1)
+    psi_m2 = _serial_psi_sq(b, m - 2)
+    d1 = psi_m - psi_m1
+    d2 = psi_m - 2 * psi_m1 + psi_m2
+    p1 = float(gammaincc(2 ** (m - 2), d1 / 2.0))
+    p2 = float(gammaincc(2 ** (m - 3), d2 / 2.0))
+    return p1, p2
+
+
+def autocorrelation_test(bits, lag):
+    """Normalized autocorrelation at the given lag; two-sided p via erfc.
+    Not part of SP 800-22; standard complement named by HANDOFF 3.2."""
+    from scipy.special import erfc
+    x = 2 * np.asarray(bits, dtype=np.int64) - 1
+    n = len(x)
+    c = float((x[:n - lag] * x[lag:]).sum())
+    z = c / np.sqrt(n - lag)
+    return float(erfc(abs(z) / np.sqrt(2)))
+
+
+def randomness_battery(bits, alpha=0.01, serial_m=8,
+                       autocorr_lags=(1, 2, 8, 16, 32)):
+    """Run the SP 800-22 subset + autocorrelation on a bit sequence.
+
+    Returns a list of {test, p_value, passed} dicts (passed: p >= alpha).
+    NOTE for interpretation: with k tests at level alpha, ~k*alpha
+    false rejections are EXPECTED for truly uniform input; a single
+    marginal failure is not evidence of non-uniformity.
+    """
+    b = np.asarray(bits, dtype=np.int64)
+    results = [
+        {"test": "monobit", "p_value": nist_monobit(b)},
+        {"test": "block_frequency(M=128)", "p_value": nist_block_frequency(b)},
+        {"test": "runs", "p_value": nist_runs(b)},
+        {"test": "longest_run_of_ones", "p_value": nist_longest_run(b)},
+    ]
+    p1, p2 = nist_serial(b, m=serial_m)
+    results.append({"test": f"serial(m={serial_m}) p1", "p_value": p1})
+    results.append({"test": f"serial(m={serial_m}) p2", "p_value": p2})
+    for lag in autocorr_lags:
+        results.append({"test": f"autocorrelation(lag={lag})",
+                        "p_value": autocorrelation_test(b, lag)})
+    for r in results:
+        r["passed"] = bool(r["p_value"] >= alpha)
+    return results
 
 
 def validate_bp_against_statistical(qber_values=None, block_size=50000, rng=None):
