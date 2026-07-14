@@ -132,9 +132,20 @@ def load_clinical_data(num_clients=3, rng_seed=42, dirichlet_alpha=0.5):
         for c, chunk in enumerate(np.split(class_indices, splits)):
             client_indices[c].extend(chunk.tolist())
 
+    # Guard (found by exp5's 10-seed sweep, HANDOFF 3.6): at some seeds the
+    # cumsum split boundaries round so that a client ends up EMPTY — the
+    # empty list became a float64 array (IndexError) and an empty client is
+    # a degenerate FL participant. Move one sample from the largest client;
+    # no-op at seeds where every client is non-empty.
+    for c in range(num_clients):
+        if len(client_indices[c]) == 0:
+            donor = max(range(num_clients),
+                        key=lambda j: len(client_indices[j]))
+            client_indices[c].append(client_indices[donor].pop())
+
     client_datasets = []
     for indices in client_indices:
-        indices = np.array(indices)
+        indices = np.array(indices, dtype=np.int64)
         rng.shuffle(indices)
         client_datasets.append(TensorDataset(
             torch.tensor(X_train[indices]),

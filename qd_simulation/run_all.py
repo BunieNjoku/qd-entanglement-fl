@@ -44,7 +44,8 @@ import matplotlib.patches as mpatches
 # Add project root to path
 sys.path.insert(0, os.path.dirname(__file__))
 from config import (QUANTUM, POST_PROC, MESH, FL, COST, VIZ, RESULTS_DIR,
-                    BITS_PER_PARAM, OPERATING_POINT, PROJECTED_OPERATING_POINT)
+                    BITS_PER_PARAM, OPERATING_POINT, PROJECTED_OPERATING_POINT,
+                    CLASSICAL_LINK_BPS)
 
 from modules.m1_quantum_source import (
     simulate_source, compute_chsh_s, werner_state,
@@ -837,83 +838,150 @@ def run_experiment_5(quick=False):
     num_rounds = 40 if not quick else 20
     target_acc = 0.90
     n_clients = 6  # 3 triangles, allows interesting dropout patterns
-    dropout_rates = [0.0, 0.05, 0.15, 0.30] if not quick else [0.0, 0.15]
+    n_triangles = 3
+    # HANDOFF 3.6: >= 10 seeds, dropout swept 0-40%. The old single-seed
+    # design produced pure-noise orderings (0% arm scoring below 15%).
+    num_seeds = 10
+    dropout_rates = ([0.0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
+                     if not quick else [0.0, 0.15, 0.40])
 
     triangles, _, tree_edges = define_triangle_topology(n_clients)
-    client_data, test_data, input_dim = load_clinical_data(
-        n_clients, rng_seed=42, dirichlet_alpha=FL.get('dirichlet_alpha', 0.5)
-    )
-    model_fn = lambda: ClinicalMLP(input_dim=input_dim, hidden=128)
 
-    results = {}
-    for dr in dropout_rates:
-        print(f"\n  ── Dropout rate: {int(dr*100)}% ──")
-        res, aux = run_multitriangle_fl(
-            model_fn, client_data, test_data,
-            num_clients=n_clients, num_rounds=num_rounds,
-            local_epochs=FL['local_epochs'], batch_size=FL['local_batch_size'],
-            lr=FL['learning_rate'], target_accuracy=target_acc,
-            triangles=triangles, tree_edges=tree_edges,
-            dropout_rate=dr, verbose=False,
-        )
-        results[dr] = (res, aux)
-        # Per-phase byte accounting — the recovery+reveal column is the
-        # actual byte cost of reveal-based dropout recovery (HANDOFF P2).
-        print_comm_summary(res, label=f"dropout {int(dr*100)}%")
-        print(f"    final acc={res.final_accuracy:.4f}  "
-              f"rounds_to_target={res.rounds_to_target}  "
-              f"recovery_rounds={sum(aux['recovery_invoked_per_round'])}  "
-              f"distinguishable_rounds={sum(aux['distinguishable_per_round'])}")
+    # results[dr] = list over seeds of (res, aux); splits and torch seeds
+    # are PAIRED across dropout rates (same seed list per rate).
+    results = {dr: [] for dr in dropout_rates}
+    for si in range(num_seeds):
+        seed = 42 + si
+        client_data, test_data, input_dim = load_clinical_data(
+            n_clients, rng_seed=seed,
+            dirichlet_alpha=FL.get('dirichlet_alpha', 0.5))
+        model_fn = lambda: ClinicalMLP(input_dim=input_dim, hidden=128)
+        for dr in dropout_rates:
+            res, aux = run_multitriangle_fl(
+                model_fn, client_data, test_data,
+                num_clients=n_clients, num_rounds=num_rounds,
+                local_epochs=FL['local_epochs'],
+                batch_size=FL['local_batch_size'],
+                lr=FL['learning_rate'], target_accuracy=target_acc,
+                triangles=triangles, tree_edges=tree_edges,
+                dropout_rate=dr, verbose=False, seed=seed,
+            )
+            results[dr].append((res, aux))
+        print(f"  seed {seed}: " + "  ".join(
+            f"{int(dr*100)}%→{results[dr][-1][0].final_accuracy:.3f}"
+            for dr in dropout_rates))
 
-    # Plot 1: accuracy vs round under each dropout rate
+    from scipy.stats import t as _t_dist
+
+    def _mean_ci(vals):
+        v = np.asarray(vals, dtype=float)
+        hw = (_t_dist.ppf(0.975, len(v) - 1) * v.std(ddof=1)
+              / np.sqrt(len(v)) if len(v) > 1 else float('nan'))
+        return v.mean(), v.std(ddof=1), hw
+
+    # ── Aggregate per-rate statistics across seeds ──
+    drs = sorted(results.keys())
+    stats = {}
+    for dr in drs:
+        accs = [r.final_accuracy for r, _ in results[dr]]
+        rec_pct = [100 * np.mean(a['recovery_invoked_per_round'])
+                   for _, a in results[dr]]
+        # HEADLINE costs of recovery (HANDOFF 3.6):
+        # bytes — reveals (+ recovery shares, identically 0 here) per
+        # client per round, from the Phase-2 ledger;
+        rec_bytes = [np.mean([rc.recovery_bytes() / max(rc.n_clients, 1)
+                              for rc in r.comm_rounds])
+                     for r, _ in results[dr]]
+        # latency — modeled wire time of the recovery bytes on the
+        # aggregator's access link;
+        rec_wire_ms = [1000 * np.mean([rc.recovery_bytes() * 8
+                                       / CLASSICAL_LINK_BPS
+                                       for rc in r.comm_rounds])
+                       for r, _ in results[dr]]
+        # failed rounds — triangle-rounds skipped because survivors <
+        # Shamir threshold (the driver zeroes that triangle's update).
+        tfail_pct = [100 * sum(rc.threshold_failures
+                               for rc in r.comm_rounds)
+                     / (num_rounds * n_triangles)
+                     for r, _ in results[dr]]
+        chi_pct = [100 * np.mean(a['distinguishable_per_round'])
+                   for _, a in results[dr]]
+        stats[dr] = {
+            "acc": _mean_ci(accs),
+            "recovery_pct": _mean_ci(rec_pct),
+            "rec_bytes": _mean_ci(rec_bytes),
+            "rec_wire_ms": _mean_ci(rec_wire_ms),
+            "tfail_pct": _mean_ci(tfail_pct),
+            "chi_pct": _mean_ci(chi_pct),
+        }
+
+    # Representative per-phase byte ledger (last seed per rate)
+    print()
+    for dr in drs:
+        print_comm_summary(results[dr][-1][0],
+                           label=f"dropout {int(dr*100)}% (seed "
+                                 f"{42 + num_seeds - 1})")
+
+    # ── Plot 1: accuracy vs dropout rate (mean ± 95% CI across seeds) ──
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    colors = [C['quantum'], C['pareto'], C['accent'], C['unmasked']]
-    for (dr, (res, _)), col in zip(results.items(), colors):
-        ax1.plot(range(1, len(res.accuracies)+1), res.accuracies,
-                 linewidth=2, color=col, label=f'dropout {int(dr*100)}%')
-    ax1.axhline(y=target_acc, color='gray', linestyle=':', alpha=0.5)
-    ax1.set_xlabel('Training round')
-    ax1.set_ylabel('Test accuracy')
-    ax1.set_title('Convergence under client dropout')
+    acc_means = [stats[dr]["acc"][0] for dr in drs]
+    acc_hws = [stats[dr]["acc"][2] for dr in drs]
+    xpct = [100 * dr for dr in drs]
+    ax1.errorbar(xpct, acc_means, yerr=acc_hws, fmt='o-', linewidth=2,
+                 capsize=4, color=C['quantum'],
+                 label=f'final accuracy (mean ± 95% CI, {num_seeds} seeds)')
+    ax1.axhline(y=target_acc, color='gray', linestyle=':', alpha=0.5,
+                label=f'{target_acc} target')
+    ax1.set_xlabel('Per-round dropout rate (%)')
+    ax1.set_ylabel(f'Final test accuracy ({num_rounds} rounds)')
+    ax1.set_title(f'Accuracy degradation vs dropout ({num_seeds} seeds)')
     ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
 
-    # Plot 2: per-round recovery + distinguisher
-    drs = sorted(results.keys())
-    final_accs = [results[dr][0].final_accuracy for dr in drs]
-    recovery_pcts = [100 * np.mean(results[dr][1]['recovery_invoked_per_round'])
-                     for dr in drs]
-    distinguish_pcts = [100 * np.mean(results[dr][1]['distinguishable_per_round'])
-                        for dr in drs]
-    x = np.arange(len(drs))
-    w = 0.28
-    ax2.bar(x - w, final_accs, w, color=C['quantum'], label='final accuracy')
-    ax2.bar(x, [r/100 for r in recovery_pcts], w, color=C['pareto'],
-            label='rounds invoking recovery (fraction)')
-    ax2.bar(x + w, [d/100 for d in distinguish_pcts], w, color=C['unmasked'],
-            label='rounds failing χ² implementation check (validation)')
-    ax2.set_xticks(x)
+    # ── Plot 2 (HEADLINE): the cost of recovery ──
+    rb_means = [stats[dr]["rec_bytes"][0] / 1024 for dr in drs]
+    rb_hws = [stats[dr]["rec_bytes"][2] / 1024 for dr in drs]
+    tf_means = [stats[dr]["tfail_pct"][0] for dr in drs]
+    tf_hws = [stats[dr]["tfail_pct"][2] for dr in drs]
+    ax2.bar(np.arange(len(drs)) - 0.18, rb_means, 0.36, yerr=rb_hws,
+            capsize=3, color=C['pareto'],
+            label='recovery bytes (reveals) KB/client·round')
+    ax2b = ax2.twinx()
+    ax2b.bar(np.arange(len(drs)) + 0.18, tf_means, 0.36, yerr=tf_hws,
+             capsize=3, color=C['unmasked'],
+             label='threshold-failed triangle-rounds %')
+    ax2.set_xticks(np.arange(len(drs)))
     ax2.set_xticklabels([f'{int(dr*100)}%' for dr in drs])
     ax2.set_xlabel('Per-round dropout rate')
-    ax2.set_ylabel('Value')
-    ax2.set_ylim(0, 1.05)
-    ax2.legend(fontsize=7, loc='upper right')
-    ax2.set_title('Recovery activation and χ² implementation check (validation)')
+    ax2.set_ylabel('Recovery bytes (KB/client·round)', color=C['pareto'])
+    ax2b.set_ylabel('Threshold failures (% of triangle-rounds)',
+                    color=C['unmasked'])
+    ax2.set_title('HEADLINE: the cost of reveal-based recovery')
+    h1, l1 = ax2.get_legend_handles_labels()
+    h2, l2 = ax2b.get_legend_handles_labels()
+    ax2.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper left')
     ax2.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle('Experiment 5: Dropout recovery, per-round-fresh two-mask aggregation\n'
-                 'Per-round bit freshness enables safe survivor reveal',
+    fig.suptitle('Experiment 5: Dropout recovery — accuracy and COST, '
+                 f'{num_seeds} paired seeds\n'
+                 'Reveal-based recovery under per-round-fresh pairwise keys',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp5_dropout_recovery')
 
-    print("\n  Summary:")
-    print(f"  {'Dropout':>10}  {'Final acc':>10}  {'Recovery %':>12}  {'χ² check fail %':>18}")
+    print(f"\n  Summary ({num_seeds} seeds, mean ± std [95% CI half-width]):")
+    print(f"  {'Dropout':>8}  {'Final acc':>22}  {'Recovery %':>12}  "
+          f"{'Reveal KB/cl·rd':>16}  {'Wire ms':>8}  {'T-fail %':>9}  "
+          f"{'χ² fail %':>10}")
     for dr in drs:
-        r, a = results[dr]
-        rec_pct = 100 * np.mean(a['recovery_invoked_per_round'])
-        dis_pct = 100 * np.mean(a['distinguishable_per_round'])
-        print(f"  {int(dr*100):>9}%  {r.final_accuracy:>10.4f}  {rec_pct:>11.1f}%  {dis_pct:>17.1f}%")
+        s = stats[dr]
+        print(f"  {int(dr*100):>7}%  "
+              f"{s['acc'][0]:.4f} ± {s['acc'][1]:.4f} [{s['acc'][2]:.4f}]  "
+              f"{s['recovery_pct'][0]:>11.1f}%  "
+              f"{s['rec_bytes'][0]/1024:>15.1f}  "
+              f"{s['rec_wire_ms'][0]:>8.3f}  "
+              f"{s['tfail_pct'][0]:>8.2f}%  "
+              f"{s['chi_pct'][0]:>9.1f}%")
     # ── Classical parity baseline (Flamingo-style per-round pool) ──
     # Same reveal-based recovery, same dropout, two mask-material sources.
     # Mechanism parity is EXPECTED; the differentiator is the assumption class.
@@ -944,9 +1012,15 @@ def run_experiment_5(quick=False):
 
     print("  ✓ Experiment 5 complete.")
     return {"dropout_results": {f"{int(dr*100)}%": {
-        "final_acc": results[dr][0].final_accuracy,
-        "recovery_pct": float(np.mean(results[dr][1]['recovery_invoked_per_round'])),
-        "distinguishable_pct": float(np.mean(results[dr][1]['distinguishable_per_round'])),
+        "final_acc_mean": float(stats[dr]["acc"][0]),
+        "final_acc_std": float(stats[dr]["acc"][1]),
+        "final_acc_ci95": float(stats[dr]["acc"][2]),
+        "recovery_pct_mean": float(stats[dr]["recovery_pct"][0]),
+        "recovery_bytes_per_client_round": float(stats[dr]["rec_bytes"][0]),
+        "recovery_wire_ms": float(stats[dr]["rec_wire_ms"][0]),
+        "threshold_fail_pct": float(stats[dr]["tfail_pct"][0]),
+        "chi2_fail_pct": float(stats[dr]["chi_pct"][0]),
+        "n_seeds": num_seeds,
     } for dr in drs}}
 
 
