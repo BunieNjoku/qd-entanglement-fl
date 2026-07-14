@@ -636,6 +636,12 @@ def run_federated_training(
                     rng.integers(0, 2, size=shortfall, dtype=np.int8)
                 ])
 
+    # Pool-reuse hard audit (HANDOFF 3.3) on the security-bearing modular
+    # OTP path. The legacy Gaussian path is not covered by the Bonawitz
+    # proof and is excluded by scope.
+    pool_audit = (PoolAuditor("pairwise", len(quantum_pool))
+                  if mode == "entangled" else None)
+
     # Communication accounting (HANDOFF Phase 2); modeled-latency inputs
     # from the config single source of truth (lazy import, m5-style).
     comm_rounds = []
@@ -682,6 +688,8 @@ def run_federated_training(
                 dropouts=set(),
                 threshold=max(2, (num_clients + 1) // 2),
                 aggregator_rng=rng,
+                pool_auditor=pool_audit,
+                pool_base_offset=round_off,
             )
             aggregate = agg_res.aggregate / num_clients
             quantum_bits_consumed.append(agg_res.bits_consumed_pairwise)
@@ -811,6 +819,16 @@ def run_federated_training(
 
     wall_clock = time.time() - start_time
 
+    # Pool-reuse hard audit (HANDOFF 3.3): every pairwise-mask slice of the
+    # run must be disjoint and account for exactly the ledgered burn.
+    if mode == "entangled" and pool_audit is not None:
+        assert pool_audit.bits_consumed == sum(quantum_bits_consumed), (
+            f"pool audit mismatch: {pool_audit.bits_consumed} audited != "
+            f"{sum(quantum_bits_consumed)} ledgered")
+        assert pool_audit.n_intervals == num_rounds * n_pairs, (
+            f"pool audit: expected {num_rounds * n_pairs} disjoint slices, "
+            f"saw {pool_audit.n_intervals}")
+
     return FLResult(
         mode=mode,
         accuracies=accuracies,
@@ -842,14 +860,79 @@ class AggregateResult:
     comm: Dict = field(default_factory=dict)  # per-phase bytes + agg time
 
 
-def _slice_pool(pool, offset, n_bits):
-    """Slice n_bits from pool starting at offset. Raises if exhausted."""
+def _slice_pool(pool, offset, n_bits, auditor=None, base_offset=0):
+    """Slice n_bits from pool starting at offset. Raises if exhausted.
+
+    When `auditor` is given, the ABSOLUTE range
+    [base_offset + offset, base_offset + offset + n_bits) is registered
+    with it, and any overlap with a previously consumed range raises —
+    the pool-reuse hard audit (HANDOFF 3.3). base_offset locates a
+    sub-pool view (e.g. one cluster's slice) inside its parent pool so
+    all consumption is audited in parent-absolute coordinates.
+    """
     if offset + n_bits > len(pool):
         raise ValueError(
             f"Pairwise key pool exhausted at offset {offset} (need {n_bits}, "
             f"have {len(pool) - offset}). Pre-size the pool to avoid bit reuse."
         )
+    if auditor is not None:
+        auditor.consume(base_offset + offset, n_bits)
     return pool[offset:offset + n_bits]
+
+
+class PoolAuditor:
+    """Hard audit that no distilled-key pool offset is consumed twice
+    across a full run (HANDOFF 3.3).
+
+    OTP integrity is binary: a single reused mask bit voids the
+    information-theoretic claim, so overlap is a hard ValueError, not a
+    warning. Consumed [start, end) intervals are kept sorted; each
+    consume() is checked against both neighbors (O(log n) locate +
+    O(n) insert — trivial at simulation scale).
+
+    Discarded-but-reserved material (a threshold-failed cluster's slice)
+    is also registered: single-use discipline burns it, so any later
+    attempt to reuse those offsets must fail the audit too.
+    """
+
+    def __init__(self, name, pool_len):
+        self.name = name
+        self.pool_len = int(pool_len)
+        self._starts = []
+        self._ends = []
+
+    def consume(self, offset, n_bits):
+        import bisect
+        start, end = int(offset), int(offset) + int(n_bits)
+        if n_bits <= 0 or start < 0 or end > self.pool_len:
+            raise ValueError(
+                f"pool '{self.name}': invalid slice [{start}, {end}) of a "
+                f"{self.pool_len}-bit pool")
+        i = bisect.bisect_left(self._starts, start)
+        if i > 0 and self._ends[i - 1] > start:
+            raise ValueError(
+                f"pool '{self.name}': OTP REUSE — slice [{start}, {end}) "
+                f"overlaps already-consumed "
+                f"[{self._starts[i-1]}, {self._ends[i-1]})")
+        if i < len(self._starts) and self._starts[i] < end:
+            raise ValueError(
+                f"pool '{self.name}': OTP REUSE — slice [{start}, {end}) "
+                f"overlaps already-consumed "
+                f"[{self._starts[i]}, {self._ends[i]})")
+        self._starts.insert(i, start)
+        self._ends.insert(i, end)
+
+    @property
+    def bits_consumed(self):
+        return sum(e - s for s, e in zip(self._starts, self._ends))
+
+    @property
+    def n_intervals(self):
+        return len(self._starts)
+
+    def summary(self):
+        return {"pool": self.name, "disjoint_slices": self.n_intervals,
+                "bits_consumed": self.bits_consumed, "reuse_detected": False}
 
 
 def secure_aggregation_round(
@@ -860,6 +943,8 @@ def secure_aggregation_round(
     dropouts=None,              # set of client indices that drop after sending
     threshold=None,             # Shamir threshold for self-mask recovery
     aggregator_rng=None,        # used for honest-but-curious distinguisher trial
+    pool_auditor=None,          # PoolAuditor: pool-reuse hard audit (HANDOFF 3.3)
+    pool_base_offset=0,         # pairwise_pool's absolute offset in the parent pool
 ):
     """One two-mask (Bonawitz-style) aggregation round with dropout recovery.
 
@@ -939,7 +1024,9 @@ def secure_aggregation_round(
     pair_masks = {}
     for i_idx, ci in enumerate(cluster_clients):
         for cj in cluster_clients[i_idx + 1:]:
-            bits = _slice_pool(pairwise_pool, pair_offset, bits_per_mask)
+            bits = _slice_pool(pairwise_pool, pair_offset, bits_per_mask,
+                               auditor=pool_auditor,
+                               base_offset=pool_base_offset)
             pair_offset += bits_per_mask
             mask = derive_modular_mask(n_params, bits)
             pair_masks[(ci, cj)] = mask  # canonical (min, max) order
@@ -1331,7 +1418,9 @@ def run_multitriangle_fl(
 
     rng = np.random.default_rng(42)
 
-    # Pre-allocate distilled-key pools — assertion in `_slice_pool` enforces no reuse.
+    # Pre-allocate distilled-key pools. _slice_pool's bound check prevents
+    # wrap-around; the PoolAuditors below hard-fail if any offset is ever
+    # consumed twice across the whole run (HANDOFF 3.3 pool-reuse audit).
     bits_per_mask = n_params * 32
     if pool_intra is None:
         size_intra, _ = size_pools(triangles, tree_edges, num_rounds, n_params)
@@ -1339,6 +1428,8 @@ def run_multitriangle_fl(
     if pool_inter is None:
         _, size_inter = size_pools(triangles, tree_edges, num_rounds, n_params)
         pool_inter = rng.integers(0, 2, size=size_inter, dtype=np.int8)
+    audit_intra = PoolAuditor("intra", len(pool_intra))
+    audit_inter = PoolAuditor("inter", len(pool_inter))
 
     accuracies, losses = [], []
     dropout_log, recovery_log, distinguisher_log = [], [], []
@@ -1395,6 +1486,7 @@ def run_multitriangle_fl(
                            client_triangle_count.values()))
         for tri in triangles:
             cluster = list(tri)
+            _cluster_base = intra_off  # absolute offset for the pool audit
             cluster_pool = _slice_pool(pool_intra, intra_off, 3 * bits_per_mask)
             intra_off += 3 * bits_per_mask
             local_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME)) for c in cluster}
@@ -1422,6 +1514,10 @@ def run_multitriangle_fl(
                 rc.share_bytes += (len(cluster) * (len(cluster) - 1)
                                    * BYTES_PER_SHAMIR_SHARE)
                 rc.key_bits_intra += 3 * bits_per_mask
+                # Pool audit: the discarded slice is BURNED (single-use
+                # discipline) — register it so any later reuse of these
+                # offsets hard-fails too.
+                audit_intra.consume(_cluster_base, 3 * bits_per_mask)
                 for _i in range(3):
                     _a, _b = int(cluster[_i]), int(cluster[(_i + 1) % 3])
                     _e = (min(_a, _b), max(_a, _b))
@@ -1436,6 +1532,8 @@ def run_multitriangle_fl(
                 dropouts=tri_dropouts,
                 threshold=2,
                 aggregator_rng=rng,
+                pool_auditor=audit_intra,
+                pool_base_offset=_cluster_base,
             )
             triangle_aggs.append(agg_res.aggregate)
             round_distinguishable = round_distinguishable or agg_res.eavesdrop_distinguishable
@@ -1465,7 +1563,8 @@ def run_multitriangle_fl(
         else:
             agg_by_tri = {i: triangle_aggs[i] for i in range(num_triangles)}
             for parent, child in reversed(tree_edges):
-                edge_bits = _slice_pool(pool_inter, inter_off, bits_per_mask)
+                edge_bits = _slice_pool(pool_inter, inter_off, bits_per_mask,
+                                        auditor=audit_inter)
                 inter_off += bits_per_mask
                 # Inter-triangle leg: one masked aggregate on the wire and
                 # one edge-pool consumption per tree edge per round. The
@@ -1562,6 +1661,23 @@ def run_multitriangle_fl(
                   f"distinguishable={'Y' if round_distinguishable else 'N'}")
 
     wall_clock = time.time() - start_time
+
+    # Pool-reuse hard audit (HANDOFF 3.3): every consumed slice must be
+    # disjoint (enforced en route — any overlap raised immediately) and
+    # the audited totals must equal the ledgered burns exactly.
+    assert audit_intra.bits_consumed == intra_off, (
+        f"intra pool audit mismatch: {audit_intra.bits_consumed} audited "
+        f"!= {intra_off} ledgered")
+    assert audit_inter.bits_consumed == inter_off, (
+        f"inter pool audit mismatch: {audit_inter.bits_consumed} audited "
+        f"!= {inter_off} ledgered")
+    if verbose:
+        print(f"    Pool-reuse audit (OTP single-use): PASS — "
+              f"intra {audit_intra.n_intervals} disjoint slices / "
+              f"{audit_intra.bits_consumed} bits; "
+              f"inter {audit_inter.n_intervals} / "
+              f"{audit_inter.bits_consumed} bits")
+
     fl_result = FLResult(
         mode=f"entangled_{num_clients}c_{num_triangles}t",
         accuracies=accuracies,
@@ -1579,6 +1695,8 @@ def run_multitriangle_fl(
         "distinguishable_per_round": distinguisher_log,
         "bits_intra_consumed": intra_off,
         "bits_inter_consumed": inter_off,
+        "pool_audit": {"intra": audit_intra.summary(),
+                       "inter": audit_inter.summary()},
     }
     return fl_result, aux
 
