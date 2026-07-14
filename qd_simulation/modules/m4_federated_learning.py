@@ -1613,6 +1613,10 @@ def run_multitriangle_fl_legacy(
         triangles, _, tree_edges = define_triangle_topology(num_clients)
     num_triangles = len(triangles)
 
+    # Same seed-before-model order as the live drivers (Gate-2 round-2
+    # carry-forward): keeps this reference implementation reproducible if
+    # it is ever revived.
+    torch.manual_seed(42)
     global_model = model_fn()
     n_params = sum(p.numel() for p in global_model.parameters())
 
