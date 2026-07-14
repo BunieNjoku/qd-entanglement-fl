@@ -1251,6 +1251,18 @@ def run_experiment_11(quick=False):
         "unmasked attribute inference should beat chance"
     assert summary["masked"]["mse_mean"] > 0.5 * prior_mse, \
         "masked reconstruction should be no better than ~prior"
+    # The 'aggregate PARTIALLY succeeds' caption is tested on ATTRIBUTE
+    # INFERENCE, not MSE. Averaging n samples destroys single-sample
+    # per-feature fidelity, so aggregate MSE can exceed the
+    # reconstruct-as-mean prior (it does in underpowered quick mode:
+    # ~0.55 vs ~0.47) while distributional/attribute leakage is real and
+    # above chance (63% quick, 73% full). Attribute inference is the
+    # load-bearing metric for this arm; assert it beats chance, and keep
+    # the unmasked <= aggregate <= masked MSE ordering as a sanity band.
+    assert summary["aggregate"]["ai_mean"] > 0.55, \
+        ("aggregate attribute inference should beat chance — the "
+         "partial-leak caption; if this fails in quick mode the run is "
+         "underpowered, use full mode")
     assert (summary["unmasked"]["mse_mean"]
             <= summary["aggregate"]["mse_mean"]
             <= summary["masked"]["mse_mean"] + 1e-9), \
@@ -2183,8 +2195,16 @@ def run_experiment_10(quick=False):
     kw = dict(fidelity=QUANTUM['fidelity'], fiber_length_m=100)
     edge_full = simulate_symmetric_edge(
         duration_s=dur, rng=np.random.default_rng(42), **kw)
-    # One endpoint dead: only the far endpoint's source keeps routing
-    # `switch_split` of its pairs down this edge.
+    # One endpoint's source killed. simulate_symmetric_edge builds the
+    # healthy edge by concatenating TWO legs, each a simulate_source run
+    # at duration_s * switch_split (switch_split = 0.5): the endpoint-i
+    # leg and the endpoint-j leg. Killing endpoint i removes its leg
+    # exactly, leaving the endpoint-j leg alone — which is precisely one
+    # simulate_source(duration_s = dur * 0.5) call with the same source
+    # params. So this is NOT an unrelated half-rate proxy; it is the
+    # surviving endpoint's own leg from the symmetric-edge decomposition
+    # (Gate-3 round-1 F2). The far endpoint keeps routing switch_split of
+    # its pairs down the edge with unchanged per-pair physics.
     edge_degraded = simulate_source(
         duration_s=dur * 0.5, rng=np.random.default_rng(43), **kw)
     n_full = len(edge_full.raw_bits_alice)
