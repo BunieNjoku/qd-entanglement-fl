@@ -1066,186 +1066,221 @@ def run_experiment_5(quick=False):
 
 
 # ═══════════════════════════════════════════════════════════
-# EXPERIMENT 5b (DEMOTED): Gradient inversion sanity check
-# Retained as appendix only; not invoked from run_all by default.
+# EXPERIMENT 11: Gradient-inversion attack on the REAL construction
+# (rebuild of the deleted CIFAR/PSNR legacy — HANDOFF 3.8)
 # ═══════════════════════════════════════════════════════════
-def run_experiment_5_legacy(quick=False):
+def _tabular_dlg(model, target_grad_params, y_label, input_dim,
+                 n_iters, lr, device='cpu', seed=0):
+    """DLG/iDLG tabular gradient-inversion (Zhu et al. NeurIPS 2019;
+    label-known iDLG variant, Zhao et al. 2020). Optimize a dummy
+    feature vector so its gradient matches the observed gradient under
+    squared-L2 gradient-matching. No image priors (no total variation) —
+    the target is a 30-feature clinical vector, so tabular from the
+    ground up (the deleted legacy applied image PSNR/SSIM to tabular
+    data and attacked the proof-less Gaussian mask; HANDOFF 3.8)."""
+    import torch
+    import torch.nn as nn
+    torch.manual_seed(seed)
+    dummy = torch.randn(1, input_dim, requires_grad=True, device=device)
+    opt = torch.optim.Adam([dummy], lr=lr)
+    crit = nn.CrossEntropyLoss()
+    y = y_label.to(device)
+    for _ in range(n_iters):
+        opt.zero_grad()
+        model.zero_grad()
+        out = model(dummy)
+        loss = crit(out, y)
+        dgrad = torch.autograd.grad(loss, model.parameters(),
+                                    create_graph=True)
+        gm = sum(((dg - tg) ** 2).sum()
+                 for dg, tg in zip(dgrad, target_grad_params))
+        gm.backward()
+        opt.step()
+    return dummy.detach()
+
+
+def run_experiment_11(quick=False):
+    """Gradient-inversion privacy demonstration on the REAL system
+    (HANDOFF 3.8): tabular DLG/iDLG against the ClinicalMLP and the
+    modular-OTP construction, across three targets with honest,
+    theorem-consistent expectations:
+      (1) unmasked gradient      → attack SUCCEEDS (per-feature MSE low,
+                                    attribute inference well above chance)
+      (2) modular-masked payload → attack FAILS (one-time pad makes the
+                                    payload independent of the gradient —
+                                    a theorem; reconstruction ≈ prior)
+      (3) plaintext aggregate    → attack PARTIALLY succeeds (the FedAvg
+                                    sum leaks a mixture; this is the
+                                    honest scoping limit that motivates
+                                    DP-on-top-of-masking)
+    Tabular metrics: per-feature MSE against the standardized ground
+    truth, and attribute-inference accuracy (adversary predicts each
+    feature's above/below-median bit from the reconstruction).
+    """
     print("\n" + "="*70)
-    print("APPENDIX 5b: Gradient inversion sanity check (legacy)")
+    print("EXPERIMENT 11: Gradient-inversion attack on the real "
+          "construction")
     print("="*70)
 
     import torch
-    import torchvision
-    import torchvision.transforms as transforms
     from modules.m4_federated_learning import (
-        SmallCNN, compute_gradient_for_attack,
-        gradient_inversion_attack, mask_gradient_for_attack,
-    )
+        ClinicalMLP, load_clinical_data, quantize_gradient,
+        dequantize_gradient, derive_modular_mask, apply_modular_mask,
+        _SHAMIR_PRIME)
 
-    n_attack_images = 3 if not quick else 2
-    attack_iters = FL['attack_iterations'] if not quick else 1000
+    n_targets = 2 if quick else 4
+    n_iters = 600 if quick else 2000
+    attack_lr = 0.1
 
-    print("  Loading CIFAR-10...")
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-    try:
-        dataset = torchvision.datasets.CIFAR10(
-            root=os.path.join(RESULTS_DIR, 'data'), train=True,
-            download=True, transform=transform
-        )
-    except Exception as e:
-        print(f"  ⚠ Could not download CIFAR-10: {e}")
-        print("  Generating synthetic 32x32 image data instead...")
-        # Fallback: synthetic images
-        X_syn = torch.randn(100, 3, 32, 32)
-        y_syn = torch.randint(0, 10, (100,))
-        dataset = torch.utils.data.TensorDataset(X_syn, y_syn)
-
-    model = SmallCNN(num_classes=10)
+    client_data, test_data, input_dim = load_clinical_data(
+        3, rng_seed=42, dirichlet_alpha=FL.get('dirichlet_alpha', 0.5))
+    torch.manual_seed(42)
+    model = ClinicalMLP(input_dim=input_dim, hidden=128)
+    model.eval()
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"  Model: SmallCNN with {n_params:,} parameters")
+    bits_per_mask = n_params * 32
+    rng = np.random.default_rng(42)
 
-    fig, axes = plt.subplots(4, n_attack_images, figsize=(7.16, 7.16))
+    # Median per feature over the training pool → attribute-inference bits.
+    all_X = torch.cat([client_data[c][:][0] for c in range(3)], dim=0)
+    feat_median = all_X.median(dim=0).values
 
-    metric_results = {"unmasked": [], "gaussian-legacy": [], "dp": []}
+    def metrics(recon, truth):
+        mse = float(((recon - truth) ** 2).mean())
+        ai = float(((recon > feat_median) == (truth > feat_median))
+                   .float().mean())
+        return mse, ai
 
-    def compute_psnr(original, reconstructed):
-        mse = torch.mean((original - reconstructed) ** 2).item()
-        if mse < 1e-10:
-            return 100.0
-        return 10 * np.log10(4.0 / mse)  # Max range = 2 (normalized to [-1,1])
+    # Victim samples (one per target), each its own gradient.
+    victim_X = all_X[rng.choice(len(all_X), size=n_targets, replace=False)]
+    crit = torch.nn.CrossEntropyLoss()
 
-    def compute_ssim(original, reconstructed, window_size=7):
-        """Structural Similarity Index (Wang et al. 2004).
-        Computed per-channel then averaged. Standard metric for
-        gradient inversion evaluation (Geiping 2020, Zhu 2019)."""
-        C1, C2 = 0.01 ** 2, 0.03 ** 2  # Stabilization constants (L=1 for normalized)
-        orig = original.squeeze(0).float()
-        recon = reconstructed.squeeze(0).float()
-        pad = window_size // 2
-        # Uniform window averaging
-        kernel = torch.ones(1, 1, window_size, window_size) / (window_size ** 2)
-        ssim_vals = []
-        for ch in range(orig.shape[0]):
-            o = orig[ch:ch+1].unsqueeze(0)
-            r = recon[ch:ch+1].unsqueeze(0)
-            mu_o = torch.nn.functional.conv2d(o, kernel, padding=pad)
-            mu_r = torch.nn.functional.conv2d(r, kernel, padding=pad)
-            mu_o_sq, mu_r_sq, mu_or = mu_o**2, mu_r**2, mu_o * mu_r
-            sigma_o = torch.nn.functional.conv2d(o**2, kernel, padding=pad) - mu_o_sq
-            sigma_r = torch.nn.functional.conv2d(r**2, kernel, padding=pad) - mu_r_sq
-            sigma_or = torch.nn.functional.conv2d(o*r, kernel, padding=pad) - mu_or
-            ssim_map = ((2*mu_or + C1) * (2*sigma_or + C2)) / \
-                       ((mu_o_sq + mu_r_sq + C1) * (sigma_o + sigma_r + C2))
-            ssim_vals.append(ssim_map.mean().item())
-        return np.mean(ssim_vals)
+    res = {"unmasked": [], "masked": [], "aggregate": []}
+    for ti in range(n_targets):
+        x = victim_X[ti:ti + 1]
+        with torch.no_grad():
+            y = model(x).argmax(dim=1)  # iDLG: label recoverable from grad
+        model.zero_grad()
+        loss = crit(model(x), y)
+        true_grad = [g.detach().clone()
+                     for g in torch.autograd.grad(loss, model.parameters())]
 
-    def to_img(t):
-        img = t.squeeze(0).permute(1, 2, 0).numpy()
-        img = (img * 0.5 + 0.5).clip(0, 1)
-        return img
+        # (1) UNMASKED: the raw gradient is on the wire.
+        r1 = _tabular_dlg(model, true_grad, y, input_dim, n_iters,
+                          attack_lr, seed=100 + ti)
+        res["unmasked"].append(metrics(r1, x))
 
-    for img_idx in range(n_attack_images):
-        print(f"  Attacking image {img_idx+1}/{n_attack_images}...")
-
-        if hasattr(dataset, 'data'):
-            image, label = dataset[img_idx * 50]
-        else:
-            image, label = dataset[img_idx]
-        if isinstance(label, int):
-            label = torch.tensor([label])
-        image = image.unsqueeze(0)
-
-        true_grad = compute_gradient_for_attack(model, image, label)
-
-        # ── Attack on UNMASKED gradient ──
-        print(f"    [unmasked] Running inversion ({attack_iters} iters)...")
-        recon_unmasked, _ = gradient_inversion_attack(
-            model, true_grad, label, image.shape,
-            n_iterations=attack_iters, lr=FL['attack_lr']
-        )
-
-        # ── Attack on QUANTUM-MASKED gradient ──
-        # Use quantum-derived mask (Box-Muller from random bits, same as FL pipeline)
-        from modules.m4_federated_learning import generate_gaussian_mask_legacy
-        qbits = np.random.default_rng(img_idx).integers(0, 2, size=n_params*BITS_PER_PARAM, dtype=np.int8)
-        q_mask = generate_gaussian_mask_legacy(n_params, qbits) * 10  # Scale for strong masking
-        masked_grad = mask_gradient_for_attack(true_grad, q_mask)
-        print(f"    [quantum] Running inversion ({attack_iters} iters)...")
-        recon_quantum, _ = gradient_inversion_attack(
-            model, masked_grad, label, image.shape,
-            n_iterations=attack_iters, lr=FL['attack_lr']
-        )
-
-        # ── Attack on DP gradient ──
-        from modules.m4_federated_learning import add_dp_noise
-        dp_grad = []
-        flat_grad = torch.cat([g.flatten() for g in true_grad])
-        noisy_flat = add_dp_noise(flat_grad, epsilon=5.0, delta=1e-5, max_grad_norm=0.5)
-        offset = 0
+        # (2) MASKED: eavesdropper sees the modular-masked payload. Slice
+        # a fresh mask from a distilled pool, mask the quantized gradient
+        # (the exact wire object), hand the dequantized payload to DLG.
+        flat = torch.cat([g.flatten() for g in true_grad])
+        q = quantize_gradient(flat)
+        pool = rng.integers(0, 2, size=len(flat) * 32, dtype=np.int8)
+        mask = derive_modular_mask(len(flat), pool)
+        masked = apply_modular_mask(q, mask, sign=+1)
+        masked_flat = dequantize_gradient(masked)
+        masked_grad, off = [], 0
         for g in true_grad:
-            n = g.numel()
-            dp_grad.append(noisy_flat[offset:offset+n].view(g.shape))
-            offset += n
-        print(f"    [dp] Running inversion ({attack_iters} iters)...")
-        recon_dp, _ = gradient_inversion_attack(
-            model, dp_grad, label, image.shape,
-            n_iterations=attack_iters, lr=FL['attack_lr']
-        )
+            k = g.numel()
+            masked_grad.append(masked_flat[off:off + k].view(g.shape))
+            off += k
+        r2 = _tabular_dlg(model, masked_grad, y, input_dim, n_iters,
+                          attack_lr, seed=200 + ti)
+        res["masked"].append(metrics(r2, x))
 
-        # ── Metrics ──
-        for mode_name, recon in [("unmasked", recon_unmasked),
-                                  ("gaussian-legacy", recon_quantum),
-                                  ("dp", recon_dp)]:
-            psnr = compute_psnr(image, recon)
-            ssim = compute_ssim(image, recon)
-            metric_results[mode_name].append({"psnr": psnr, "ssim": ssim})
+        # (3) AGGREGATE: honest-but-curious aggregator sees the PLAINTEXT
+        # FedAvg sum (masks cancel by design). Attack the mean gradient
+        # of this victim + 2 other clients' samples.
+        others = all_X[rng.choice(len(all_X), size=2, replace=False)]
+        agg_grad = [g.clone() for g in true_grad]
+        for oi in range(2):
+            xo = others[oi:oi + 1]
+            with torch.no_grad():
+                yo = model(xo).argmax(dim=1)
+            model.zero_grad()
+            lo = crit(model(xo), yo)
+            go = torch.autograd.grad(lo, model.parameters())
+            agg_grad = [a + g.detach() for a, g in zip(agg_grad, go)]
+        agg_grad = [a / 3.0 for a in agg_grad]
+        r3 = _tabular_dlg(model, agg_grad, y, input_dim, n_iters,
+                          attack_lr, seed=300 + ti)
+        res["aggregate"].append(metrics(r3, x))
 
-        # ── Plot: Original + 3 reconstructions ──
-        axes[0, img_idx].imshow(to_img(image))
-        axes[0, img_idx].set_title('Original', fontsize=8)
-        axes[0, img_idx].axis('off')
+    # Chance baselines: reconstruct-as-prior (all-zeros = the standardized
+    # mean) for MSE, and coin-flip (0.5) for attribute inference.
+    prior_mse = float((victim_X ** 2).mean())
 
-        m = metric_results["unmasked"][-1]
-        axes[1, img_idx].imshow(to_img(recon_unmasked))
-        axes[1, img_idx].set_title(f'Unmasked\nPSNR={m["psnr"]:.1f}dB SSIM={m["ssim"]:.3f}', fontsize=7)
-        axes[1, img_idx].axis('off')
+    print(f"\n  {n_targets} victim samples, {n_iters}-iter tabular "
+          f"DLG/iDLG, ClinicalMLP ({n_params:,} params):")
+    print(f"  {'target':>22}  {'per-feature MSE':>16}  "
+          f"{'attr-infer acc':>15}  verdict")
+    verdicts = {
+        "unmasked": "ATTACK SUCCEEDS",
+        "masked": "ATTACK FAILS (theorem)",
+        "aggregate": "PARTIAL (motivates DP)",
+    }
+    summary = {}
+    for tgt in ["unmasked", "masked", "aggregate"]:
+        mses = [m for m, _ in res[tgt]]
+        ais = [a for _, a in res[tgt]]
+        summary[tgt] = {"mse_mean": float(np.mean(mses)),
+                        "mse_std": float(np.std(mses)),
+                        "ai_mean": float(np.mean(ais)),
+                        "ai_std": float(np.std(ais))}
+        print(f"  {tgt:>22}  {np.mean(mses):>10.4f} ± {np.std(mses):.3f}  "
+              f"{100*np.mean(ais):>13.1f}%  {verdicts[tgt]}")
+    print(f"  {'(chance baseline)':>22}  {prior_mse:>10.4f} (prior)  "
+          f"{50.0:>13.1f}%  reconstruct-as-mean / coin-flip")
 
-        m = metric_results["gaussian-legacy"][-1]
-        axes[2, img_idx].imshow(to_img(recon_quantum))
-        axes[2, img_idx].set_title(f'Quantum-masked\nPSNR={m["psnr"]:.1f}dB SSIM={m["ssim"]:.3f}', fontsize=7)
-        axes[2, img_idx].axis('off')
+    # Honest ordering assertions (means over targets).
+    assert summary["unmasked"]["mse_mean"] < summary["masked"]["mse_mean"], \
+        "unmasked should reconstruct better than masked"
+    assert summary["unmasked"]["ai_mean"] > 0.6, \
+        "unmasked attribute inference should beat chance"
+    assert summary["masked"]["mse_mean"] > 0.5 * prior_mse, \
+        "masked reconstruction should be no better than ~prior"
+    assert (summary["unmasked"]["mse_mean"]
+            <= summary["aggregate"]["mse_mean"]
+            <= summary["masked"]["mse_mean"] + 1e-9), \
+        "aggregate leakage should sit between unmasked and masked"
 
-        m = metric_results["dp"][-1]
-        axes[3, img_idx].imshow(to_img(recon_dp))
-        axes[3, img_idx].set_title(f'DP (ε=5)\nPSNR={m["psnr"]:.1f}dB SSIM={m["ssim"]:.3f}', fontsize=7)
-        axes[3, img_idx].axis('off')
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    order = ["unmasked", "aggregate", "masked"]
+    labels = ["unmasked\ngradient", "plaintext\naggregate",
+              "modular-masked\npayload"]
+    cols = [C['unmasked'], C['dp'], C['quantum']]
+    ax1.bar(labels, [summary[t]["mse_mean"] for t in order],
+            yerr=[summary[t]["mse_std"] for t in order], capsize=4,
+            color=cols)
+    ax1.axhline(y=prior_mse, color='gray', linestyle=':',
+                label=f'prior (reconstruct-as-mean) = {prior_mse:.2f}')
+    ax1.set_ylabel('Per-feature reconstruction MSE (↓ = more leak)')
+    ax1.set_title('Reconstruction error by target')
+    ax1.legend(fontsize=7)
+    ax1.grid(True, alpha=0.3, axis='y')
 
-    axes[0, 0].set_ylabel('Original', fontsize=8, fontweight='bold')
-    axes[1, 0].set_ylabel('Unmasked\n(ATTACK SUCCEEDS)', fontsize=11, color=C['unmasked'], fontweight='bold')
-    axes[2, 0].set_ylabel('Quantum-masked\n(ATTACK FAILS)', fontsize=11, color=C['quantum'], fontweight='bold')
-    axes[3, 0].set_ylabel('DP ε=5\n(PARTIAL LEAKAGE)', fontsize=11, color=C['dp'], fontweight='bold')
+    ax2.bar(labels, [100 * summary[t]["ai_mean"] for t in order],
+            yerr=[100 * summary[t]["ai_std"] for t in order], capsize=4,
+            color=cols)
+    ax2.axhline(y=50, color='gray', linestyle=':', label='chance (50%)')
+    ax2.set_ylabel('Attribute-inference accuracy (%)')
+    ax2.set_ylim(0, 105)
+    ax2.set_title('Above/below-median attribute inference')
+    ax2.legend(fontsize=7)
+    ax2.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle('Experiment 5: Gradient Inversion Attack — Privacy Demonstration\n'
-                 'Original images (top) vs reconstructions from intercepted gradients',
+    fig.suptitle('Experiment 11: gradient inversion on the REAL '
+                 'construction (tabular DLG/iDLG)\nunmasked leaks · '
+                 'modular mask blocks (theorem) · plaintext aggregate '
+                 'partially leaks',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
-    save_fig(fig, 'exp5_gradient_inversion')
+    save_fig(fig, 'exp11_gradient_inversion')
 
-    # ── Metric summary ──
-    print("\n  Attack Metric Summary (higher = more information leaked):")
-    print(f"  {'Mode':>15}  {'PSNR (dB)':>15}  {'SSIM':>15}")
-    print("  " + "-"*50)
-    for mode_name in ["unmasked", "gaussian-legacy", "dp"]:
-        psnrs = [m["psnr"] for m in metric_results[mode_name]]
-        ssims = [m["ssim"] for m in metric_results[mode_name]]
-        print(f"  {mode_name:>15}  {np.mean(psnrs):>6.1f} ± {np.std(psnrs):.1f}  "
-              f"  {np.mean(ssims):>6.3f} ± {np.std(ssims):.3f}")
+    print("  ✓ Experiment 11 complete.")
+    return {"targets": summary, "prior_mse": prior_mse,
+            "n_targets": n_targets, "n_iters": n_iters}
 
-    print("  ✓ Experiment 5 complete.")
-    return metric_results
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2269,7 +2304,7 @@ def run_experiment_10(quick=False):
 
 def main():
     parser = argparse.ArgumentParser(description='QD-Entanglement Simulation Runner')
-    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 11)),
+    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 12)),
                         help='Experiment numbers to run (default: all 1-8)')
     parser.add_argument('--quick', action='store_true',
                         help='Quick mode with reduced parameter sweeps')
@@ -2297,6 +2332,7 @@ def main():
         8: run_experiment_8,
         9: run_experiment_9,
         10: run_experiment_10,
+        11: run_experiment_11,
     }
 
     for exp_num in sorted(args.exp):
