@@ -1192,7 +1192,7 @@ def run_experiment_7(quick=False):
     differentiator claim.
     """
     print("\n" + "="*70)
-    print("EXPERIMENT 7: QBER -> privacy-budget curve")
+    print("EXPERIMENT 7: QBER -> key-rate / capacity envelope")
     print("="*70)
 
     qbers = np.linspace(0.005, 0.06, 12) if not quick else np.linspace(0.005, 0.06, 6)
@@ -1305,14 +1305,15 @@ def run_experiment_7(quick=False):
     ax2.set_xlabel('QBER')
     ax2.set_ylabel('Max model size at 60s round (K params)')
     ax2.set_yscale('log')
-    ax2.set_title('Privacy-budget headroom vs QBER')
+    ax2.set_title('Max maskable model size vs QBER (rate-driven)')
     ax2.grid(True, alpha=0.3, which='both')
 
-    fig.suptitle('Experiment 7: QBER -> privacy-budget curve\n'
-                 'Physical channel quality bounds the maskable model size',
+    fig.suptitle('Experiment 7: QBER -> key-rate / capacity envelope\n'
+                 'Channel quality bounds key SUPPLY (rate, model size); '
+                 'the PA entropy floor stays flat',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
-    save_fig(fig, 'exp7_qber_privacy')
+    save_fig(fig, 'exp7_qber_key_rate_envelope')
 
     print("\n  QBER -> Shared rate -> Max model size (60s rounds):")
     print(f"  {'QBER':>8}  {'Declared rate':>15}  {'Envelope*':>12}  "

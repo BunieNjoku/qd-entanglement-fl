@@ -55,7 +55,7 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 4 | FL training correctness | Modular masking does not degrade convergence vs unmasked baseline |
 | 5 | **Dropout recovery** | entangled-key two-mask aggregation tolerates client dropout at per-round freshness; classical Bonawitz needs Shamir reconstruction for pairwise leg |
 | 6 | Throughput | Round-rate ceiling under shared-bit-rate constraints |
-| 7 | **QBER → privacy budget curve** | Mask entropy as function of physical QBER; quantum-vs-classical differentiator |
+| 7 | **QBER → key-rate / capacity envelope** | QBER prices key SUPPLY (rate, max maskable model size); the PA mask-entropy floor stays flat |
 | 8 | Multi-triangle FL | Two-level hierarchical Bonawitz at 3/6/9/12 client scales |
 
 ## Assumptions
@@ -74,7 +74,7 @@ Results in `results/`:
 - `exp4*` — FL training convergence
 - `exp5_dropout_recovery.png` — Dropout recovery validation
 - `exp6_throughput.png` — Rate-constrained throughput
-- `exp7_qber_privacy.png` — QBER → privacy budget curve
+- `exp7_qber_key_rate_envelope.png` — QBER → key-rate / capacity envelope
 - `exp8*` — Multi-triangle scaling
 - `summary.json` — Numeric results
 
