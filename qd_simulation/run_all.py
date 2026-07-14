@@ -54,7 +54,7 @@ from modules.m1_quantum_source import (
 from modules.m2_post_processing import (
     fast_ec_simulate, compute_rate_waterfall, binary_entropy,
     validate_bp_against_statistical, toeplitz_hash, validate_pa_output,
-    estimate_capacity_qber,
+    estimate_capacity_qber, randomness_battery,
 )
 from modules.m3_mesh_topology import (
     generate_campus_mesh, build_aggregation_tree,
@@ -466,14 +466,49 @@ def run_experiment_2(quick=False):
         print(f"    {row['qber']:.2f}    {row['bp_fer']:.2f}      "
               f"{row['stat_fer']:.2f}        {agree}")
 
-    # ── 2e: Privacy amplification validation ──
-    print("  [2e] Validating Toeplitz privacy amplification...")
+    # ── 2e: NIST SP 800-22 subset battery on the PA output (HANDOFF 3.2;
+    # replaces the former 10,000-bit monobit spot check). The input is the
+    # PIPELINE's output, not synthetic rng bits: simulated source at the
+    # config fidelity (100 m fiber) → reconciled frames → Toeplitz PA at
+    # the LHL-consistent compression for the measured QBER. ──
+    print("  [2e] NIST SP 800-22 subset battery on privacy-amplified "
+          "pipeline output...")
     rng_pa = np.random.default_rng(42)
-    test_bits = rng_pa.integers(0, 2, size=10000, dtype=np.int8)
-    secure_output = toeplitz_hash(test_bits, 5000, rng=rng_pa)
-    pa_pvalue = validate_pa_output(secure_output)
-    print(f"    Toeplitz output: {len(secure_output)} bits, "
-          f"monobit p-value={pa_pvalue:.4f} ({'PASS' if pa_pvalue > 0.01 else 'FAIL'})")
+    src_pa = simulate_source(fidelity=QUANTUM['fidelity'],
+                             n_pairs=8_000_000 if not quick else 4_000_000,
+                             fiber_length_m=100, rng=rng_pa)
+    ec_pa = fast_ec_simulate(src_pa.raw_bits_alice, src_pa.raw_bits_bob,
+                             qber_estimate=src_pa.qber, rng=rng_pa)
+    _rec, _off = [], 0
+    for _r in ec_pa:
+        if _r.frame_success:
+            _rec.append(src_pa.raw_bits_alice[_off:_off + _r.n_raw_bits])
+        _off += _r.n_raw_bits
+    rec_bits = np.concatenate(_rec)
+    _wf_pa = compute_rate_waterfall(
+        1.0, src_pa.qber, code_rate=POST_PROC['ldpc_code_rate'],
+        security_margin=POST_PROC['security_margin_bits'],
+        block_size=POST_PROC['block_size'],
+        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'])
+    _ent_rate = max(0.0, 1.0 - _wf_pa['ec_overhead_pct'] / 100
+                    - _wf_pa['tagged_fraction'])
+    pa_out_len = (int(len(rec_bits) * _ent_rate)
+                  - 2 * POST_PROC['security_margin_bits'])
+    secure_output = toeplitz_hash(rec_bits, pa_out_len, rng=rng_pa)
+    print(f"    pipeline: {len(src_pa.raw_bits_alice):,} sifted bits @ "
+          f"QBER {src_pa.qber:.4f} → {len(rec_bits):,} reconciled → "
+          f"{len(secure_output):,} PA output bits "
+          f"(LHL rate {_ent_rate:.3f}, margin "
+          f"{POST_PROC['security_margin_bits']})")
+    battery = randomness_battery(secure_output, alpha=0.01)
+    n_pass = sum(r['passed'] for r in battery)
+    print(f"    {'test':<28} {'p-value':>10}  verdict")
+    for r in battery:
+        print(f"    {r['test']:<28} {r['p_value']:>10.4f}  "
+              f"{'PASS' if r['passed'] else 'FAIL'}")
+    print(f"    → {n_pass}/{len(battery)} tests pass at α = 0.01 "
+          f"(expected false rejections for uniform input: "
+          f"≈{0.01 * len(battery):.2f})")
 
     print("  ✓ Experiment 2 complete.")
     return {
@@ -482,7 +517,12 @@ def run_experiment_2(quick=False):
         "final_rates": final_rates,
         "qber_sweep": qber_sweep.tolist(),
         "bp_validation": bp_validation,
-        "pa_pvalue": pa_pvalue,
+        "pa_battery": {r["test"]: {"p_value": r["p_value"],
+                                   "passed": r["passed"]}
+                       for r in battery},
+        "pa_battery_input": {"qber": float(src_pa.qber),
+                             "reconciled_bits": int(len(rec_bits)),
+                             "output_bits": int(len(secure_output))},
     }
 
 
@@ -1901,9 +1941,179 @@ def run_experiment_8(quick=False):
 # ═══════════════════════════════════════════════════════════
 # MAIN RUNNER
 # ═══════════════════════════════════════════════════════════
+def run_experiment_9(quick=False):
+    """HNDL — harvest-now / decrypt-later retroactive transcript attack.
+
+    HANDOFF 3.1: makes claim (b) empirical. Two arms differ ONLY in the
+    pairwise-mask source; both record the full classical transcript
+    (masked payloads, Shamir shares, seed disclosures, dropout reveals),
+    then a recording adversary is granted retroactive god-mode over every
+    COMPUTATIONAL secret (future quantum computer: DH/PRF/channel
+    encryption broken after the fact). Expected: classical arm 100% of
+    recorded gradients recovered; entangled arm 0% with residuals
+    statistically uniform (every delivered payload keeps >= 1 pairwise
+    mask that never appeared in any transcript).
+    """
+    print("\n" + "="*70)
+    print("EXPERIMENT 9: Harvest-now / decrypt-later (HNDL) transcript attack")
+    print("="*70)
+
+    import torch
+    from modules.m4_federated_learning import (
+        ClinicalMLP, load_clinical_data, secure_aggregation_round,
+        train_local, get_model_params, set_model_params,
+        get_gradient_update, _SHAMIR_PRIME)
+    from modules.m6_hndl import run_transcript_round, retroactive_attack
+
+    n_clients = 3
+    num_rounds = 6 if quick else 10
+    # Deterministic dropout schedule exercising reveals: exactly one
+    # dropped client in two rounds. Two simultaneous drops would abort
+    # the cluster at the live-set announcement (threshold failure), so
+    # no payload would be recorded at all — the t >= 2 argument's edge
+    # case is structurally unreachable for DELIVERED payloads.
+    dropout_schedule = {2: {2}, 4: {0}}
+
+    client_data, test_data, input_dim = load_clinical_data(
+        n_clients, rng_seed=42, dirichlet_alpha=FL.get('dirichlet_alpha', 0.5))
+    torch.manual_seed(42)
+    model_fn = lambda: ClinicalMLP(input_dim=input_dim, hidden=128)
+    global_model = model_fn()
+    n_params = sum(p.numel() for p in global_model.parameters())
+    bits_per_mask = n_params * 32
+
+    rng = np.random.default_rng(42)
+    tr_ent, tr_cls = [], []
+    print(f"  Recording {num_rounds} rounds x both arms "
+          f"(drops at rounds {sorted(dropout_schedule)})...")
+    for rd in range(num_rounds):
+        drops = dropout_schedule.get(rd, set())
+        # Real local training -> gradient updates. The SAME gradients are
+        # recorded in both arms; only the mask source differs.
+        gparams = get_model_params(global_model)
+        grads = {}
+        for c in range(n_clients):
+            local = model_fn()
+            set_model_params(local, gparams.clone())
+            train_local(local, client_data[c], FL['local_epochs'],
+                        FL['local_batch_size'], FL['learning_rate'])
+            grads[c] = get_gradient_update(global_model, local)
+
+        pool = rng.integers(0, 2, size=3 * bits_per_mask, dtype=np.int8)
+        self_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME))
+                      for c in range(n_clients)}
+        pair_seeds = {(i, j): int(rng.integers(0, 2**31))
+                      for i in range(n_clients)
+                      for j in range(i + 1, n_clients)}
+
+        t_e, agg_e = run_transcript_round(
+            rd, grads, range(n_clients), drops, "entangled",
+            pairwise_pool=pool, self_seeds=self_seeds)
+        t_c, agg_c = run_transcript_round(
+            rd, grads, range(n_clients), drops, "classical",
+            pair_mask_seeds=pair_seeds, self_seeds=self_seeds)
+        # Coherence assertions: the wire-faithful transcript must equal
+        # the LIVE implementation on identical inputs, and the two arms
+        # must agree in the clear (they differ only inside the masks).
+        agg_live = secure_aggregation_round(
+            client_gradients=grads, cluster_clients=list(range(n_clients)),
+            pairwise_pool=pool, local_rng_seeds=self_seeds,
+            dropouts=drops, threshold=2)
+        assert np.array_equal(agg_e, agg_live.aggregate_quantized), \
+            "transcript arm diverges from secure_aggregation_round"
+        assert np.array_equal(agg_c, agg_e), "arms diverge in the clear"
+        tr_ent.append(t_e)
+        tr_cls.append(t_c)
+
+        survivors = n_clients - len(drops)
+        set_model_params(global_model,
+                         gparams + agg_live.aggregate / survivors)
+
+    atk_c = retroactive_attack(tr_cls, "classical")
+    atk_e = retroactive_attack(tr_ent, "entangled")
+
+    print("\n  Retroactive god-mode attack on the recorded transcripts")
+    print("  (adversary recomputes every COMPUTATIONAL secret: channel "
+          "encryption ->\n   Shamir shares -> all self-masks in BOTH arms; "
+          "classical arm also all\n   DH/PRF pairwise seeds):")
+    print(f"\n  {'arm':<28} {'payloads':>8} {'recovered':>10} "
+          f"{'min masks left':>15} {'residual p':>11} {'median|err|':>12}")
+    for label, atk in [("classical (DH/PRF masks)", atk_c),
+                       ("entangled (distilled keys)", atk_e)]:
+        print(f"  {label:<28} {atk['n_payloads']:>8} "
+              f"{100*atk['recovered_fraction']:>9.1f}% "
+              f"{atk['min_masks_remaining']:>15} "
+              f"{atk['mean_residual_monobit_p']:>11.3f} "
+              f"{atk['median_abs_error']:>12.4g}")
+    assert atk_c["recovered_fraction"] == 1.0, \
+        "classical arm should be fully recoverable under god-mode"
+    assert atk_e["recovered_fraction"] == 0.0, \
+        "entangled arm leaked a payload — HNDL claim violated"
+    assert atk_e["min_masks_remaining"] >= 1, \
+        "a delivered payload lost all pairwise masks — t>=2 argument violated"
+
+    print("\n  → classical arm: 100% of recorded gradients recovered "
+          "retroactively;")
+    print("    entangled arm: 0% — every delivered payload retains ≥ 1 "
+          "pairwise mask that\n    never appeared in any transcript, and "
+          "god-mode residuals remain uniform\n    (mean monobit p above; "
+          "median reconstruction error ~10³ in gradient units\n    vs ~0 "
+          "classically).")
+    print("\n  HONEST SCOPE: the self-mask leg rides classical channels "
+          "(Shamir shares)\n  and is only computationally protected — "
+          "god-mode strips it in BOTH arms\n  here. The PAIRWISE leg alone "
+          "carries the HNDL claim. Recorded EC syndromes\n  are covered by "
+          "the PA ε (masks are sliced from post-PA output).")
+
+    # Plot: recovery fraction + residual uniformity per arm
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    arms = ["classical\n(DH/PRF)", "entangled\n(distilled)"]
+    ax1.bar(arms, [100 * atk_c["recovered_fraction"],
+                   100 * atk_e["recovered_fraction"]],
+            color=[C['unmasked'], C['quantum']])
+    ax1.set_ylabel('Gradients recovered retroactively (%)')
+    ax1.set_ylim(0, 105)
+    for i, v in enumerate([100 * atk_c["recovered_fraction"],
+                           100 * atk_e["recovered_fraction"]]):
+        ax1.text(i, v + 2, f'{v:.0f}%', ha='center', fontweight='bold')
+    ax1.set_title('Retroactive recovery under god-mode')
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    pc = [r["residual_monobit_p"] for r in atk_c["records"]]
+    pe = [r["residual_monobit_p"] for r in atk_e["records"]]
+    ax2.scatter(np.zeros(len(pc)) + 0.0, pc, color=C['unmasked'],
+                alpha=0.7, label='classical: residual = the gradient')
+    ax2.scatter(np.zeros(len(pe)) + 1.0, pe, color=C['quantum'],
+                alpha=0.7, label='entangled: residual stays uniform')
+    ax2.axhline(y=0.01, color='gray', linestyle=':', linewidth=1,
+                label='α = 0.01')
+    ax2.set_xticks([0, 1])
+    ax2.set_xticklabels(arms)
+    ax2.set_ylabel('Monobit p-value of post-attack residual')
+    ax2.set_ylim(-0.05, 1.05)
+    ax2.legend(fontsize=7)
+    ax2.set_title('What god-mode is left with')
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle('Experiment 9: harvest-now / decrypt-later — record '
+                 'everything, break all\ncomputational secrets later; '
+                 'only the never-transmitted pairwise bits survive',
+                 fontsize=10, fontweight='bold')
+    fig.tight_layout()
+    save_fig(fig, 'exp9_hndl_transcript')
+
+    print("  ✓ Experiment 9 complete.")
+    return {
+        "classical": {k: v for k, v in atk_c.items() if k != "records"},
+        "entangled": {k: v for k, v in atk_e.items() if k != "records"},
+        "rounds": num_rounds,
+        "payloads_per_arm": atk_c["n_payloads"],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='QD-Entanglement Simulation Runner')
-    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 9)),
+    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 10)),
                         help='Experiment numbers to run (default: all 1-8)')
     parser.add_argument('--quick', action='store_true',
                         help='Quick mode with reduced parameter sweeps')
@@ -1929,6 +2139,7 @@ def main():
         6: run_experiment_6,
         7: run_experiment_7,
         8: run_experiment_8,
+        9: run_experiment_9,
     }
 
     for exp_num in sorted(args.exp):

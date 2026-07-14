@@ -57,6 +57,7 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 6 | Throughput | Round-rate ceiling under shared-bit-rate constraints |
 | 7 | **QBER → key-rate / capacity envelope** | QBER prices key SUPPLY (rate, max maskable model size); the PA mask-entropy floor stays flat |
 | 8 | Multi-triangle FL | Two-level hierarchical Bonawitz at 3/6/9/12 client scales |
+| 9 | **HNDL transcript attack** | Record everything, break all computational secrets later: classical arm 100% retro-recovered, entangled arm 0% (pairwise bits never transit a channel) |
 
 ## Assumptions
 
@@ -76,6 +77,7 @@ Results in `results/`:
 - `exp6_throughput.png` — Rate-constrained throughput
 - `exp7_qber_key_rate_envelope.png` — QBER → key-rate / capacity envelope
 - `exp8*` — Multi-triangle scaling
+- `exp9_hndl_transcript.png` — HNDL retroactive-recovery comparison
 - `summary.json` — Numeric results
 
 ## Hardware Requirements
