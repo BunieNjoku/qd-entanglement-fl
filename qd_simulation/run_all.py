@@ -725,8 +725,10 @@ def run_experiment_5(quick=False):
     Entanglement-derived pairwise bits are single-use per round. Survivors can safely reveal pairwise bits with
     dropped clients (no future rounds compromised). We sweep dropout rate
     and check (i) training still converges, (ii) recovery activates as
-    expected, (iii) the honest-but-curious aggregator's chi-squared
-    distinguisher cannot break the modular mask at any dropout rate.
+    expected, (iii) the chi-squared VALIDATION check stays silent at every
+    dropout rate (indistinguishability under uniform modular masks is a
+    theorem — the check is an implementation-bug detector, not a security
+    result; HANDOFF 3.9).
 
     Classical parity baseline: the same reveal-based recovery is exercised
     with a Flamingo-style per-round pool (Ma et al., IEEE S&P 2023) to show
@@ -800,14 +802,14 @@ def run_experiment_5(quick=False):
     ax2.bar(x, [r/100 for r in recovery_pcts], w, color=C['pareto'],
             label='rounds invoking recovery (fraction)')
     ax2.bar(x + w, [d/100 for d in distinguish_pcts], w, color=C['unmasked'],
-            label='rounds with aggregator distinguisher (fraction)')
+            label='rounds failing χ² implementation check (validation)')
     ax2.set_xticks(x)
     ax2.set_xticklabels([f'{int(dr*100)}%' for dr in drs])
     ax2.set_xlabel('Per-round dropout rate')
     ax2.set_ylabel('Value')
     ax2.set_ylim(0, 1.05)
     ax2.legend(fontsize=7, loc='upper right')
-    ax2.set_title('Recovery activation and aggregator distinguishability')
+    ax2.set_title('Recovery activation and χ² implementation check (validation)')
     ax2.grid(True, alpha=0.3, axis='y')
 
     fig.suptitle('Experiment 5: Dropout recovery, per-round-fresh two-mask aggregation\n'
@@ -817,7 +819,7 @@ def run_experiment_5(quick=False):
     save_fig(fig, 'exp5_dropout_recovery')
 
     print("\n  Summary:")
-    print(f"  {'Dropout':>10}  {'Final acc':>10}  {'Recovery %':>12}  {'Distinguishable %':>18}")
+    print(f"  {'Dropout':>10}  {'Final acc':>10}  {'Recovery %':>12}  {'χ² check fail %':>18}")
     for dr in drs:
         r, a = results[dr]
         rec_pct = 100 * np.mean(a['recovery_invoked_per_round'])
@@ -1547,7 +1549,7 @@ def run_experiment_8(quick=False):
         print(f"    Final accuracy: {result.final_accuracy:.4f}")
         print(f"    Rounds to target ({target_acc}): {result.rounds_to_target}")
         print(f"    Wall clock: {result.wall_clock_s:.1f}s")
-        print(f"    Aggregator distinguishable rounds: "
+        print(f"    χ² implementation-check failures (validation): "
               f"{sum(aux['distinguishable_per_round'])}/{num_rounds}")
         print(f"    entangled-key bits consumed (intra/inter): "
               f"{aux['bits_intra_consumed']:,} / {aux['bits_inter_consumed']:,}")

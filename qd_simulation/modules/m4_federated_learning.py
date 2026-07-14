@@ -900,12 +900,14 @@ def secure_aggregation_round(
               same reveal logic rests on computational per-round PRF seeds).
       (7) Aggregator dequantizes the sum, returns aggregate.
 
-    Honest-but-curious aggregator check:
-      The aggregator attempts to distinguish a survivor's masked payload
-      from a uniform random uint32 array of the same length. If masks are
-      uniform over Z_{2^32}, this should be statistically indistinguishable
-      and the check returns False. We use a chi-squared test on the
-      lowest byte for a quick distinguisher.
+    Honest-but-curious aggregator check — VALIDATION, not a security
+    result (HANDOFF 3.9): under uniform modular masks, payload
+    indistinguishability from uniform is a THEOREM (one-time pad over
+    Z_{2^32}); the chi-squared trial on the lowest byte is therefore an
+    implementation-bug detector — it can only fire if the mask pipeline
+    is broken (non-uniform bits, reuse, wrong modular arithmetic). A
+    False result confirms the implementation matches the theorem; it
+    adds no security beyond it.
     """
     if aggregator_rng is None:
         aggregator_rng = np.random.default_rng(0)
@@ -979,9 +981,10 @@ def secure_aggregation_round(
         agg = (agg + pl).astype(np.uint32)
     _t_agg1 = time.perf_counter()
 
-    # Honest-but-curious distinguisher trial: can the aggregator tell
-    # any single survivor's payload from uniform noise? (Instrumentation,
-    # not protocol — timed separately so it lands in NO latency bucket.)
+    # Honest-but-curious distinguisher trial — VALIDATION (implementation-
+    # bug detector; indistinguishability itself is a theorem, see the
+    # docstring). Instrumentation, not protocol — timed separately so it
+    # lands in NO latency bucket.
     _t_chi0 = time.perf_counter()
     sample = masked_payloads[survivors[0]]
     distinguishable = _chi2_distinguishable(sample, aggregator_rng)
@@ -1082,10 +1085,12 @@ def secure_aggregation_round(
 def _chi2_distinguishable(payload_uint32, rng, alpha=0.001):
     """Chi-squared test: is payload's lowest-byte distribution uniform?
 
-    Returns True if the aggregator can reject the null "payload is uniform"
-    at significance alpha. This is the honest-but-curious aggregator's
-    cheapest distinguisher. Under modular OTP with uniform mask, it should
-    not be able to distinguish at any reasonable alpha.
+    VALIDATION ONLY (HANDOFF 3.9). Under modular OTP with uniform masks,
+    indistinguishability is a theorem, so this test cannot produce a
+    security finding — a True return means the implementation is broken
+    (non-uniform mask bits, pool reuse, or wrong modular arithmetic),
+    nothing more. Returns True if the null "payload is uniform" is
+    rejected at significance alpha.
     """
     from scipy.stats import chisquare
     low_byte = (payload_uint32 & 0xFF).astype(np.int64)
@@ -1297,6 +1302,8 @@ def run_multitriangle_fl(
       - Two-mask design: self-mask Shamir-shared for dropout recovery
       - Per-round dropouts sampled at `dropout_rate`
       - Honest-but-curious aggregator distinguisher reported per round
+        (validation-only implementation-bug detector — see
+        _chi2_distinguishable; indistinguishability is a theorem)
     """
     if triangles is None or tree_edges is None:
         triangles, _, tree_edges = define_triangle_topology(num_clients)
