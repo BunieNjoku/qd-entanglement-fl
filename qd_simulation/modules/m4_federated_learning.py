@@ -334,11 +334,18 @@ BYTES_PER_MASKED_WORD = 4    # one uint32 word of masked payload
 BYTES_PER_MODEL_WORD = 4     # one float32 word of broadcast global model
 BYTES_PER_SHAMIR_SHARE = 6   # 4 B value in the 31-bit Mersenne prime field
                              # (_SHAMIR_PRIME = 2^31 - 1) + 2 B share index
+BYTES_ABORT_NOTICE = 4       # live-set/abort announcement to each surviving
+                             # member of a threshold-failed cluster: the
+                             # share→payload round-boundary message clients
+                             # need anyway (see RoundComm's Downlink note);
+                             # charging it justifies not charging the
+                             # aborted survivors' never-sent payloads.
 BYTES_PER_SELFMASK_SEED = 4  # survivor's self-mask disclosure: the seed
                              # (< _SHAMIR_PRIME). The self-mask is
                              # PRG-expanded from this seed — which is
                              # exactly why the self-mask leg is only
-                             # computationally protected (report §6.3);
+                             # computationally protected (see the channel
+                             # assumption in RoundComm's docstring);
                              # the pairwise leg carries the HNDL claim.
 
 
@@ -347,19 +354,36 @@ class RoundComm:
     """Per-round communication and latency accounting (HANDOFF Phase 2).
 
     Uplink phases (client → aggregator), bytes summed over clients:
-      payload           survivors' masked int32 gradients (dropped clients
-                        never send)
+      payload           masked int32 gradients from members of clusters
+                        that met threshold. Dropped clients never send;
+                        neither do the SURVIVORS of a threshold-failed
+                        cluster — every client needs the live-set
+                        announcement (the Bonawitz share→payload round
+                        boundary) before it can pick which pairwise masks
+                        to include in its payload, and that same message
+                        tells a below-threshold cluster's survivors to
+                        abort (see Downlink).
       shares            per-round Shamir distribution — happens BEFORE
                         dropout, so all n members send n−1 shares of their
                         fresh self-mask seed
       selfmask          survivors' own seed disclosures
-      recovery_shares   threshold-many shares per dropped client's seed
+      recovery_shares   identically 0 under this simulation's pre-payload
+                        drop timing: a dropped self-mask never enters the
+                        sum, so Shamir reconstruction runs as VALIDATION
+                        only (asserted, never charged as wire traffic —
+                        protocol step 6). The field exists for the
+                        Phase-4 baselines' post-payload drop timing,
+                        which does transmit recovery shares.
       reveals           each survivor reveals its full pairwise bit-string
                         with each dropped partner: n_params×4 B per
                         (survivor, dropped) pair — THE byte cost of
                         reveal-based recovery
       inter_triangle    masked triangle aggregates on tree edges
-    Downlink: global-model broadcast to every client.
+    Downlink: global-model broadcast to every client, plus a
+    BYTES_ABORT_NOTICE live-set/abort notice to each surviving member of
+    a threshold-failed cluster — the announcement is inherent to the
+    Bonawitz round structure (see payload above), and charging it here
+    is what justifies NOT charging the aborted survivors' payloads.
 
     Latency decomposition: key_wait_s is MODELED from the config operating
     point — the SLOWEST physical edge's pool-fill time,
@@ -386,8 +410,8 @@ class RoundComm:
     Scope (Gate-2 F5): key-DISTILLATION classical traffic is excluded
     from this FL-layer ledger by design (HANDOFF Phase-2 phase list).
     Magnitude at the operating point: reconciliation syndromes cost
-    ≈ 0.20 B per secret bit ((1−R_code)/yield = 0.16/0.809 bits of
-    syndrome per secret bit), ≈ 23 KB per edge per round at the ~29K-param
+    ≈ 0.20 bits ≈ 0.025 B per secret bit ((1−R_code)/yield = 0.16/0.809
+    bits of syndrome per secret bit), ≈ 23 KB per edge per round at the ~29K-param
     clinical model; PA (Toeplitz) seed traffic depends on the seed-reuse
     policy and is flagged to the Phase-3 HNDL transcript work. The
     Phase-4 comparison charges the classical baselines' key-agreement
@@ -539,6 +563,13 @@ def run_federated_training(
     """
     mode = _validate_mode(mode)
     num_clients = len(client_datasets)
+    # Seed torch BEFORE the first model_fn(): the initial global model and
+    # DataLoader shuffling otherwise inherit whatever global state the
+    # process had, making training metrics irreproducible across suite
+    # compositions and standalone runs (Gate-1 F12; Gate-2 round-2 F5 —
+    # seeding after model creation left the initial model OS-entropy-random
+    # on the first run in any process).
+    torch.manual_seed(42)
     global_model = model_fn()
     n_params = sum(p.numel() for p in global_model.parameters())
 
@@ -547,10 +578,6 @@ def run_federated_training(
     rounds_to_target = num_rounds
     start_time = time.time()
     rng = np.random.default_rng(42)
-    # Seed torch too: model init and DataLoader shuffling otherwise inherit
-    # whatever global state earlier experiments left behind, making training
-    # metrics irreproducible across suite compositions (Gate-1 F12).
-    torch.manual_seed(42)
 
     # Pre-generate PRNG seeds for PRNG mode — symmetric: seed(a,b) == seed(b,a)
     prng_seeds = rng.integers(0, 2**31, size=(num_rounds, num_clients, num_clients))
@@ -847,8 +874,10 @@ def secure_aggregation_round(
       (3) Each client adds a self-mask drawn from local QRNG (seed s_i).
           The seed is Shamir-shared (t-of-n) across the cluster so
           survivors can reconstruct it if the client drops.
-      (4) Each client transmits the masked payload + their Shamir shares of
-          other clients' self-mask seeds.
+      (4) Each client sends one share of its OWN self-mask seed to each of
+          its n−1 cluster peers (the n(n−1) × BYTES_PER_SHAMIR_SHARE wire
+          charge models exactly these messages), then — after the live-set
+          announcement — transmits its masked payload.
       (5) Aggregator sums the masked payloads (modular addition).
       (6) Dropout handling under THIS simulation's drop timing (dropouts
           occur AFTER share distribution, BEFORE payload transmission):
@@ -1272,7 +1301,19 @@ def run_multitriangle_fl(
     if triangles is None or tree_edges is None:
         triangles, _, tree_edges = define_triangle_topology(num_clients)
     num_triangles = len(triangles)
+    # All pairwise links that physically exist (triangle sides) — the only
+    # pairs with distillation hardware and hence key pools. Used to keep
+    # tree-mask key assignment on real links (Gate-2 round-2 F6).
+    physical_edges = {tuple(sorted((int(t[i]), int(t[j]))))
+                      for t in triangles for i, j in ((0, 1), (1, 2), (0, 2))}
 
+    # Seed torch BEFORE the first model_fn(): the initial global model and
+    # DataLoader shuffling otherwise inherit whatever global state the
+    # process had, making training metrics irreproducible across suite
+    # compositions and standalone runs (Gate-1 F12; Gate-2 round-2 F5 —
+    # seeding after model creation left the initial model OS-entropy-random
+    # on the first run in any process).
+    torch.manual_seed(42)
     global_model = model_fn()
     n_params = sum(p.numel() for p in global_model.parameters())
 
@@ -1282,10 +1323,6 @@ def run_multitriangle_fl(
             client_triangle_count[c] = client_triangle_count.get(c, 0) + 1
 
     rng = np.random.default_rng(42)
-    # Seed torch too: model init and DataLoader shuffling otherwise inherit
-    # whatever global state earlier experiments left behind, making training
-    # metrics irreproducible across suite compositions (Gate-1 F12).
-    torch.manual_seed(42)
 
     # Pre-allocate distilled-key pools — assertion in `_slice_pool` enforces no reuse.
     bits_per_mask = n_params * 32
@@ -1367,8 +1404,14 @@ def run_multitriangle_fl(
                 # knowledge), and its reserved key slice is DISCARDED, not
                 # returned (single-use discipline — safe against partial
                 # derivation). Both are ledgered so this record reconciles
-                # with aux['bits_intra_consumed']. The abort notice itself
-                # (a constant few bytes downlink) is not charged.
+                # with aux['bits_intra_consumed'].
+                # Gate-2 round-2 F4 — stated detection convention: the
+                # live-set announcement at the Bonawitz share→payload
+                # boundary (which every client needs before it can compute
+                # its masked payload) doubles as the abort notice, so the
+                # surviving member's payload is never transmitted and never
+                # charged; the notice itself is charged here.
+                rc.downlink_bytes += survivors_count * BYTES_ABORT_NOTICE
                 rc.share_bytes += (len(cluster) * (len(cluster) - 1)
                                    * BYTES_PER_SHAMIR_SHARE)
                 rc.key_bits_intra += 3 * bits_per_mask
@@ -1431,11 +1474,27 @@ def run_multitriangle_fl(
                 if len(_shared) >= 2:
                     _phys = (_shared[0], _shared[1])
                 else:
-                    # Non-adjacent tree edge (should not occur on a
-                    # Delaunay dual) — fall back to the lexicographically
-                    # first cross pair; stated modeling choice.
-                    _phys = (min(int(v) for v in triangles[parent]),
-                             min(int(v) for v in triangles[child]))
+                    # Non-adjacent tree edge (does not occur on a Delaunay
+                    # dual, where parent and child share a side). Assign
+                    # the mask to the lexicographically first PHYSICAL
+                    # cross link between the two triangles — the candidate
+                    # set excludes self-loops and pairs with no
+                    # distillation hardware / key pool, which the previous
+                    # (min, min) fallback could silently produce on
+                    # vertex-sharing or disjoint triangles (Gate-2
+                    # round-2 F6).
+                    _cross = sorted(
+                        tuple(sorted((int(a), int(b))))
+                        for a in triangles[parent] for b in triangles[child]
+                        if int(a) != int(b)
+                        and tuple(sorted((int(a), int(b)))) in physical_edges)
+                    if not _cross:
+                        raise ValueError(
+                            f"Tree edge ({parent},{child}) connects "
+                            "triangles with no physical cross link; the "
+                            "single-hop tree mask cannot be keyed on this "
+                            "topology.")
+                    _phys = _cross[0]
                 rc.key_bits_per_edge[_phys] = (
                     rc.key_bits_per_edge.get(_phys, 0) + bits_per_mask)
                 mask = derive_modular_mask(n_params, edge_bits)
@@ -1459,8 +1518,10 @@ def run_multitriangle_fl(
             set_model_params(global_model, new_params)
 
         # ── Round communication/latency record (HANDOFF Phase 2) ──
-        rc.downlink_bytes = (len(client_updates) * n_params
-                             * BYTES_PER_MODEL_WORD)
+        # += not =: abort notices for threshold-failed clusters were
+        # already added in step 3 (Gate-2 round-2 F4).
+        rc.downlink_bytes += (len(client_updates) * n_params
+                              * BYTES_PER_MODEL_WORD)
         rc.local_compute_s = _local_compute_s
         # Masking = step-3 wall time minus the cluster-level aggregator
         # work (aggregator_time_s minus the tree stage, which ran after

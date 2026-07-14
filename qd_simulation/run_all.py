@@ -651,7 +651,8 @@ def run_experiment_4(quick=False):
     print("\n  Communication accounting (last repeat per mode; prng/dp/"
           "unmasked count payload+downlink only — faithful classical "
           "baselines land in Phase 4;\n  key-distillation classical "
-          "traffic, syndromes ≈0.20 B per secret bit, is excluded from "
+          "traffic, syndromes ≈0.20 bits (≈0.025 B) per secret bit, is "
+          "excluded from "
           "the FL-layer ledger by scope — see RoundComm):")
     for mode in modes:
         print_comm_summary(all_runs[mode][-1], label=mode)
