@@ -72,29 +72,6 @@ class ClinicalMLP(nn.Module):
         return self.net(x)
 
 
-class SmallCNN(nn.Module):
-    """Small CNN for CIFAR-10. ~150K parameters."""
-    def __init__(self, num_classes=10):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 64, 3, padding=1), nn.ReLU(),
-            nn.AdaptiveAvgPool2d(4),
-        )
-        self.classifier = nn.Sequential(
-            nn.Linear(64 * 4 * 4, 128), nn.ReLU(),
-            nn.Linear(128, num_classes),
-        )
-
-    def forward(self, x):
-        x = self.features(x)
-        x = x.view(x.size(0), -1)
-        return self.classifier(x)
-
-
 # ══════════════════════════════════════════════
 # DATASETS
 # ══════════════════════════════════════════════
@@ -1245,103 +1222,6 @@ def _chi2_distinguishable(payload_uint32, rng, alpha=0.001):
     chi2_stat, p_value = chisquare(counts, [expected] * 256)
     return p_value < alpha
 
-
-# ══════════════════════════════════════════════
-# GRADIENT INVERSION ATTACK (Geiping 2020)
-# ══════════════════════════════════════════════
-
-def gradient_inversion_attack(
-    model, true_gradient, true_labels, input_shape,
-    n_iterations=3000, lr=0.1, device='cpu'
-):
-    """Reconstruct training data from gradient using cosine similarity optimization.
-
-    Based on Geiping et al. "Inverting Gradients" (NeurIPS 2020).
-
-    Args:
-        model: The model whose gradient was computed.
-        true_gradient: The gradient to invert (list of tensors per param).
-        true_labels: Known labels (assumed known in the attack).
-        input_shape: Shape of input data (e.g., (1, 3, 32, 32) for CIFAR).
-        n_iterations: Attack optimization iterations.
-
-    Returns:
-        reconstructed: Reconstructed input tensor.
-        losses: Attack loss per iteration.
-    """
-    model.eval()
-    criterion = nn.CrossEntropyLoss()
-
-    # Initialize random dummy input
-    dummy_input = torch.randn(input_shape, requires_grad=True, device=device)
-    optimizer = optim.Adam([dummy_input], lr=lr)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, n_iterations)
-
-    attack_losses = []
-
-    for i in range(n_iterations):
-        optimizer.zero_grad()
-        model.zero_grad()
-
-        dummy_output = model(dummy_input)
-        dummy_loss = criterion(dummy_output, true_labels.to(device))
-        dummy_grad = torch.autograd.grad(dummy_loss, model.parameters(), create_graph=True)
-
-        # Cosine similarity loss between true and dummy gradients
-        cos_loss = 0
-        for dg, tg in zip(dummy_grad, true_gradient):
-            cos_sim = torch.nn.functional.cosine_similarity(
-                dg.flatten(), tg.flatten(), dim=0
-            )
-            cos_loss -= cos_sim  # Maximize similarity = minimize negative
-
-        # Total variation regularization
-        if len(input_shape) == 4 and input_shape[2] > 1:
-            tv_loss = (
-                torch.sum(torch.abs(dummy_input[:, :, 1:, :] - dummy_input[:, :, :-1, :])) +
-                torch.sum(torch.abs(dummy_input[:, :, :, 1:] - dummy_input[:, :, :, :-1]))
-            ) * 1e-4
-        else:
-            tv_loss = 0
-
-        total_loss = cos_loss + tv_loss
-        total_loss.backward()
-        optimizer.step()
-        scheduler.step()
-        attack_losses.append(cos_loss.item())
-
-    return dummy_input.detach(), attack_losses
-
-
-def compute_gradient_for_attack(model, data, labels, device='cpu'):
-    """Compute per-sample gradient for the attack."""
-    model.eval()
-    model.zero_grad()
-    criterion = nn.CrossEntropyLoss()
-    data, labels = data.to(device), labels.to(device)
-    output = model(data)
-    loss = criterion(output, labels)
-    gradients = torch.autograd.grad(loss, model.parameters())
-    return [g.detach().clone() for g in gradients]
-
-
-def mask_gradient_for_attack(gradients, mask_tensor):
-    """Apply mask to gradient (simulating what an eavesdropper sees)."""
-    flat_grad = torch.cat([g.flatten() for g in gradients])
-    masked_flat = flat_grad + mask_tensor[:len(flat_grad)]
-    # Reshape back
-    masked_grads = []
-    offset = 0
-    for g in gradients:
-        n = g.numel()
-        masked_grads.append(masked_flat[offset:offset+n].view(g.shape))
-        offset += n
-    return masked_grads
-
-
-# ══════════════════════════════════════════════
-# MULTI-TRIANGLE FEDERATED LEARNING
-# ══════════════════════════════════════════════
 
 def define_triangle_topology(num_clients):
     """Define triangle topologies for different client counts.

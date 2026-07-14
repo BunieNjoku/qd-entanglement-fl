@@ -1536,8 +1536,8 @@ def run_experiment_7(quick=False):
     ax2.text(cap_q, ax2.get_ylim()[0] if ax2.get_ylim()[0] > 0 else 1,
              ' 0.84-code capacity', fontsize=6, color='gray', rotation=90,
              va='bottom')
-    for ref, lbl in [(50, '50K (ClinicalMLP)'),
-                      (150, '150K (SmallCNN)'),
+    for ref, lbl in [(29, '29K (ClinicalMLP)'),
+                      (150, '150K params'),
                       (1000, '1M params')]:
         ax2.axhline(y=ref, color='gray', linestyle=':', alpha=0.5)
         ax2.text(qbers[0], ref, lbl, fontsize=7, color='gray', va='bottom')
