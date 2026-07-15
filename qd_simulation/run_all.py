@@ -2334,9 +2334,217 @@ def run_experiment_10(quick=False):
     }
 
 
+def run_experiment_12(quick=False):
+    """SOTA comparison: this system vs faithful Bonawitz-DH and
+    Flamingo-PRF classical baselines (HANDOFF 4.1-4.3).
+
+    All three share the same modular masking, payload/self-mask wire
+    format, and FL-layer byte scoping; they differ only in pairwise-mask
+    source and dropout-recovery mechanism (see modules/m7_baselines.py).
+    Compared on: per-round bytes by phase, dropout recovery cost (bytes +
+    aggregator compute), scaling in the vector dimension d and client
+    count n, and assumption class / HNDL exposure. Systems results that
+    depend on the quantum key rate are reported at BOTH operating points.
+
+    HONEST expected result (HANDOFF 4.1): this system is SLIGHTLY WORSE on
+    recovery communication (a one-time pad has no compact seed, so the
+    pairwise reveal is n_params words, not one scalar) and it alone pays a
+    key-distillation latency, in exchange for unconditional freshness and
+    HNDL immunity of the pairwise leg. The baselines are NOT tuned to lose.
+    """
+    print("\n" + "="*70)
+    print("EXPERIMENT 12: SOTA comparison — this system vs Bonawitz / "
+          "Flamingo")
+    print("="*70)
+
+    import torch
+    from modules.m4_federated_learning import ClinicalMLP, load_clinical_data
+    from modules.m7_baselines import (
+        run_entangled, run_bonawitz, run_flamingo)
+
+    # ── Real gradients at the ClinicalMLP scale (28,866 params) ──
+    client_data, test_data, input_dim = load_clinical_data(
+        6, rng_seed=42, dirichlet_alpha=FL.get('dirichlet_alpha', 0.5))
+    torch.manual_seed(42)
+    model = ClinicalMLP(input_dim=input_dim, hidden=128)
+    n_params = sum(p.numel() for p in model.parameters())
+    # One representative cluster of 4 clients (a super-triangle), one drop.
+    cluster = [0, 1, 2, 3]
+    rng = np.random.default_rng(42)
+    grads = {}
+    crit = torch.nn.CrossEntropyLoss()
+    for c in cluster:
+        xb, yb = client_data[c][:][0], client_data[c][:][1]
+        model.zero_grad()
+        crit(model(xb), yb.long()).backward()
+        grads[c] = torch.cat([p.grad.flatten() for p in model.parameters()])
+    bpm = n_params * 32
+    pool = rng.integers(0, 2, size=len(cluster) * (len(cluster) - 1) // 2 * bpm,
+                        dtype=np.int8)
+
+    def run_all_three(dropouts):
+        ae, ce = run_entangled({c: g.clone() for c, g in grads.items()},
+                               cluster, dropouts, pool, np.random.default_rng(1))
+        ab, cb = run_bonawitz({c: g.clone() for c, g in grads.items()},
+                              cluster, dropouts, np.random.default_rng(1))
+        af, cf = run_flamingo({c: g.clone() for c, g in grads.items()},
+                              cluster, dropouts, 3, np.random.default_rng(1))
+        assert np.array_equal(ae, ab) and np.array_equal(ab, af), \
+            "protocols disagree on the recovered aggregate"
+        return {"entangled": ce, "bonawitz": cb, "flamingo": cf}
+
+    # ── (A) Per-round cost with 1 dropped client ──
+    costs1 = run_all_three({2})
+    print(f"\n  (A) Per-round cost, 4-client cluster, ClinicalMLP "
+          f"(n_params={n_params:,}), 1 dropout:")
+    print(f"  {'protocol':>10} {'payload/cl':>11} {'recovery B':>11} "
+          f"{'agg PRG exp':>12} {'agg recov ms':>13} {'assumption':>14} "
+          f"{'HNDL-imm':>9}")
+    for name in ["entangled", "bonawitz", "flamingo"]:
+        c = costs1[name]
+        print(f"  {name:>10} "
+              f"{c.payload_bytes // max(c.n_clients - c.n_dropped, 1):>11,} "
+              f"{c.recovery_bytes:>11,} {c.aggregator_prg_expansions:>12} "
+              f"{1000*c.aggregator_recovery_s:>13.2f} "
+              f"{c.assumption_class:>14} {str(c.hndl_immune_pairwise_leg):>9}")
+    ratio = costs1["entangled"].recovery_bytes / max(
+        costs1["flamingo"].recovery_bytes, 1)
+    print(f"    → this system's recovery traffic is {ratio:,.0f}x the "
+          f"seed-based baselines' (= n_params: a one-time pad has no\n"
+          f"      compact seed to send). Steady-state (no-dropout) bytes "
+          f"are identical across all three.")
+
+    # ── (B) Recovery-byte scaling in the vector dimension d ──
+    dims = [128, 1024, 8192, n_params]
+    print("\n  (B) Dropout-recovery bytes vs vector dimension d "
+          "(1 dropout, 3 survivors):")
+    print(f"  {'d':>8} {'entangled':>12} {'bonawitz':>10} {'flamingo':>10}")
+    scaling = {}
+    for d in dims:
+        gd = {c: torch.zeros(d) for c in cluster}
+        pd = rng.integers(0, 2, size=6 * d * 32, dtype=np.int8)
+        _, ced = run_entangled({c: g.clone() for c, g in gd.items()},
+                               cluster, {2}, pd, np.random.default_rng(1))
+        _, cbd = run_bonawitz({c: g.clone() for c, g in gd.items()},
+                              cluster, {2}, np.random.default_rng(1))
+        _, cfd = run_flamingo({c: g.clone() for c, g in gd.items()},
+                              cluster, {2}, 3, np.random.default_rng(1))
+        scaling[d] = (ced.recovery_bytes, cbd.recovery_bytes, cfd.recovery_bytes)
+        print(f"  {d:>8} {ced.recovery_bytes:>12,} {cbd.recovery_bytes:>10,} "
+              f"{cfd.recovery_bytes:>10,}")
+    print("    → this system O(d); both baselines O(1) in d (scalar seed/"
+          "shares). The gap is the price of\n      the one-time pad, and "
+          "it grows with model size.")
+
+    # ── (C) Key-supply latency this system pays and the baselines do NOT,
+    # at BOTH operating points (HANDOFF 4.3) ──
+    op = OPERATING_POINT['secret_rate_bps']
+    proj = PROJECTED_OPERATING_POINT['secret_rate_bps']
+    # One pairwise pool per cluster edge per round: bits_per_mask = n_params*32.
+    key_wait_op = bpm / op
+    key_wait_proj = bpm / proj
+    print("\n  (C) Key-supply latency (this system only; baselines use "
+          "DH/PRF, no distilled key):")
+    print(f"      pairwise pool per edge/round = {bpm:,} bits")
+    print(f"      modeled operating point ({op/1000:.1f} kbit/s): "
+          f"key_wait {key_wait_op:.1f} s/edge")
+    print(f"      projected 1 MHz-class ({proj/1000:.0f} kbit/s, "
+          f"hypothetical): key_wait {key_wait_proj:.1f} s/edge")
+    print("      Bonawitz/Flamingo pay 0 s here — computational key setup "
+          "is ~instant. This latency is\n      the operational cost of "
+          "the unconditional-freshness guarantee.")
+
+    # ── (D) Matched-metric table for systems that cannot be re-run
+    # (HANDOFF 4.2). Sourced from the underlying report's related-work
+    # analysis; arXiv ids carried for provenance. ──
+    print("\n  (D) Matched-metric comparison (columns matched; external "
+          "rows from published descriptions):")
+    hdr = ["system", "key source", "keys on channel?", "server",
+           "dropout recovery", "assumption", "HNDL-immune leg"]
+    rows = [
+        ["This system", "source-model distilled (entangled)", "no (local)",
+         "honest-but-curious", "reveal pairwise bits (O(d))",
+         "unconditional", "yes (pairwise)"],
+        ["Bonawitz SecAgg (CCS'17)", "ephemeral DH + PRG", "yes (DH msgs)",
+         "honest-but-curious", "Shamir DH secret + recompute",
+         "computational", "no"],
+        ["Flamingo (S&P'23)", "per-round PRF seed", "yes (enc. seeds)",
+         "honest-but-curious", "reveal PRF seed (O(1))",
+         "computational", "no"],
+        ["QuNetQFL (2501.12709)", "MDI-QKD via relay", "yes (transmitted)",
+         "present", "not analyzed", "computational (QKD)", "n/a"],
+        ["6G QKD-FL (2603.15649)", "transmitted QKD keys", "yes (transmitted)",
+         "present", "not analyzed", "computational (QKD)", "n/a"],
+    ]
+    for r in [hdr] + rows:
+        print("      | " + " | ".join(f"{c:<34}" if i == 0 else f"{c:<20}"
+                                       for i, c in enumerate(r)) + " |")
+
+    # ── Plot: recovery-byte scaling in d (left) + assumption/HNDL and
+    # aggregator compute (right) ──
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    ds = sorted(scaling.keys())
+    ax1.loglog(ds, [scaling[d][0] for d in ds], 'o-', color=C['quantum'],
+               linewidth=2, label='this system (reveal bits, O(d))')
+    ax1.loglog(ds, [scaling[d][1] for d in ds], 's--', color=C['unmasked'],
+               linewidth=2, label='Bonawitz (Shamir DH scalar, O(1))')
+    ax1.loglog(ds, [scaling[d][2] for d in ds], '^:', color=C['dp'],
+               linewidth=2, label='Flamingo (PRF seed, O(1))')
+    ax1.axvline(x=n_params, color='gray', linestyle=':', alpha=0.6)
+    ax1.text(n_params, ax1.get_ylim()[0] * 2, ' ClinicalMLP', fontsize=6,
+             color='gray', rotation=90, va='bottom')
+    ax1.set_xlabel('Vector dimension d (params)')
+    ax1.set_ylabel('Dropout-recovery bytes (1 drop, 3 survivors)')
+    ax1.set_title('Recovery cost scales with d only for this system')
+    ax1.legend(fontsize=7)
+    ax1.grid(True, alpha=0.3, which='both')
+
+    names = ["entangled", "bonawitz", "flamingo"]
+    labels = ["this system", "Bonawitz", "Flamingo"]
+    cols = [C['quantum'], C['unmasked'], C['dp']]
+    ax2.bar(labels, [costs1[n].recovery_bytes / 1024 for n in names],
+            color=cols)
+    ax2.set_ylabel('Recovery bytes / dropout (KB, ClinicalMLP)')
+    ax2.set_yscale('symlog')
+    for i, n in enumerate(names):
+        c = costs1[n]
+        ax2.text(i, c.recovery_bytes / 1024,
+                 f'\n{c.assumption_class}\n'
+                 f'{"HNDL-immune" if c.hndl_immune_pairwise_leg else "HNDL-exposed"}\n'
+                 f'{c.aggregator_prg_expansions} PRG exp',
+                 ha='center', va='bottom', fontsize=6)
+    ax2.set_title('The trade: bytes vs assumption class + HNDL')
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    fig.suptitle('Experiment 12: SOTA comparison — this system pays O(d) '
+                 'recovery bytes + key latency\nfor unconditional freshness '
+                 '& HNDL immunity; baselines are cheaper but computational',
+                 fontsize=10, fontweight='bold')
+    fig.tight_layout()
+    save_fig(fig, 'exp12_sota_comparison')
+
+    print("\n  ✓ Experiment 12 complete.")
+    return {
+        "per_round_1drop": {n: {
+            "payload_per_client": costs1[n].payload_bytes
+            // max(costs1[n].n_clients - costs1[n].n_dropped, 1),
+            "recovery_bytes": costs1[n].recovery_bytes,
+            "aggregator_prg_expansions": costs1[n].aggregator_prg_expansions,
+            "aggregator_recovery_ms": 1000 * costs1[n].aggregator_recovery_s,
+            "assumption_class": costs1[n].assumption_class,
+            "hndl_immune_pairwise_leg": costs1[n].hndl_immune_pairwise_leg}
+            for n in ["entangled", "bonawitz", "flamingo"]},
+        "recovery_bytes_vs_dim": {str(d): {"entangled": v[0],
+                                           "bonawitz": v[1], "flamingo": v[2]}
+                                  for d, v in scaling.items()},
+        "key_wait_s": {"modeled": key_wait_op, "projected": key_wait_proj},
+        "n_params": n_params,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='QD-Entanglement Simulation Runner')
-    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 12)),
+    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 13)),
                         help='Experiment numbers to run (default: all 1-8)')
     parser.add_argument('--quick', action='store_true',
                         help='Quick mode with reduced parameter sweeps')
@@ -2365,6 +2573,7 @@ def main():
         9: run_experiment_9,
         10: run_experiment_10,
         11: run_experiment_11,
+        12: run_experiment_12,
     }
 
     for exp_num in sorted(args.exp):

@@ -60,6 +60,7 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 9 | **HNDL transcript attack** | Record everything, break all computational secrets later: classical arm 100% retro-recovered, entangled arm 0% (pairwise bits never transit a channel) |
 | 10 | Availability under source failure | Kill one node's source: edges continue at ~half rate from far endpoints (availability/fairness, not security) |
 | 11 | **Gradient inversion (real construction)** | Tabular DLG/iDLG: unmasked leaks (98% attr-infer), modular mask blocks (theorem), plaintext aggregate partially leaks (motivates DP-on-top) |
+| 12 | **SOTA comparison** | Faithful Bonawitz-DH + Flamingo-PRF baselines: ours pays O(d) recovery bytes + key latency for unconditional freshness & HNDL immunity (honest trade, baselines not strawmanned) |
 
 ## Assumptions
 
@@ -82,6 +83,7 @@ Results in `results/`:
 - `exp9_hndl_transcript.png` — HNDL retroactive-recovery comparison
 - `exp10_availability.png` — Availability under single-source failure
 - `exp11_gradient_inversion.png` — Gradient inversion on the real construction
+- `exp12_sota_comparison.png` — SOTA comparison vs Bonawitz and Flamingo baselines
 - `summary.json` — Numeric results
 
 ## Hardware Requirements
