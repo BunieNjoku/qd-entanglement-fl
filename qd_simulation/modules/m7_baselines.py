@@ -259,12 +259,20 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
     rec_s = time.perf_counter() - t0
 
     agg = _finish(cluster, dropouts, quant, self_masks, agg)
+    # Bonawitz uses PER-EXECUTION ephemeral DH (HANDOFF 4.1a); in a
+    # multi-round FL run each round is an execution, so each round
+    # redistributes n(n-1) Shamir shares of the fresh DH secrets IN
+    # ADDITION to the self-mask seed shares. Charging both is faithful —
+    # this per-round DH-setup share traffic is exactly the cost Flamingo
+    # was designed to avoid with its long-term-secret + PRF ratchet, and
+    # NOT counting it would undercount (flatter) Bonawitz (Gate-4 F-min1).
     cost = BaselineCost(
         protocol="bonawitz", n_clients=n, n_params=n_params,
         n_dropped=len(dropouts),
         payload_bytes=len(survivors) * n_params * BYTES_PER_MASKED_WORD,
         selfmask_bytes=len(survivors) * BYTES_PER_SELFMASK_SEED,
-        share_bytes=n * (n - 1) * BYTES_PER_SHAMIR_SHARE,
+        share_bytes=(n * (n - 1) * BYTES_PER_SHAMIR_SHARE       # self-mask
+                     + n * (n - 1) * BYTES_PER_DH_SHARE),       # DH secret
         recovery_bytes=recovery_bytes,
         aggregator_prg_expansions=prg_expansions,
         aggregator_recovery_s=rec_s,
