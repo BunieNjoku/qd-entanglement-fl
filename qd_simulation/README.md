@@ -18,7 +18,7 @@ This is **not** a QKD system. The protocol assumes:
 
 Under this model the protocol extracts **per-round shared random bits** from
 pairwise Bell pairs between cluster members. Each round consumes fresh bits.
-This is closer to the randomness-expansion framework than to QKD.
+This is source-model secret-key agreement (Maurer 1993; Ahlswede–Csiszár 1993), not QKD.
 
 ## Core construction
 
@@ -59,7 +59,7 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 8 | Multi-triangle FL | Two-level hierarchical Bonawitz at 3/6/9/12 client scales |
 | 9 | **HNDL transcript attack** | Record everything, break all computational secrets later: classical arm 100% retro-recovered, entangled arm 0% (pairwise bits never transit a channel) |
 | 10 | Availability under source failure | Kill one node's source: edges continue at ~half rate from far endpoints (availability/fairness, not security) |
-| 11 | **Gradient inversion (real construction)** | Tabular DLG/iDLG: unmasked leaks (98% attr-infer), modular mask blocks (theorem), plaintext aggregate partially leaks (motivates DP-on-top) |
+| 11 | **Gradient inversion (real construction)** | Tabular DLG/iDLG: unmasked leaks (100% attr-infer), modular mask blocks (theorem), plaintext aggregate partially leaks (motivates DP-on-top) |
 | 12 | **SOTA comparison** | Faithful Bonawitz-DH + Flamingo-PRF baselines: ours pays O(d) recovery bytes + key latency for unconditional freshness & HNDL immunity (honest trade, baselines not strawmanned) |
 
 ## Assumptions
