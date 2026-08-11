@@ -4,8 +4,8 @@ Module 7: Faithful classical secure-aggregation baselines (HANDOFF 4.1).
 Implements the two classical protocols the secure-aggregation literature
 compares against, at the level of fidelity that determines the honest
 comparison axes (per-client bytes, aggregator recovery compute, dropout
-recovery cost, assumption class, HNDL exposure). All three protocols —
-this system and the two baselines — share the SAME Bonawitz-style
+recovery cost, assumption class, HNDL exposure). All three protocols -
+this system and the two baselines - share the SAME Bonawitz-style
 modular masking over Z_2^32, the SAME payload/self-mask wire format, and
 the SAME FL-layer byte scoping (m4's BYTES_PER_* constants), so the
 columns are matched. They differ ONLY in the pairwise-mask SOURCE and
@@ -15,7 +15,7 @@ the DROPOUT-RECOVERY mechanism:
       pairwise mask = single-use source-model distilled bits (a true
       one-time pad; no compact seed). Dropout recovery on the pairwise
       leg: each survivor REVEALS its full pairwise bit-string with the
-      dropped client (n_params x 4 B) — there is no seed to send, which
+      dropped client (n_params x 4 B) - there is no seed to send, which
       is exactly the cost of unconditional freshness. Assumption class:
       unconditional. HNDL: the pairwise leg is immune (bits never transit
       a channel; reveals are single-use).
@@ -37,7 +37,7 @@ the DROPOUT-RECOVERY mechanism:
       scalar) for the dropped partner; the aggregator PRG-expands and
       cancels. Same reveal-based logic as this system, but the revealed
       object is a computational SEED (4 B) not the mask itself, so
-      recovery bytes are tiny — at the price of computational freshness
+      recovery bytes are tiny - at the price of computational freshness
       (a future break of the PRF/long-term secret reopens the transcript,
       cf. exp9). Assumption class: computational.
 
@@ -47,7 +47,7 @@ payloads do. Pairwise masks between two survivors cancel; the pairwise
 mask between a survivor and a dropped client is uncancelled and must be
 removed by the protocol's recovery mechanism. Each survivor's self-mask
 is removed via a Shamir-reconstructed seed (the Bonawitz double-mask,
-reconstructed from a threshold of OTHER survivors' shares — charged
+reconstructed from a threshold of OTHER survivors' shares - charged
 identically in all three arms so it does not bias the comparison).
 
 Each round is really executed and the recovered aggregate is asserted
@@ -120,7 +120,7 @@ def _common_setup(gradients, cluster, rng):
     quant = {c: quantize_gradient(gradients[c]) for c in cluster}
     self_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME)) for c in cluster}
     self_masks = {c: _prg(self_seeds[c], n_params) for c in cluster}
-    # Self-mask seeds are Shamir-shared (threshold 2) in ALL arms — the
+    # Self-mask seeds are Shamir-shared (threshold 2) in ALL arms - the
     # double-mask, charged identically so it does not bias the comparison.
     shares = {c: shamir_split(self_seeds[c], n, 2,
                               np.random.default_rng(self_seeds[c] + 1))
@@ -208,8 +208,8 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
 
     # Per-execution ephemeral DH: model each client's secret scalar and
     # the pairwise shared secret as a deterministic function of the two
-    # (symmetric), then PRG-expand. (We model DH agreement's RESULT — a
-    # shared per-pair scalar — not the group operation; the comparison
+    # (symmetric), then PRG-expand. (We model DH agreement's RESULT - a
+    # shared per-pair scalar - not the group operation; the comparison
     # axes depend on the recovery mechanism, not the DH group.)
     dh_secret = {c: int(rng.integers(1, _SHAMIR_PRIME)) for c in cluster}
     dh_shares = {c: shamir_split(dh_secret[c], n, 2,
@@ -262,7 +262,7 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
     # Bonawitz uses PER-EXECUTION ephemeral DH (HANDOFF 4.1a); in a
     # multi-round FL run each round is an execution, so each round
     # redistributes n(n-1) Shamir shares of the fresh DH secrets IN
-    # ADDITION to the self-mask seed shares. Charging both is faithful —
+    # ADDITION to the self-mask seed shares. Charging both is faithful -
     # this per-round DH-setup share traffic is exactly the cost Flamingo
     # was designed to avoid with its long-term-secret + PRF ratchet, and
     # NOT counting it would undercount (flatter) Bonawitz (Gate-4 F-min1).

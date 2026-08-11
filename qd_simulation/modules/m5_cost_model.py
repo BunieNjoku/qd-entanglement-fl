@@ -102,7 +102,7 @@ def compute_opex_annual(n_triangles, n_nodes, params=None):
     if params is None:
         from config import COST as params
 
-    # Power — 1 cryostat per node (dual-QD cryostats use ~same power)
+    # Power - 1 cryostat per node (dual-QD cryostats use ~same power)
     power_cryostats = n_nodes * params["cryostat_power_w"]
     # SPADs: approximate total from Option B formula
     n_qds = n_triangles * 3

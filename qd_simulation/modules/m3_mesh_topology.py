@@ -176,7 +176,7 @@ def compute_max_mesh_size(
 
     bits_per_param defaults to config.BITS_PER_PARAM (32: the int32 modular
     masking ring the implementation actually uses; 16-bit BF16-style
-    accounting is not implementable against QUANT_SCALE = 2^20 — see
+    accounting is not implementable against QUANT_SCALE = 2^20 - see
     config.py).
 
     Returns:
@@ -194,17 +194,16 @@ def compute_max_mesh_size(
 
     if t_per_level <= 0 or training_round_s <= 0:
         return 0, 0
-    # Infeasible: a single level's mask-generation time already exceeds the
-    # whole round period. The previous max(1, ...) clamp converted this into
-    # a fabricated "2-node feasible mesh" — at honest rates most of exp3b's
-    # modeled panel was that artifact (Gate-1 F2). Report 0.
+    # Infeasible: a single level's mask-generation time already exceeds
+    # the whole round period. Report 0 rather than clamping to a fake
+    # 2-node mesh (Gate-1 F2).
     if t_per_level > training_round_s:
         return 0, 0
 
     max_depth = max(1, int(training_round_s / t_per_level))
     # NOTE: max_triangles ~ depth^2 is a heuristic motivated by planar Delaunay
     # diameter scaling on uniformly placed points (Euclidean planar mesh
-    # diameter grows as sqrt(N)). Not a proved bound — adversarial placements
+    # diameter grows as sqrt(N)). Not a proved bound - adversarial placements
     # or non-Euclidean topologies will deviate. exp3 measures the empirical
     # exponent over random placements.
     max_triangles = max_depth ** 2

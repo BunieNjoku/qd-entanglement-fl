@@ -17,7 +17,7 @@ that the prepared state is genuinely entangled rather than degraded or
 mis-set (source fault / drift). Established concept: an ENTANGLEMENT
 WITNESS (Horodecki 1996; Terhal 2000) used as a calibration/QA diagnostic.
 It is not self-testing, not device-independent, and not an eavesdropper
-bound — there is no eavesdropper in the declared threat model
+bound - there is no eavesdropper in the declared threat model
 (source-model secret-key agreement).
 """
 import numpy as np
@@ -70,7 +70,7 @@ def compute_chsh_s(rho):
     where E(a,b) = P(same) - P(different)
 
     SIMULATION HONESTY NOTE: S is computed analytically from the programmed
-    density matrix, not estimated from sampled measurement statistics — so
+    density matrix, not estimated from sampled measurement statistics - so
     within this simulation the entanglement-witness check is tautological.
     A hardware implementation must estimate S from the Bell-test duty-cycle
     sample, with finite-statistics uncertainty.
@@ -124,7 +124,7 @@ def simulate_source(
     if rng is None:
         rng = np.random.default_rng(42)
 
-    # ── Step 1: Pair generation ──
+    # Step 1: Pair generation
     if n_pairs is None:
         n_pulses = int(source_rep_rate_hz * duration_s)
         n_emitted = rng.binomial(n_pulses, source_brightness)
@@ -135,7 +135,7 @@ def simulate_source(
     if n_emitted == 0:
         return SourceResult(0, 0, 0, 0, np.array([]), np.array([]), 0, 0, {})
 
-    # ── Step 2: Fiber transmission ──
+    # Step 2: Fiber transmission
     fiber_loss_db = fiber_loss_db_per_km * (fiber_length_m / 1000)
     fiber_transmission = 10 ** (-fiber_loss_db / 10)
 
@@ -163,7 +163,7 @@ def simulate_source(
     coincidence_mask = alice_detected & bob_detected
     n_true_coinc = int(np.sum(coincidence_mask))
 
-    # ── Step 3: Dark count accidentals ──
+    # Step 3: Dark count accidentals
     # Accidentals = dark counts at A coinciding with real detections at B and vice versa
     dark_rate_per_window = spad_dark_count_hz * (coincidence_window_ns * 1e-9)
     n_accidental = rng.poisson(
@@ -171,7 +171,7 @@ def simulate_source(
     )
     n_accidental = min(n_accidental, n_true_coinc // 2)  # Cap at reasonable fraction
 
-    # ── Step 4: Polarization measurement ──
+    # Step 4: Polarization measurement
     rho = werner_state(fidelity)
 
     # Fiber birefringence: random rotation angle
@@ -219,7 +219,7 @@ def simulate_source(
         alice_bits = alice_bits[perm]
         bob_bits = bob_bits[perm]
 
-    # ── Step 5: Compute metrics ──
+    # Step 5: Compute metrics
     qber = float(np.mean(alice_bits != bob_bits)) if n_total > 0 else 0
     coincidence_rate = n_total / duration_s if duration_s > 0 else n_total
     accidental_ratio = n_accidental / max(n_total, 1)
@@ -281,9 +281,7 @@ def compute_coincidence_rate(
         return source_rep_rate_hz * source_brightness * link_eff ** 2
 
 
-# ══════════════════════════════════════════════
 # SYMMETRIC BEAMSPLITTER-MULTIPLEXED EDGE KEYING
-# ══════════════════════════════════════════════
 #
 # Architecture (matches the cost model: 1 QD + 1 two-way optical switch per
 # node per triangle membership):
@@ -293,7 +291,7 @@ def compute_coincidence_rate(
 #   a two-way optical switch (beamsplitter / Pockels cell) to ONE of the node's
 #   two neighbours, chosen at random per pair.
 #
-# Consequence — availability and role symmetry (under the trusted-source
+# Consequence - availability and role symmetry (under the trusted-source
 # model this is an availability/fairness property, NOT a security mechanism):
 #
 #   Edge (i,j) accumulates shared bits from node i's source (on pairs its
@@ -309,7 +307,7 @@ def compute_coincidence_rate(
 #
 #   A 50/50 switch sends ~R/2 of each source's pairs toward each neighbour.
 #   Edge (i,j) receives ~R_i/2 from i plus ~R_j/2 from j. For homogeneous
-#   nodes this nets to ~R per edge — the two-way keying compensates for the
+#   nodes this nets to ~R per edge - the two-way keying compensates for the
 #   multiplexing split. Bits from the two directions are CONCATENATED into
 #   the edge's pool (they are independent Bell-pair measurements on the same
 #   node pair, so both endpoints hold both halves after reconciliation).
@@ -364,7 +362,7 @@ def simulate_symmetric_edge(
 ):
     """Simulate one triangle edge keyed from BOTH endpoints.
 
-    Runs the source model twice — once for each endpoint's QD — with each
+    Runs the source model twice - once for each endpoint's QD - with each
     contributing `switch_split` of its pairs to this edge. The two resulting
     bit strings are concatenated into the edge's shared pool.
 

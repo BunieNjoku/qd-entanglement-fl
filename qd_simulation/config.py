@@ -1,5 +1,5 @@
 """
-Entanglement-Based Shared Randomness for FL — Configuration.
+Entanglement-Based Shared Randomness for FL - Configuration.
 
 Parameters anchored to published experimental data where possible.
 See system_description.md for source citations.
@@ -7,13 +7,11 @@ See system_description.md for source citations.
 import os
 import numpy as np
 
-# ── Output directories ──
+# Output directories
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# ══════════════════════════════════════════════
 # MODULE 1: QUANTUM SOURCE PARAMETERS
-# ══════════════════════════════════════════════
 QUANTUM = {
     "fidelity": 0.987,              # Schimpf 2021
     "fidelity_sweep": np.linspace(0.90, 0.99, 10),
@@ -45,14 +43,12 @@ QUANTUM = {
     "analytic_qber_birefringence_allowance": 0.001,
     "fiber_birefringence_rad_per_km_per_C": 0.01,  # Compensated SMF (pol. controller)
     "temperature_variation_C": 2.0,
-    # CHSH measurement angles (radians) — optimal for |Φ+⟩
+    # CHSH measurement angles (radians) - optimal for |Φ+⟩
     "chsh_angles_alice": [0, np.pi/4],           # 0°, 45°
     "chsh_angles_bob": [np.pi/8, 3*np.pi/8],     # 22.5°, 67.5°
 }
 
-# ══════════════════════════════════════════════
 # MODULE 2: POST-PROCESSING PARAMETERS
-# ══════════════════════════════════════════════
 POST_PROC = {
     "block_size": 50000,            # Bits per EC block
     "block_size_sweep": [10000, 25000, 50000, 100000],
@@ -68,9 +64,7 @@ POST_PROC = {
     "bell_test_duty_cycle": 0.02,  # 2% overhead
 }
 
-# ══════════════════════════════════════════════
-# MASKING WIDTH — single source of truth
-# ══════════════════════════════════════════════
+# MASKING WIDTH - single source of truth
 # The implementation masks int32-quantized gradients in the modular ring
 # Z_{2^32} (m4_federated_learning: QUANT_SCALE = 2^20 → 20 fractional bits
 # plus sign and dynamic range). Every throughput, cost, and feasibility
@@ -78,7 +72,7 @@ POST_PROC = {
 # per edge per round. A 16-bit (BF16-style) payload is NOT implementable
 # against this construction: QUANT_SCALE = 2^20 does not fit a 16-bit ring.
 # Lowering this constant would require changing the masking ring and
-# QUANT_SCALE in modules/m4_federated_learning.py — never change it in
+# QUANT_SCALE in modules/m4_federated_learning.py - never change it in
 # isolation.
 BITS_PER_PARAM = 32
 
@@ -87,14 +81,12 @@ BITS_PER_PARAM = 32
 # round-latency decomposition both consume this).
 CLASSICAL_LINK_BPS = 1e9  # 1 Gbps campus LAN reference
 
-# ══════════════════════════════════════════════
-# DERIVED OPERATING POINTS — single source of truth for key rates
-# ══════════════════════════════════════════════
+# DERIVED OPERATING POINTS - single source of truth for key rates
 # The per-edge secret rate is DERIVED at import time from the m1 device
 # model and the m2 post-processing waterfall, evaluated at the
 # QUANTUM/POST_PROC parameters above. It moves automatically if the physics
 # config changes. Experiments must import OPERATING_POINT (modeled device)
-# or PROJECTED_OPERATING_POINT (labeled hypothetical) — never hardcode a
+# or PROJECTED_OPERATING_POINT (labeled hypothetical) - never hardcode a
 # rate literal.
 
 
@@ -126,7 +118,7 @@ def _derive_operating_point():
     the binding per-round constraint is the per-edge pool-fill time.
     QBER: m1.compute_qber_analytical at the config fidelity/extinction.
     Experiment 1 [1d] cross-validates both with Monte Carlo (15,355 Hz,
-    QBER 0.0068 at seed 7 vs analytic ≈15.6 kHz, 0.0085 — the MC includes
+    QBER 0.0068 at seed 7 vs analytic ≈15.6 kHz, 0.0085 - the MC includes
     sampled accidentals/dark counts; agreement within sampling noise, and
     the analytic QBER is the conservative one).
 
@@ -170,19 +162,19 @@ def _derive_operating_point():
         # simulation-grade pending EC validation.
         "ec_model_caveat": "EC modeled by statistical placeholder "
                            "(m2.fast_ec_simulate); BP-decoder validation "
-                           "pending — see exp2d",
+                           "pending - see exp2d",
     }
 
 
 def _derive_projected_operating_point():
-    """HYPOTHETICAL 1 MHz-class source — NOT produced by the m1 device model.
+    """HYPOTHETICAL 1 MHz-class source - NOT produced by the m1 device model.
 
     Retained as the explicitly-labeled optimistic projection: raw
-    coincidence rate 1 MHz at QBER 2% — the assumption formerly smuggled
+    coincidence rate 1 MHz at QBER 2% - the assumption formerly smuggled
     into exps 2/3/6/8 as a hardcoded 675000 bps literal. (That legacy
     literal additionally baked in the superseded pre-GLLP waterfall; run
     through the corrected waterfall, the same 1 MHz / 2% assumption yields
-    ≈0.73 Mbps — ≈0.81 Mbps before charging the EC tier model's 10% FER,
+    ≈0.73 Mbps - ≈0.81 Mbps before charging the EC tier model's 10% FER,
     which applies because 2% QBER sits in the declared rate-0.84 code's
     degraded band, 0.8×capacity ≤ q < capacity.) Sources of this
     brightness class are plausible for state-of-the-art entangled-pair
@@ -200,32 +192,28 @@ def _derive_projected_operating_point():
         "secret_rate_bps": wf["final_secure_rate"],
         "tagged_fraction": wf["tagged_fraction"],
         "waterfall": wf,
-        # Same honesty caveat as OPERATING_POINT — and it bites harder
+        # Same honesty caveat as OPERATING_POINT - and it bites harder
         # here: at 2% QBER the declared rate-0.84 code sits in the tier
         # model's DEGRADED band, so this point is charged FER 0.10
         # (Gate-1 round-2 finding 1).
         "ec_model_caveat": "EC modeled by statistical placeholder "
                            "(m2.fast_ec_simulate tier model; FER 0.10 at "
-                           "this QBER — the declared rate-0.84 code is in "
+                           "this QBER - the declared rate-0.84 code is in "
                            "its degraded band at 2%); BP-decoder "
-                           "validation pending — see exp2d",
+                           "validation pending - see exp2d",
     }
 
 
 OPERATING_POINT = _derive_operating_point()
 PROJECTED_OPERATING_POINT = _derive_projected_operating_point()
 
-# ══════════════════════════════════════════════
 # MODULE 3: MESH TOPOLOGY PARAMETERS
-# ══════════════════════════════════════════════
 MESH = {
     "node_counts_sweep": [3, 6, 9, 12, 18, 24, 30, 40, 50],
     "campus_size_m": 2000,          # 2km × 2km campus
 }
 
-# ══════════════════════════════════════════════
 # MODULE 4: FEDERATED LEARNING PARAMETERS
-# ══════════════════════════════════════════════
 FL = {
     "num_clients": 3,               # Matches 1-triangle default
     "num_clients_sweep": [3, 6, 9, 12],
@@ -249,9 +237,7 @@ FL = {
     "cifar_local_epochs": 1,
 }
 
-# ══════════════════════════════════════════════
 # MODULE 5: COST MODEL PARAMETERS
-# ══════════════════════════════════════════════
 COST = {
     # CAPEX (EUR, near-term pricing)
     # Option B co-located: 1 QD per triangle membership per node.
@@ -285,9 +271,7 @@ COST = {
     "dp_cost_per_site": 0,
 }
 
-# ══════════════════════════════════════════════
 # VISUALIZATION
-# ══════════════════════════════════════════════
 VIZ = {
     # IEEE single-column = 3.5in, double-column = 7.16in
     # Use double-column width for most plots; single for compact ones

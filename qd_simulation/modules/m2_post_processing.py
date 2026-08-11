@@ -20,7 +20,7 @@ Shared-bit rate:
                    × (1 - FER) × (1 - bell_duty),
 where the reconciliation leakage is the LARGER of the declared fixed code's
 syndrome fraction (1 - R_code: a rate-0.84 LDPC leaks 16% of every block
-regardless of QBER — which is what fast_ec_simulate actually charges) and
+regardless of QBER - which is what fast_ec_simulate actually charges) and
 the rate-adaptive envelope beta*H(q) with beta ≈ 1.15 (the leakage of an
 efficiency-beta code family tuned to q, needed once q exceeds the fixed
 code's design point). The crossover sits at the code's design QBER (~2%
@@ -29,7 +29,7 @@ and never more correction capability than the beta envelope allows.
 D_tag is the GLLP-style tagged fraction: multi-pair emissions that a
 passive beamsplitter could copy WITHOUT disturbance (Gottesman, Lo,
 Lutkenhaus & Preskill 2004). Tagged bits are treated as known to a
-transcript recorder and removed in PA — this is what supports the
+transcript recorder and removed in PA - this is what supports the
 harvest-now-decrypt-later immunity claim. There is NO eavesdropper term:
 secrecy is claimed against observers of the public transcript only.
 """
@@ -231,7 +231,7 @@ def fast_ec_simulate(alice_bits, bob_bits, qber_estimate, code_rate=0.84,
             beta = 1.0
 
         # Frame success probability (modeled from LDPC performance curves)
-        # via the shared tier model — a SINGLE definition, also used by
+        # via the shared tier model - a SINGLE definition, also used by
         # compute_rate_waterfall, so rate budgets can never disagree with
         # the block-level EC model (Gate-1 round-2 finding 1).
         frame_success = rng.random() < (
@@ -295,7 +295,7 @@ def estimate_capacity_qber(code_rate):
 
 def tier_frame_error_rate(qber, code_rate=0.84):
     """Frame-error rate of the declared fixed-rate code under the SAME
-    statistical tier model fast_ec_simulate uses (placeholder tiers — not
+    statistical tier model fast_ec_simulate uses (placeholder tiers - not
     density evolution; see that function's honesty note):
 
         q < 0.8 × capacity  →  FER 0.005
@@ -304,8 +304,8 @@ def tier_frame_error_rate(qber, code_rate=0.84):
 
     Single source of the tiers so the rate waterfall can never claim EC
     performance the block-level model doesn't deliver (Gate-1 round-2
-    finding 1: the old fixed 0.005 constant overstated the projected
-    operating point, which sits in the 0.10 band, by ~10%).
+    finding 1): the projected operating point sits in the 0.10 band, so a
+    flat 0.005 would overstate it by ~10%.
     """
     capacity_qber = estimate_capacity_qber(code_rate)
     if qber < capacity_qber * 0.8:
@@ -326,7 +326,7 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     waterfall consistent with the block-level EC model at every QBER.
 
     assume_rate_adapted=True computes the HYPOTHETICAL rate-adapted-family
-    envelope instead: leakage β·h(q) and design-band FER 0.005 — for
+    envelope instead: leakage β·h(q) and design-band FER 0.005 - for
     explicitly-labeled comparison curves only, never for headline numbers
     (the repo implements one fixed rate-0.84 code).
 
@@ -338,19 +338,19 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     raw_rate = coincidence_rate_hz
     after_sifting = raw_rate  # Fixed-basis: zero sifting loss
 
-    # Shared-bit fraction (source model — no eavesdropper term):
+    # Shared-bit fraction (source model - no eavesdropper term):
     #   shared_fraction = 1 - max(beta*h(q), 1 - code_rate) - D_tag
     # Reconciliation leakage is the LARGER of:
     #   (a) the declared FIXED code's syndrome fraction (1 - code_rate):
-    #       rate-0.84 LDPC leaks 16% of every block regardless of QBER —
+    #       rate-0.84 LDPC leaks 16% of every block regardless of QBER -
     #       this is what fast_ec_simulate actually charges; and
     #   (b) the rate-adaptive envelope beta*h(q): what an efficiency-beta
     #       code family tuned to q would leak, which a real system needs
     #       once q exceeds the fixed code's design point (~2% for 0.84).
     # max(a, b) never claims less leakage than the implemented code and
-    # never more correction capability than the envelope allows (Gate-1 F1;
-    # the previous pure-beta*h(q) charge was 9.5% optimistic at the
-    # operating QBER of 0.0085).
+    # never more correction capability than the envelope allows (Gate-1
+    # F1): a pure beta*h(q) charge would be 9.5% optimistic at the
+    # operating QBER of 0.0085.
     # D_tag is the GLLP tagged fraction (multi-pair emissions a passive
     # beamsplitter could copy undetected; removed in PA for HNDL immunity).
     if assume_rate_adapted:
@@ -422,7 +422,7 @@ def toeplitz_hash(bits, output_length, seed=None, rng=None):
     # Equivalently: first row = toeplitz_seed[m-1 : m-1+n]
     #               first col = toeplitz_seed[m-1 : :-1] (reversed prefix)
 
-    # y_i = sum_j seed[(m-1-i)+j] * x_j mod 2 is a correlation — compute
+    # y_i = sum_j seed[(m-1-i)+j] * x_j mod 2 is a correlation - compute
     # it with one FFT convolution instead of an O(m·n) Python loop (the
     # SP 800-22 battery hashes ~4e5-bit inputs, HANDOFF 3.2). Integer
     # counts are exact in float64 up to 2^53; verified bit-identical to
@@ -454,13 +454,10 @@ def validate_pa_output(secure_bits, n_samples=5):
     return p_value
 
 
-# ══════════════════════════════════════════════
 # NIST SP 800-22 SUBSET BATTERY (HANDOFF 3.2)
-# ══════════════════════════════════════════════
 #
-# The load-bearing quantum-layer property — PA output close to uniform —
-# was previously spot-checked with a single monobit test on 10,000 bits.
-# This battery implements the SP 800-22 subset the work order names
+# The load-bearing quantum-layer property is that PA output is close to
+# uniform. This battery implements the SP 800-22 subset the work order names
 # (monobit, block-frequency, runs, longest-run-of-ones, serial) plus an
 # autocorrelation test, each returning its standard p-value. Reference:
 # NIST SP 800-22 Rev. 1a (2010), sections 2.1-2.4, 2.11.
@@ -609,14 +606,14 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000, rng=None)
     SCOPE (Gate-3/HANDOFF 3): this is a decoder SPOT CHECK, not a
     capacity claim, and it is reported honestly rather than asserted as a
     pass. The code here is a crude column-weight-3 random LDPC at rate
-    0.84 — a 3-regular high-rate code has a LOW BSC threshold, far below a
+    0.84 - a 3-regular high-rate code has a LOW BSC threshold, far below a
     5G-NR-grade capacity-approaching code. Measured behavior: it decodes
     cleanly below ~0.5% QBER, is already MARGINAL at the 0.85% operating
     point (FER ≈ 0.3 at these block sizes), and fails outright at 2%. So
     the toy decoder is a conservative FLOOR: it demonstrates that the
     tier model's low-FER assumption is achievable at the very low end and
     improves with code quality, but it does NOT by itself certify the
-    tiers across the design band — that needs a real capacity-approaching
+    tiers across the design band - that needs a real capacity-approaching
     code. The gap at 0.85-2% is the toy code underperforming the
     idealized code the tiers assume, NOT the tier model being wrong.
     Reported alongside the standing placeholder caveat in fast_ec_simulate.
@@ -658,7 +655,7 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000, rng=None)
             # is independently flipped with probability qber, so a priori
             # P(e_j=1)=qber for ALL j and LLR(e=0:e=1)=log((1-q)/q) > 0
             # everywhere. The earlier code applied `channel_llr[bob==1] *=
-            # -1` — a CODEWORD-decoding sign flip (LLR keyed to the
+            # -1` - a CODEWORD-decoding sign flip (LLR keyed to the
             # received bit). That is wrong for syndrome decoding of the
             # error pattern: it randomized the priors and the decoder
             # recovered errors at chance (~50%) even with 2 errors in 500
@@ -670,12 +667,11 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000, rng=None)
                 bp_successes += 1
 
         bp_fer = 1.0 - bp_successes / n_blocks_per_qber
-        # Reference = the DETERMINISTIC tier FER the pipeline assumes, via
-        # the SAME shared tier definition (the validator previously held a
-        # third inline copy — Gate-1 round-3 finding 1 — and drew a noisy
-        # n=3 stochastic estimate here, which could read 0.00 at a QBER
-        # whose tier FER is 0.10. Comparing the measured BP FER against
-        # the tier's actual assumed value is the meaningful cross-check).
+        # Reference = the DETERMINISTIC tier FER the pipeline assumes,
+        # via the SAME shared tier definition, never an inline copy
+        # (Gate-1 round-3 finding 1). A noisy stochastic estimate here
+        # could read 0.00 at a QBER whose tier FER is 0.10; the meaningful
+        # cross-check is measured BP FER against the tier's assumed value.
         stat_fer = tier_frame_error_rate(qber, code_rate)
 
         validation_table.append({

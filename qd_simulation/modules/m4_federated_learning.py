@@ -11,7 +11,7 @@ cluster for dropout recovery.
 Modes:
   - entangled:       pairwise masks from shared Bell-pair bits (source-model
                      distilled keys); self-mask Shamir-shared.
-  - gaussian-legacy: float Gaussian masks — NO Bonawitz proof; retained for
+  - gaussian-legacy: float Gaussian masks - NO Bonawitz proof; retained for
                      comparison only.
   - prng:     identical structure but classical PRNG seeds (baseline)
   - dp:       per-client gradient clipping + calibrated Gaussian noise
@@ -33,7 +33,7 @@ Dropout recovery:
   exists classically with computational per-round seeds (Flamingo; Ma,
   Woods, Angel, Polychroniadou & Rabin, IEEE S&P 2023). The differentiator
   here is that freshness is UNCONDITIONAL: revealed bits are
-  information-theoretically independent of every other round — no PRF/DH
+  information-theoretically independent of every other round - no PRF/DH
   assumption, no key-erasure or forward-secrecy reliance.
 """
 import numpy as np
@@ -50,9 +50,7 @@ from typing import Dict, List, Optional
 import time
 
 
-# ══════════════════════════════════════════════
 # MODELS
-# ══════════════════════════════════════════════
 
 class ClinicalMLP(nn.Module):
     """Small MLP for tabular clinical data. ~50K parameters."""
@@ -72,9 +70,7 @@ class ClinicalMLP(nn.Module):
         return self.net(x)
 
 
-# ══════════════════════════════════════════════
 # DATASETS
-# ══════════════════════════════════════════════
 
 def load_clinical_data(num_clients=3, rng_seed=42, dirichlet_alpha=0.5):
     """Load sklearn breast cancer dataset, split non-IID across clients.
@@ -110,7 +106,7 @@ def load_clinical_data(num_clients=3, rng_seed=42, dirichlet_alpha=0.5):
             client_indices[c].extend(chunk.tolist())
 
     # Guard (found by exp5's 10-seed sweep, HANDOFF 3.6): at some seeds the
-    # cumsum split boundaries round so that a client ends up EMPTY — the
+    # cumsum split boundaries round so that a client ends up EMPTY - the
     # empty list became a float64 array (IndexError) and an empty client is
     # a degenerate FL participant. Move one sample from the largest client;
     # no-op at seeds where every client is non-empty.
@@ -133,9 +129,7 @@ def load_clinical_data(num_clients=3, rng_seed=42, dirichlet_alpha=0.5):
     return client_datasets, test_dataset, X_train.shape[1]
 
 
-# ══════════════════════════════════════════════
 # MODULAR OTP MASKING (Bonawitz-compatible)
-# ══════════════════════════════════════════════
 #
 # Bonawitz 2017's privacy proof requires masks uniform over the gradient
 # group. We quantize gradients to int32 (Q-format, see QUANT_SCALE) and
@@ -176,13 +170,13 @@ def derive_modular_mask(n_params, shared_bits):
     uniform over Z_{2^32} when the shared bits are uniform (Leftover Hash
     Lemma after Toeplitz PA). Bonawitz's privacy proof applies directly.
 
-    Raises ValueError if insufficient bits — caller must size the pool.
+    Raises ValueError if insufficient bits - caller must size the pool.
     """
     bits_needed = n_params * 32
     if len(shared_bits) < bits_needed:
         raise ValueError(
             f"derive_modular_mask: have {len(shared_bits)} bits, need {bits_needed}. "
-            "Pool exhausted — increase source duration or reduce model size."
+            "Pool exhausted - increase source duration or reduce model size."
         )
     return bits_to_uint32(shared_bits[:bits_needed])
 
@@ -193,9 +187,7 @@ def apply_modular_mask(quant_grad, mask, sign=+1):
     return (quant_grad - mask).astype(np.uint32)
 
 
-# ══════════════════════════════════════════════
 # SHAMIR SECRET SHARING (for self-mask recovery)
-# ══════════════════════════════════════════════
 #
 # (t, n) threshold sharing over GF(2^31 - 1) (Mersenne prime). Used to
 # protect each client's self-mask seed so survivors can reconstruct it
@@ -234,7 +226,7 @@ def shamir_reconstruct(shares):
 
 
 def generate_gaussian_mask_legacy(n_params, shared_key_bits):
-    """LEGACY — float Gaussian masks; NO Bonawitz privacy proof attaches.
+    """LEGACY - float Gaussian masks; NO Bonawitz privacy proof attaches.
 
     Retained only for historical comparison (Experiment 5b appendix).
     Use derive_modular_mask() for the proof-carrying modular construction.
@@ -243,7 +235,7 @@ def generate_gaussian_mask_legacy(n_params, shared_key_bits):
 
     Converts shared random bits to Gaussian-distributed mask values using the
     Box-Muller transform on uniform variates derived from the key material.
-    This uses the quantum bits directly — not as a PRNG seed — preserving
+    This uses the quantum bits directly - not as a PRNG seed - preserving
     the high-entropy guarantee from the key-distillation (PA) layer.
 
     If insufficient bits are available, the remaining mask entries are zero
@@ -265,7 +257,7 @@ def generate_gaussian_mask_legacy(n_params, shared_key_bits):
 
     key_bits = shared_key_bits
     if len(key_bits) < bits_needed:
-        # Pad — in practice this means the key rate limits round speed
+        # Pad - in practice this means the key rate limits round speed
         key_bits = np.concatenate([
             key_bits,
             np.zeros(bits_needed - len(key_bits), dtype=np.int8)
@@ -310,11 +302,9 @@ def add_dp_noise(gradient_flat, epsilon, delta, max_grad_norm=1.0):
     return gradient_flat + noise
 
 
-# ══════════════════════════════════════════════
 # FEDERATED LEARNING ENGINE
-# ══════════════════════════════════════════════
 
-# ── Communication byte model (HANDOFF Phase 2) ──
+# Communication byte model (HANDOFF Phase 2)
 # Documented wire-format assumptions behind every bytes/client/round
 # figure. Gate 2 audits these against the protocol steps in
 # secure_aggregation_round; change them only together with the protocol.
@@ -330,7 +320,7 @@ BYTES_ABORT_NOTICE = 4       # live-set/abort announcement to each surviving
                              # aborted survivors' never-sent payloads.
 BYTES_PER_SELFMASK_SEED = 4  # survivor's self-mask disclosure: the seed
                              # (< _SHAMIR_PRIME). The self-mask is
-                             # PRG-expanded from this seed — which is
+                             # PRG-expanded from this seed - which is
                              # exactly why the self-mask leg is only
                              # computationally protected (see the channel
                              # assumption in RoundComm's docstring);
@@ -345,39 +335,39 @@ class RoundComm:
       payload           masked int32 gradients from members of clusters
                         that met threshold. Dropped clients never send;
                         neither do the SURVIVORS of a threshold-failed
-                        cluster — every client needs the live-set
+                        cluster - every client needs the live-set
                         announcement (the Bonawitz share→payload round
                         boundary) before it can pick which pairwise masks
                         to include in its payload, and that same message
                         tells a below-threshold cluster's survivors to
                         abort (see Downlink).
-      shares            per-round Shamir distribution — happens BEFORE
+      shares            per-round Shamir distribution - happens BEFORE
                         dropout, so all n members send n−1 shares of their
                         fresh self-mask seed
       selfmask          survivors' own seed disclosures
       recovery_shares   identically 0 under this simulation's pre-payload
                         drop timing: a dropped self-mask never enters the
                         sum, so Shamir reconstruction runs as VALIDATION
-                        only (asserted, never charged as wire traffic —
+                        only (asserted, never charged as wire traffic -
                         protocol step 6). The field exists for the
                         Phase-4 baselines' post-payload drop timing,
                         which does transmit recovery shares.
       reveals           each survivor reveals its full pairwise bit-string
                         with each dropped partner: n_params×4 B per
-                        (survivor, dropped) pair — THE byte cost of
+                        (survivor, dropped) pair - THE byte cost of
                         reveal-based recovery
       inter_triangle    masked triangle aggregates on tree edges
     Downlink: global-model broadcast to every client, plus a
     BYTES_ABORT_NOTICE live-set/abort notice to each surviving member of
-    a threshold-failed cluster — the announcement is inherent to the
+    a threshold-failed cluster - the announcement is inherent to the
     Bonawitz round structure (see payload above), and charging it here
     is what justifies NOT charging the aborted survivors' payloads.
 
     Latency decomposition: key_wait_s is MODELED from the config operating
-    point — the SLOWEST physical edge's pool-fill time,
+    point - the SLOWEST physical edge's pool-fill time,
     max(key_bits_per_edge) / secret_rate (edges distill concurrently on
     dedicated per-edge optics, but a physical edge serving multiple
-    logical demands — two triangles, or a triangle plus a tree mask —
+    logical demands - two triangles, or a triangle plus a tree mask -
     fills correspondingly slower; conservative single-distillation-plane
     model, even though m5's per-membership QD provisioning could
     parallelize shared edges). comm_s is MODELED from
@@ -385,14 +375,14 @@ class RoundComm:
 
     Network model, stated once (Gate-2 F9): FL bytes serialize through
     the aggregator's single CLASSICAL_LINK_BPS access port; quantum key
-    distillation runs on per-physical-edge dedicated optics in parallel —
+    distillation runs on per-physical-edge dedicated optics in parallel -
     two different resources, hence the different concurrency treatments.
 
     Channel assumption (Gate-2 F8): Shamir shares and seed disclosures
     are assumed to transit CONFIDENTIAL pairwise channels (Bonawitz's
     setting); channel-encryption overhead is not charged. Without that
     confidentiality, any threshold-many recorded shares reconstruct a
-    seed — degrading the self-mask leg from computationally-protected to
+    seed - degrading the self-mask leg from computationally-protected to
     broken. The pairwise (HNDL-carrying) leg is unaffected either way.
 
     Scope (Gate-2 F5): key-DISTILLATION classical traffic is excluded
@@ -457,8 +447,8 @@ class FLResult:
     comm_rounds: List = field(default_factory=list)  # RoundComm per round
     # Aggregate-fidelity instrumentation (entangled mode; HANDOFF 3.5):
     # per round, (a) count of uint32 words where the masked pipeline's
-    # integer aggregate differs from the direct quantized sum — the
-    # masking-exactness theorem says every entry must be 0 — and (b) the
+    # integer aggregate differs from the direct quantized sum - the
+    # masking-exactness theorem says every entry must be 0 - and (b) the
     # float64 sup-norm error of the dequantized mean aggregate vs the
     # exact float mean, bounded by the 2^-20 truncation bound.
     agg_exact_mismatches: List[int] = field(default_factory=list)
@@ -527,7 +517,7 @@ _VALID_MODES = ("entangled", "gaussian-legacy", "prng", "unmasked", "dp")
 
 
 def _validate_mode(mode):
-    """Fail loudly on unknown mode names — no silent fallthrough, no aliasing."""
+    """Fail loudly on unknown mode names - no silent fallthrough, no aliasing."""
     if mode not in _VALID_MODES:
         raise ValueError(
             f"Unknown mode {mode!r}. Valid modes: {', '.join(_VALID_MODES)}.")
@@ -543,7 +533,7 @@ def run_federated_training(
     dp_epsilon=5.0, dp_delta=1e-5,
     device='cpu',
     verbose=True,
-    seed=42,  # torch/np seed — vary across repeats for real replicates
+    seed=42,  # torch/np seed - vary across repeats for real replicates
 ):
     """Run complete federated learning training.
 
@@ -567,7 +557,7 @@ def run_federated_training(
     # Seed torch BEFORE the first model_fn(): the initial global model and
     # DataLoader shuffling otherwise inherit whatever global state the
     # process had, making training metrics irreproducible across suite
-    # compositions and standalone runs (Gate-1 F12; Gate-2 round-2 F5 —
+    # compositions and standalone runs (Gate-1 F12; Gate-2 round-2 F5 -
     # seeding after model creation left the initial model OS-entropy-random
     # on the first run in any process).
     torch.manual_seed(seed)
@@ -581,7 +571,7 @@ def run_federated_training(
     start_time = time.time()
     rng = np.random.default_rng(seed)
 
-    # Pre-generate PRNG seeds for PRNG mode — symmetric: seed(a,b) == seed(b,a)
+    # Pre-generate PRNG seeds for PRNG mode - symmetric: seed(a,b) == seed(b,a)
     prng_seeds = rng.integers(0, 2**31, size=(num_rounds, num_clients, num_clients))
     for r in range(num_rounds):
         for i in range(num_clients):
@@ -629,7 +619,7 @@ def run_federated_training(
             else:
                 quantum_pool = rng.integers(0, 2, size=total_bits_needed, dtype=np.int8)
             if len(quantum_pool) < total_bits_needed:
-                # Top up from simulated source — single deployment cannot do
+                # Top up from simulated source - single deployment cannot do
                 # this online; in simulation we just generate more random bits
                 # representative of additional measurement windows.
                 shortfall = total_bits_needed - len(quantum_pool)
@@ -660,7 +650,7 @@ def run_federated_training(
         client_updates = []
         global_params = get_model_params(global_model)
 
-        # ── Local training ──
+        # Local training
         _t_local0 = time.perf_counter()
         for c in range(num_clients):
             local_model = model_fn()
@@ -670,7 +660,7 @@ def run_federated_training(
             client_updates.append(update)
         _local_compute_s = time.perf_counter() - _t_local0
 
-        # ── Masking & Aggregation ──
+        # Masking & Aggregation
         mask_start = time.time()
 
         if mode == "entangled":
@@ -696,10 +686,10 @@ def run_federated_training(
             aggregate = agg_res.aggregate / num_clients
             quantum_bits_consumed.append(agg_res.bits_consumed_pairwise)
 
-            # ── Aggregate-fidelity instrumentation (HANDOFF 3.5) ──
+            # Aggregate-fidelity instrumentation (HANDOFF 3.5)
             # (a) Masking exactness at the INTEGER level: the unmasked
             #     modular sum from the masked pipeline must equal the
-            #     direct quantized sum word-for-word (theorem — pairwise
+            #     direct quantized sum word-for-word (theorem - pairwise
             #     masks cancel exactly in Z_2^32). Zero float rounding in
             #     this comparison.
             _direct_q = np.zeros(n_params, dtype=np.uint32)
@@ -785,7 +775,7 @@ def run_federated_training(
         round_mask_time = time.time() - mask_start
         mask_gen_times.append(round_mask_time)
 
-        # ── Round communication/latency record (HANDOFF Phase 2) ──
+        # Round communication/latency record (HANDOFF Phase 2)
         if mode == "entangled":
             cc = agg_res.comm
             rc = RoundComm(
@@ -814,7 +804,7 @@ def run_federated_training(
             # Non-entangled modes: payload + downlink only. The prng mode
             # as implemented PRE-SHARES symmetric seeds (no per-round share
             # traffic), so its accounting here is NOT a faithful classical
-            # secure-aggregation baseline — the Phase-4 Bonawitz-DH and
+            # secure-aggregation baseline - the Phase-4 Bonawitz-DH and
             # Flamingo-PRF baselines carry the faithful byte models.
             rc = RoundComm(
                 round_idx=round_idx, n_clients=num_clients,
@@ -828,11 +818,11 @@ def run_federated_training(
                      / _LINK_BPS)
         comm_rounds.append(rc)
 
-        # ── Apply aggregate update ──
+        # Apply aggregate update
         new_params = global_params + aggregate
         set_model_params(global_model, new_params)
 
-        # ── Evaluate ──
+        # Evaluate
         acc, loss = evaluate(global_model, test_dataset, device)
         accuracies.append(acc)
         losses.append(loss)
@@ -872,9 +862,7 @@ def run_federated_training(
     )
 
 
-# ══════════════════════════════════════════════
 # TWO-MASK AGGREGATION ROUND (modular OTP, dropout-aware; entangled-key pool)
-# ══════════════════════════════════════════════
 
 @dataclass
 class AggregateResult:
@@ -887,7 +875,7 @@ class AggregateResult:
     recovery_invoked: bool
     eavesdrop_distinguishable: bool  # honest-but-curious aggregator gain
     comm: Dict = field(default_factory=dict)  # per-phase bytes + agg time
-    # Integer-domain modular sum AFTER unmasking — lets callers verify
+    # Integer-domain modular sum AFTER unmasking - lets callers verify
     # masking exactness (masked pipeline == direct quantized sum, word
     # for word) without float rounding in the comparison (HANDOFF 3.5).
     aggregate_quantized: object = None  # np.uint32 array
@@ -898,7 +886,7 @@ def _slice_pool(pool, offset, n_bits, auditor=None, base_offset=0):
 
     When `auditor` is given, the ABSOLUTE range
     [base_offset + offset, base_offset + offset + n_bits) is registered
-    with it, and any overlap with a previously consumed range raises —
+    with it, and any overlap with a previously consumed range raises -
     the pool-reuse hard audit (HANDOFF 3.3). base_offset locates a
     sub-pool view (e.g. one cluster's slice) inside its parent pool so
     all consumption is audited in parent-absolute coordinates.
@@ -921,7 +909,7 @@ class PoolAuditor:
     information-theoretic claim, so overlap is a hard ValueError, not a
     warning. Consumed [start, end) intervals are kept sorted; each
     consume() is checked against both neighbors (O(log n) locate +
-    O(n) insert — trivial at simulation scale).
+    O(n) insert - trivial at simulation scale).
 
     Discarded-but-reserved material (a threshold-failed cluster's slice)
     is also registered: single-use discipline burns it, so any later
@@ -944,12 +932,12 @@ class PoolAuditor:
         i = bisect.bisect_left(self._starts, start)
         if i > 0 and self._ends[i - 1] > start:
             raise ValueError(
-                f"pool '{self.name}': OTP REUSE — slice [{start}, {end}) "
+                f"pool '{self.name}': OTP REUSE - slice [{start}, {end}) "
                 f"overlaps already-consumed "
                 f"[{self._starts[i-1]}, {self._ends[i-1]})")
         if i < len(self._starts) and self._starts[i] < end:
             raise ValueError(
-                f"pool '{self.name}': OTP REUSE — slice [{start}, {end}) "
+                f"pool '{self.name}': OTP REUSE - slice [{start}, {end}) "
                 f"overlaps already-consumed "
                 f"[{self._starts[i]}, {self._ends[i]})")
         self._starts.insert(i, start)
@@ -994,12 +982,12 @@ def secure_aggregation_round(
           survivors can reconstruct it if the client drops.
       (4) Each client sends one share of its OWN self-mask seed to each of
           its n−1 cluster peers (the n(n−1) × BYTES_PER_SHAMIR_SHARE wire
-          charge models exactly these messages), then — after the live-set
-          announcement — transmits its masked payload.
+          charge models exactly these messages), then - after the live-set
+          announcement - transmits its masked payload.
       (5) Aggregator sums the masked payloads (modular addition).
       (6) Dropout handling under THIS simulation's drop timing (dropouts
           occur AFTER share distribution, BEFORE payload transmission):
-            - A dropped client's payload — and with it its self-mask —
+            - A dropped client's payload - and with it its self-mask -
               never entered the sum, so NO self-mask reconstruction is
               protocol-necessary here. The Shamir machinery is still
               distributed every round because the general Bonawitz timing
@@ -1007,22 +995,22 @@ def secure_aggregation_round(
               >= threshold survivors' shares to reconstruct the dropped
               self-mask seed; this simulation VALIDATES reconstruction
               (asserted below, not charged as protocol traffic) without
-              exercising that timing — the Phase-4 baselines do.
+              exercising that timing - the Phase-4 baselines do.
             - Each survivor discloses its own self-mask SEED (4 B; the
-              mask is PRG-expanded from it — the computationally protected
+              mask is PRG-expanded from it - the computationally protected
               leg) so the aggregator can remove surviving self-masks.
             - For the dropped client's pairwise residue: each survivor
               reveals the pairwise bits it shared with the dropped client.
-              Safe because bits are per-round-fresh and single-use —
+              Safe because bits are per-round-fresh and single-use -
               unconditionally so (cf. Flamingo, IEEE S&P 2023, where the
               same reveal logic rests on computational per-round PRF seeds).
       (7) Aggregator dequantizes the sum, returns aggregate.
 
-    Honest-but-curious aggregator check — VALIDATION, not a security
+    Honest-but-curious aggregator check - VALIDATION, not a security
     result (HANDOFF 3.9): under uniform modular masks, payload
     indistinguishability from uniform is a THEOREM (one-time pad over
     Z_{2^32}); the chi-squared trial on the lowest byte is therefore an
-    implementation-bug detector — it can only fire if the mask pipeline
+    implementation-bug detector - it can only fire if the mask pipeline
     is broken (non-uniform bits, reuse, wrong modular arithmetic). A
     False result confirms the implementation matches the theorem; it
     adds no security beyond it.
@@ -1101,9 +1089,9 @@ def secure_aggregation_round(
         agg = (agg + pl).astype(np.uint32)
     _t_agg1 = time.perf_counter()
 
-    # Honest-but-curious distinguisher trial — VALIDATION (implementation-
+    # Honest-but-curious distinguisher trial - VALIDATION (implementation-
     # bug detector; indistinguishability itself is a theorem, see the
-    # docstring). Instrumentation, not protocol — timed separately so it
+    # docstring). Instrumentation, not protocol - timed separately so it
     # lands in NO latency bucket.
     _t_chi0 = time.perf_counter()
     sample = masked_payloads[survivors[0]]
@@ -1127,13 +1115,13 @@ def secure_aggregation_round(
                 if len(shares) >= threshold:
                     break
                 # In real protocol, survivor s sends seed_shares[c][s_pos]
-                # — here we model that survivor s holds the share at
+                # - here we model that survivor s holds the share at
                 # position (s_pos+1) corresponding to its position.
                 pos = cluster_clients.index(s)
                 shares.append(seed_shares[c][pos])
             reconstructed_seed = shamir_reconstruct(shares)
             assert reconstructed_seed == (int(local_rng_seeds[c]) % _SHAMIR_PRIME), \
-                "Shamir reconstruction failed — protocol bug"
+                "Shamir reconstruction failed - protocol bug"
             local_rng = np.random.default_rng(reconstructed_seed)
             dropped_self_mask = local_rng.integers(0, 1 << 32, size=n_params, dtype=np.uint64).astype(np.uint32)
             # Note: dropped client's pairwise masks are still in `agg` from
@@ -1168,7 +1156,7 @@ def secure_aggregation_round(
     aggregate = dequantize_gradient(agg)
     _t_agg3 = time.perf_counter()
 
-    # ── Communication accounting for this cluster round (HANDOFF Phase 2).
+    # Communication accounting for this cluster round (HANDOFF Phase 2).
     # Wire model documented at the BYTES_PER_* constants; phase semantics
     # at RoundComm. The distinguisher trial between _t_agg1 and _t_agg2 is
     # instrumentation, not protocol, and is excluded from aggregator time.
@@ -1208,7 +1196,7 @@ def _chi2_distinguishable(payload_uint32, rng, alpha=0.001):
 
     VALIDATION ONLY (HANDOFF 3.9). Under modular OTP with uniform masks,
     indistinguishability is a theorem, so this test cannot produce a
-    security finding — a True return means the implementation is broken
+    security finding - a True return means the implementation is broken
     (non-uniform mask bits, pool reuse, or wrong modular arithmetic),
     nothing more. Returns True if the null "payload is uniform" is
     rejected at significance alpha.
@@ -1316,24 +1304,24 @@ def run_multitriangle_fl(
     dropout_rate=0.0,
     pool_intra=None, pool_inter=None,
     device='cpu', verbose=True,
-    seed=42,  # torch/np seed — vary across repeats for real replicates
+    seed=42,  # torch/np seed - vary across repeats for real replicates
 ):
     """two-mask hierarchical FL with two-mask design and dropout recovery.
 
     Differences from the legacy driver (`run_multitriangle_fl_legacy`):
       - Modular OTP masking on int32-quantized gradients (Bonawitz proof applies)
-      - Pairwise masks derived from pre-sized distilled-key bit pool — wrap-around impossible
+      - Pairwise masks derived from pre-sized distilled-key bit pool - wrap-around impossible
       - Inter-triangle masks ALSO from distilled bits (not classical PRNG)
       - Two-mask design: self-mask Shamir-shared for dropout recovery
       - Per-round dropouts sampled at `dropout_rate`
       - Honest-but-curious aggregator distinguisher reported per round
-        (validation-only implementation-bug detector — see
+        (validation-only implementation-bug detector - see
         _chi2_distinguishable; indistinguishability is a theorem)
     """
     if triangles is None or tree_edges is None:
         triangles, _, tree_edges = define_triangle_topology(num_clients)
     num_triangles = len(triangles)
-    # All pairwise links that physically exist (triangle sides) — the only
+    # All pairwise links that physically exist (triangle sides) - the only
     # pairs with distillation hardware and hence key pools. Used to keep
     # tree-mask key assignment on real links (Gate-2 round-2 F6).
     physical_edges = {tuple(sorted((int(t[i]), int(t[j]))))
@@ -1342,7 +1330,7 @@ def run_multitriangle_fl(
     # Seed torch BEFORE the first model_fn(): the initial global model and
     # DataLoader shuffling otherwise inherit whatever global state the
     # process had, making training metrics irreproducible across suite
-    # compositions and standalone runs (Gate-1 F12; Gate-2 round-2 F5 —
+    # compositions and standalone runs (Gate-1 F12; Gate-2 round-2 F5 -
     # seeding after model creation left the initial model OS-entropy-random
     # on the first run in any process).
     torch.manual_seed(seed)
@@ -1388,7 +1376,7 @@ def run_multitriangle_fl(
     for round_idx in range(num_rounds):
         global_params = get_model_params(global_model)
 
-        # ── Step 1: Local training ──
+        # Step 1: Local training
         _t_local0 = time.perf_counter()
         client_updates = {}
         for tri in triangles:
@@ -1405,7 +1393,7 @@ def run_multitriangle_fl(
                 client_updates[c] = upd
         _local_compute_s = time.perf_counter() - _t_local0
 
-        # ── Step 2: Sample dropouts ──
+        # Step 2: Sample dropouts
         round_dropouts = set()
         if dropout_rate > 0:
             for c in client_updates:
@@ -1413,7 +1401,7 @@ def run_multitriangle_fl(
                     round_dropouts.add(c)
         dropout_log.append(len(round_dropouts))
 
-        # ── Step 3: Intra-triangle secure_aggregation_round per cluster ──
+        # Step 3: Intra-triangle secure_aggregation_round per cluster
         triangle_aggs = []
         round_distinguishable = False
         any_recovery = False
@@ -1430,7 +1418,7 @@ def run_multitriangle_fl(
             local_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME)) for c in cluster}
             tri_dropouts = {c for c in cluster if c in round_dropouts}
             survivors_count = len(cluster) - len(tri_dropouts)
-            # Skip if fewer survivors than Shamir threshold — cannot recover
+            # Skip if fewer survivors than Shamir threshold - cannot recover
             # dropped clients' self-masks. Triangle contributes zero this round.
             if survivors_count < 2:
                 triangle_aggs.append(torch.zeros(n_params))
@@ -1439,10 +1427,10 @@ def run_multitriangle_fl(
                 # Gate-2 F3: the aborted cluster still exchanged its
                 # per-round Shamir shares (distribution precedes dropout
                 # knowledge), and its reserved key slice is DISCARDED, not
-                # returned (single-use discipline — safe against partial
+                # returned (single-use discipline - safe against partial
                 # derivation). Both are ledgered so this record reconciles
                 # with aux['bits_intra_consumed'].
-                # Gate-2 round-2 F4 — stated detection convention: the
+                # Gate-2 round-2 F4 - stated detection convention: the
                 # live-set announcement at the Bonawitz share→payload
                 # boundary (which every client needs before it can compute
                 # its masked payload) doubles as the abort notice, so the
@@ -1453,7 +1441,7 @@ def run_multitriangle_fl(
                                    * BYTES_PER_SHAMIR_SHARE)
                 rc.key_bits_intra += 3 * bits_per_mask
                 # Pool audit: the discarded slice is BURNED (single-use
-                # discipline) — register it so any later reuse of these
+                # discipline) - register it so any later reuse of these
                 # offsets hard-fails too.
                 audit_intra.consume(_cluster_base, 3 * bits_per_mask)
                 for _i in range(3):
@@ -1493,7 +1481,7 @@ def run_multitriangle_fl(
         distinguisher_log.append(round_distinguishable)
         recovery_log.append(any_recovery)
 
-        # ── Step 4: Inter-triangle hierarchical aggregation via tree edges ──
+        # Step 4: Inter-triangle hierarchical aggregation via tree edges
         # Each (parent, child) edge gets a fresh distilled-key-derived mask.
         _t_tree0 = time.perf_counter()
         if num_triangles == 1:
@@ -1508,7 +1496,7 @@ def run_multitriangle_fl(
                 # one edge-pool consumption per tree edge per round. The
                 # tree mask's key demand is assigned to the PHYSICAL shared
                 # edge between the adjacent triangles (Delaunay dual edge =
-                # two shared vertices) — Gate-2 F1: tree masks do not get
+                # two shared vertices) - Gate-2 F1: tree masks do not get
                 # implicit dedicated hardware; a shared physical edge fills
                 # correspondingly slower.
                 rc.inter_triangle_bytes += n_params * BYTES_PER_MASKED_WORD
@@ -1521,12 +1509,9 @@ def run_multitriangle_fl(
                     # Non-adjacent tree edge (does not occur on a Delaunay
                     # dual, where parent and child share a side). Assign
                     # the mask to the lexicographically first PHYSICAL
-                    # cross link between the two triangles — the candidate
+                    # cross link between the two triangles. The candidate
                     # set excludes self-loops and pairs with no
-                    # distillation hardware / key pool, which the previous
-                    # (min, min) fallback could silently produce on
-                    # vertex-sharing or disjoint triangles (Gate-2
-                    # round-2 F6).
+                    # distillation hardware / key pool (Gate-2 round-2 F6).
                     _cross = sorted(
                         tuple(sorted((int(a), int(b))))
                         for a in triangles[parent] for b in triangles[child]
@@ -1550,18 +1535,18 @@ def run_multitriangle_fl(
                 agg_by_tri[parent] = agg_by_tri[parent] + dequantize_gradient(q_recovered)
             root = tree_edges[0][0]
             global_aggregate = agg_by_tri[root]
-        # Tree stage (child-side masking + parent-side unmasking) charged
-        # to the aggregation bucket — Gate-2 F7: previously in no bucket.
+        # Tree stage (child-side masking + parent-side unmasking) is
+        # charged to the aggregation bucket (Gate-2 F7).
         _tree_s = time.perf_counter() - _t_tree0
         rc.aggregator_time_s += _tree_s
 
-        # ── Step 5: Apply update ──
+        # Step 5: Apply update
         total_clients = len(client_updates) - len(round_dropouts)
         if total_clients > 0:
             new_params = global_params + global_aggregate / total_clients
             set_model_params(global_model, new_params)
 
-        # ── Round communication/latency record (HANDOFF Phase 2) ──
+        # Round communication/latency record (HANDOFF Phase 2)
         # += not =: abort notices for threshold-failed clusters were
         # already added in step 3 (Gate-2 round-2 F4).
         rc.downlink_bytes += (len(client_updates) * n_params
@@ -1601,7 +1586,7 @@ def run_multitriangle_fl(
     wall_clock = time.time() - start_time
 
     # Pool-reuse hard audit (HANDOFF 3.3): every consumed slice must be
-    # disjoint (enforced en route — any overlap raised immediately) and
+    # disjoint (enforced en route - any overlap raised immediately) and
     # the audited totals must equal the ledgered burns exactly.
     assert audit_intra.bits_consumed == intra_off, (
         f"intra pool audit mismatch: {audit_intra.bits_consumed} audited "
@@ -1610,7 +1595,7 @@ def run_multitriangle_fl(
         f"inter pool audit mismatch: {audit_inter.bits_consumed} audited "
         f"!= {inter_off} ledgered")
     if verbose:
-        print(f"    Pool-reuse audit (OTP single-use): PASS — "
+        print(f"    Pool-reuse audit (OTP single-use): PASS - "
               f"intra {audit_intra.n_intervals} disjoint slices / "
               f"{audit_intra.bits_consumed} bits; "
               f"inter {audit_inter.n_intervals} / "
@@ -1646,7 +1631,7 @@ def run_multitriangle_fl_legacy(
     triangles=None, tree_edges=None,
     device='cpu', verbose=True,
 ):
-    """LEGACY hierarchical driver — superseded by run_multitriangle_fl.
+    """LEGACY hierarchical driver - superseded by run_multitriangle_fl.
 
     Retained for reference only; no callers. The modern driver adds modular
     OTP masking, pre-sized distilled-key pools, the two-mask design, and
@@ -1718,7 +1703,7 @@ def run_multitriangle_fl_legacy(
     for round_idx in range(num_rounds):
         global_params = get_model_params(global_model)
 
-        # ── Step 1: All clients train locally ──
+        # Step 1: All clients train locally
         client_updates = {}
         for tri in triangles:
             for c in tri:
@@ -1732,7 +1717,7 @@ def run_multitriangle_fl_legacy(
                     scale = 1.0 / client_triangle_count.get(c, 1)
                     client_updates[c] = update * scale
 
-        # ── Step 2: Intra-triangle Bonawitz masking ──
+        # Step 2: Intra-triangle Bonawitz masking
         triangle_aggregates = []
         for tri_idx, tri in enumerate(triangles):
             clients_in_tri = list(tri)
@@ -1752,7 +1737,7 @@ def run_multitriangle_fl_legacy(
             tri_agg = torch.stack(masked_updates).sum(dim=0)
             triangle_aggregates.append(tri_agg)
 
-        # ── Step 3: Inter-triangle hierarchical aggregation ──
+        # Step 3: Inter-triangle hierarchical aggregation
         # Models actual network communication: child and parent are separate
         # entities that each hold one copy of the shared key.
         if num_triangles == 1:
@@ -1768,10 +1753,10 @@ def run_multitriangle_fl_legacy(
                     pair_seed = int(inter_seeds[round_idx, min(parent, child), max(parent, child)])
                     inter_mask = generate_prng_mask(n_params, pair_seed)
 
-                    # ── CHILD NODE scope: only sees own aggregate + shared key ──
+                    # CHILD NODE scope: only sees own aggregate + shared key
                     wire_payload = agg[child] + inter_mask  # transmitted over network
 
-                    # ── Eavesdropper verification: analyze wire payload ──
+                    # Eavesdropper verification: analyze wire payload
                     # An eavesdropper intercepting wire_payload should learn nothing
                     # about agg[child]. Measure information leakage:
                     true_agg = agg[child]
@@ -1787,7 +1772,7 @@ def run_multitriangle_fl_legacy(
                     round_cosines.append(cos_sim)
                     round_corrs.append(pearson)
 
-                    # ── PARENT NODE scope: only sees wire_payload + shared key ──
+                    # PARENT NODE scope: only sees wire_payload + shared key
                     child_recovered = wire_payload - inter_mask
                     agg[parent] = agg[parent] + child_recovered
 
@@ -1797,12 +1782,12 @@ def run_multitriangle_fl_legacy(
             root = tree_edges[0][0] if tree_edges else 0
             global_aggregate = agg[root]
 
-        # ── Step 4: Compute weighted average ──
+        # Step 4: Compute weighted average
         total_unique_clients = len(client_updates)
         new_params = global_params + global_aggregate / total_unique_clients
         set_model_params(global_model, new_params)
 
-        # ── Evaluate ──
+        # Evaluate
         acc, loss = evaluate(global_model, test_dataset, device)
         accuracies.append(acc)
         losses.append(loss)
