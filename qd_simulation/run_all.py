@@ -446,7 +446,9 @@ def run_experiment_2(quick=False):
     ax.set_ylabel('Shared bit rate (kbit/s)')
     ax.set_title(f'Fixed-basis vs sifting rate at modeled-device '
                  f'raw rate ({base_rate/1000:.1f} kHz)\n'
-                 f'(Fixed-basis requires trusted source; sifting does not)')
+                 f'(Fixed-basis requires trusted source; sifting does not. '
+                 f'Sifting loss only - full QKD accounting: exp13)',
+                 fontsize=9)
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -1933,14 +1935,25 @@ def run_experiment_8(quick=False):
         for mp in model_params:
             gradient_bits = int(mp) * BITS_PER_PARAM
             mask_time_per_level = gradient_bits / secure_rate
-            overhead_at_depths = [mask_time_per_level * d for d in tree_depths]
+            # depth 0 (single triangle, no inter-triangle stage) means zero
+            # tree overhead; NaN keeps the log axis from drawing a fake
+            # vertical segment up from the clipped zero
+            overhead_at_depths = [mask_time_per_level * d if d > 0 else np.nan
+                                  for d in tree_depths]
             ax.plot(scales, overhead_at_depths, 'o-', linewidth=2,
                     label=f'{int(mp/1000)}K ({mask_time_per_level:.0f}s/level)')
         ax.set_xlabel('Number of Clients')
         ax.set_ylabel('Aggregation Overhead (seconds)')
         ax.set_yscale('log')
         ax.set_title(f'{rlabel}\n({secure_rate/1000:.1f} kbit/s)', fontsize=8)
-        # data spans clients >= 6, so the left band is empty
+        # 3 clients = one triangle = depth 0: zero tree overhead, which a
+        # log axis cannot plot; keep the x range so the point's absence is
+        # explicit and the legend has a data-free band
+        ax.set_xlim(2.4, 12.6)
+        ax.text(0.02, 0.03, '3 clients: depth 0,\n'
+                'zero tree overhead\n(not plottable, log axis)',
+                transform=ax.transAxes, fontsize=5.5, color='gray',
+                va='bottom')
         ax.legend(fontsize=6, loc='center left', borderaxespad=0.2)
         ax.grid(True, alpha=0.3, which='both')
         # Round period reference lines
@@ -2661,12 +2674,13 @@ def run_experiment_12(quick=False):
     labels = ["this system", "Bonawitz", "Flamingo",
               "dealer\n(online)", "dealer\n(courier)"]
     cols = [C['quantum'], C['unmasked'], C['dp'], C['accent'], C['pareto']]
-    ax2.bar(labels, [costs1[n].recovery_bytes / 1024 for n in names],
-            color=cols)
-    ax2.set_ylabel('Recovery bytes / dropout (KB, ClinicalMLP)')
-    ax2.set_yscale('symlog')
-    # headroom for the 3-line bar annotations
-    ax2.set_ylim(0, max(costs1[n].recovery_bytes for n in names) / 1024 * 20)
+    vals = [costs1[n].recovery_bytes for n in names]
+    ax2.bar(labels, vals, color=cols)
+    ax2.set_ylabel('Recovery bytes / dropout (ClinicalMLP)')
+    # Log scale in BYTES so the 12-B seed reveals are visible bars, not
+    # sub-pixel slivers next to the 346 KB OTP reveals.
+    ax2.set_yscale('log')
+    ax2.set_ylim(4, max(vals) * 300)  # headroom for the annotations
     HNDL_NOTE = {"entangled": "HNDL-imm.*",
                  "bonawitz": "HNDL-exp.",
                  "flamingo": "HNDL-exp.",
@@ -2674,16 +2688,15 @@ def run_experiment_12(quick=False):
                  "it_dealer_courier": "HNDL-imm.\n(vs ch. recorder)"}
     for i, n in enumerate(names):
         c = costs1[n]
-        ax2.text(i, c.recovery_bytes / 1024,
+        ax2.text(i, c.recovery_bytes * 1.4,
+                 f'{c.recovery_bytes:,} B\n'
                  f'{SHORT_ASSUME[n]}\n'
                  f'{HNDL_NOTE[n]}\n'
                  f'{c.aggregator_prg_expansions} PRG exp',
                  ha='center', va='bottom', fontsize=6)
     ax2.tick_params(axis='x', labelsize=6)
-    ax2.text(0.99, 0.01,
-             '* contingent on GLLP PA margin + Shamir t>=2 (exp9)',
-             transform=ax2.transAxes, ha='right', va='bottom', fontsize=5,
-             color='gray')
+    ax2.set_xlabel('* contingent on GLLP PA margin + Shamir t>=2 (exp9)',
+                   fontsize=5, color='gray')
     ax2.set_title('The trade: bytes vs assumption class + HNDL')
     ax2.grid(True, alpha=0.3, axis='y')
 
