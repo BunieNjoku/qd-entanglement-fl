@@ -64,6 +64,22 @@ POST_PROC = {
     "bell_test_duty_cycle": 0.02,  # 2% overhead
 }
 
+# QKD-FRAMED COMPARISON ARM (exp13)
+# Same physics as OPERATING_POINT; only the post-processing framing
+# differs. Comparison-only - never feeds headline numbers.
+QKD_FRAMING = {
+    # Basis keep-fractions p^2 + (1-p)^2 for BBM92-class sifting
+    # (Lo, Chau & Ardehali, J. Cryptology 2005).
+    "sifting_modes": {
+        "symmetric": 0.5,                    # textbook BBM92, p = 0.5
+        "efficient-90/10": 0.9**2 + 0.1**2,  # = 0.82, QuNetQFL's split
+        "efficient-asymptotic": 1.0,         # asymptotic efficient limit
+    },
+    # e_ph = e_bit: standard symmetric-channel assumption; exp13 prints
+    # the caveat about m1's noise model.
+    "phase_error_equals_bit_error": True,
+}
+
 # MASKING WIDTH - single source of truth
 # The implementation masks int32-quantized gradients in the modular ring
 # Z_{2^32} (m4_federated_learning: QUANT_SCALE = 2^20 → 20 fractional bits

@@ -45,7 +45,7 @@ import matplotlib.patches as mpatches
 sys.path.insert(0, os.path.dirname(__file__))
 from config import (QUANTUM, POST_PROC, MESH, FL, COST, VIZ, RESULTS_DIR,
                     BITS_PER_PARAM, OPERATING_POINT, PROJECTED_OPERATING_POINT,
-                    CLASSICAL_LINK_BPS)
+                    CLASSICAL_LINK_BPS, QKD_FRAMING)
 
 from modules.m1_quantum_source import (
     simulate_source, compute_chsh_s, werner_state,
@@ -53,9 +53,9 @@ from modules.m1_quantum_source import (
     simulate_symmetric_edge,
 )
 from modules.m2_post_processing import (
-    fast_ec_simulate, compute_rate_waterfall, binary_entropy,
-    validate_bp_against_statistical, toeplitz_hash, validate_pa_output,
-    estimate_capacity_qber, randomness_battery,
+    fast_ec_simulate, compute_rate_waterfall, compute_rate_waterfall_qkd,
+    binary_entropy, validate_bp_against_statistical, toeplitz_hash,
+    validate_pa_output, estimate_capacity_qber, randomness_battery,
 )
 from modules.m3_mesh_topology import (
     generate_campus_mesh, build_aggregation_tree,
@@ -456,26 +456,31 @@ def run_experiment_2(quick=False):
     print("  [2d] BP decoder spot check against the EC tier model "
           "(toy random LDPC)...")
     bp_validation = validate_bp_against_statistical(
-        qber_values=[0.005, 0.01, 0.02],
+        qber_values=[0.005, 0.01, 0.02] if quick
+        else [0.005, 0.0085, 0.01, 0.02],
         block_size=800 if quick else 1000,
+        n_blocks=3 if quick else 10,
     )
-    print("    QBER    BP FER    Stat FER    Agreement")
-    print("    " + "-"*45)
+    print(f"    QBER     BP FER    Stat FER    Agreement   "
+          f"(FER resolution 1/{3 if quick else 10} per point)")
+    print("    " + "-"*60)
     for row in bp_validation:
         agree = "YES" if row["agreement"] else "NO"
-        print(f"    {row['qber']:.3f}   {row['bp_fer']:.2f}      "
+        print(f"    {row['qber']:.4f}   {row['bp_fer']:.2f}      "
               f"{row['stat_fer']:.2f}        {agree}")
     print("    Note: this toy 3-regular rate-0.84 LDPC has a low BSC "
-          "threshold - it\n    decodes cleanly below ~0.5% QBER, is "
-          "already marginal at the 0.85%\n    operating point, and fails "
-          "at 2%. It is a CONSERVATIVE FLOOR, not a\n    certification of "
-          "the tiers: a real capacity-approaching code (which the\n    "
-          "tiers assume) decodes the full design band. The 0.85-2% gap is "
-          "the toy\n    code underperforming that idealized code, not a "
-          "tier-model refutation.\n    The stat column is the "
-          "deterministic tier FER; the FER tiers remain a\n    stated "
-          "placeholder (see fast_ec_simulate). [prior LLR bug fixed: the "
-          "old\n    codeword-decoding sign gave FER≈1.0 at every QBER.]")
+          "threshold. Measured:\n    FER 0.1-0.6 across the 0.5-1% band "
+          "(0.10 at the 0.85% operating point),\n    1.0 at 2% - "
+          "everywhere above the tier model's assumed FER (0.005 in\n    "
+          "the design band; 0.10 at 2%). It is a CONSERVATIVE FLOOR, not a certification "
+          "of the tiers:\n    a real capacity-approaching code (which "
+          "the tiers assume) decodes the\n    full design band; the gap "
+          "is the toy code underperforming that idealized\n    code, not "
+          "a tier-model refutation. The stat column is the deterministic"
+          "\n    tier FER; the FER tiers remain a stated placeholder "
+          "(see\n    fast_ec_simulate). EC-model uncertainty affects "
+          "ABSOLUTE rates only: the\n    exp13 framing ratio charges "
+          "identical EC to both arms, so it cancels\n    there.")
 
     # 2e: NIST SP 800-22 subset battery on the PA output (HANDOFF 3.2;
     # replaces the former 10,000-bit monobit spot check). The input is the
@@ -2447,42 +2452,65 @@ def run_experiment_12(quick=False):
           "the unconditional-freshness guarantee.")
 
     # (D) Matched-metric table for systems that cannot be re-run
-    # (HANDOFF 4.2). Sourced from the underlying report's related-work
-    # analysis; arXiv ids carried for provenance.
+    # (HANDOFF 4.2, corrected per COMPARISON_DESIGN 3c: QuNetQFL is a
+    # fully connected pairwise MDI-QKD network with a classical
+    # aggregation-only server and no key relay - the earlier "via relay /
+    # transmitted / server present [in the key path]" row misdescribed
+    # it. Verified against arXiv 2501.12709; 6G row against 2603.15649.
+    # The "keys on channel?" column is retired: what matters is what a
+    # channel RECORDER captures and whether it breaks later.)
     print("\n  (D) Matched-metric comparison (columns matched; external "
           "rows from published descriptions):")
-    hdr = ["system", "key source", "keys on channel?", "server",
+    hdr = ["system", "key source", "recorder captures", "server",
            "dropout recovery", "assumption", "HNDL-immune leg"]
     rows = [
-        ["This system", "source-model distilled (entangled)", "no (local)",
+        ["This system", "source-model distilled (entangled)",
+         "nothing usable (keys local)",
          "honest-but-curious", "reveal pairwise bits (O(d))",
          "unconditional (ITS key)", "yes* (pairwise)"],
-        ["Bonawitz SecAgg (CCS'17)", "ephemeral DH + PRG", "yes (DH msgs)",
+        ["Bonawitz SecAgg (CCS'17)", "ephemeral DH + PRG",
+         "DH msgs (breaks later)",
          "honest-but-curious", "Shamir DH secret + recompute",
          "computational", "no"],
-        ["Flamingo (S&P'23)", "per-round PRF seed", "yes (enc. seeds)",
+        ["Flamingo (S&P'23)", "per-round PRF seed",
+         "enc. seeds (break later)",
          "honest-but-curious", "reveal PRF seed (O(1))",
          "computational", "no"],
-        ["QuNetQFL (2501.12709)", "MDI-QKD via relay", "yes (transmitted)",
-         "present", "not analyzed", "unconditional (QKD key)",
-         "yes (key layer)"],
-        ["6G QKD-FL (2603.15649)", "transmitted QKD keys", "yes (transmitted)",
-         "present", "not analyzed", "unconditional (QKD key)",
-         "yes (key layer)"],
+        ["QuNetQFL (2501.12709)", "pairwise MDI-QKD (fully conn.)",
+         "unclonable quantum states",
+         "classical, agg-only", "not addressed",
+         "unconditional (ITS key)", "yes (key layer)"],
+        ["6G QKD-FL (2603.15649)", "BB84-class QKD keys",
+         "unclonable quantum states",
+         "agg-only (masked)", "not addressed",
+         "unconditional (ITS key)", "yes (key layer)"],
     ]
     for r in [hdr] + rows:
-        print("      | " + " | ".join(f"{c:<34}" if i == 0 else f"{c:<20}"
+        print("      | " + " | ".join(f"{c:<34}" if i == 0 else f"{c:<27}"
                                        for i, c in enumerate(r)) + " |")
+    # The rate differentiator vs the QKD rows, computed (exp13), never
+    # asserted: same physics, both framings, per sifting protocol.
+    _qkd = _qkd_arm_waterfalls(OPERATING_POINT['raw_edge_rate_hz'],
+                               OPERATING_POINT['qber'])
+    _src_rate = OPERATING_POINT['waterfall']['final_secure_rate']
+    _r_sym = _src_rate / _qkd['symmetric']['final_secure_rate']
+    _r_eff = _src_rate / _qkd['efficient-90/10']['final_secure_rate']
+    _r_asy = _src_rate / _qkd['efficient-asymptotic']['final_secure_rate']
     print("    * This system's HNDL immunity is CONTINGENT on the GLLP "
           "tagged-fraction PA margin and the\n      Shamir threshold t≥2 "
-          "(HANDOFF §2b; mechanism in exp9). The QKD rows' keys are "
-          "information-\n      theoretically secure at the KEY layer too - "
-          "the honest differentiator over QuNetQFL/6G-QKD-FL\n      is NOT "
-          "assumption class but that this system's keys are generated by "
-          "LOCAL measurement (never\n      transmitted) and use "
-          "source-model framing (>2x the throughput of naive QKD framing), "
-          "and that it\n      analyzes reveal-based dropout recovery, which "
-          "those works do not.")
+          "(HANDOFF §2b; mechanism in exp9). The QKD rows share the "
+          "key-layer HNDL\n      immunity AND the ITS assumption class - "
+          "the honest differentiators are narrower: a higher\n      key "
+          f"rate from the same physics (exp13: {_r_sym:.1f}x vs "
+          f"symmetric-basis sifting, {_r_eff:.1f}x vs the\n      "
+          f"efficient 90/10 protocol QuNetQFL runs, {_r_asy:.1f}x in the "
+          "asymptotic-sifting limit - bought by\n      the trusted-source "
+          "assumption, i.e. a weaker tolerated channel adversary), no "
+          "basis-choice or\n      mid-point measurement hardware, and "
+          "reveal-based dropout recovery, which those works do\n      "
+          "not analyze. QuNetQFL's measured hardware rates (32.8-240 "
+          "kbit/s) exceed our modeled\n      12.6 kbit/s; theirs is "
+          "hardware, ours is simulation.")
 
     # Plot: recovery-byte scaling in d (left) + assumption/HNDL and
     # aggregator compute (right)
@@ -2548,10 +2576,230 @@ def run_experiment_12(quick=False):
     }
 
 
+def _qkd_arm_waterfalls(raw_hz, qber, assume_rate_adapted=False):
+    """One QKD-framed waterfall per configured sifting mode, with the
+    identical EC charges the source waterfall uses."""
+    return {
+        name: compute_rate_waterfall_qkd(
+            raw_hz, qber, keep,
+            code_rate=POST_PROC['ldpc_code_rate'],
+            security_margin=POST_PROC['security_margin_bits'],
+            block_size=POST_PROC['block_size'],
+            bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+            assume_rate_adapted=assume_rate_adapted)
+        for name, keep in QKD_FRAMING['sifting_modes'].items()
+    }
+
+
+def run_experiment_13(quick=False):
+    """Rate cost of QKD framing vs source-model framing, same physics
+    (COMPARISON_DESIGN 3a).
+
+    Both arms consume the identical m1 device model (raw coincidence
+    rate, QBER) and identical EC / FER / margin / duty charges from m2;
+    they differ ONLY in the post-processing framing. Source model: no
+    eavesdropper subtraction, explicit GLLP tagged-fraction removal, no
+    sifting. QKD framing (Shor-Preskill, entanglement-based): basis
+    sifting, h2(e_bit) Eve bound, NO tagging (Koashi-Preskill 2003;
+    Ma-Fung-Lo 2007 - see compute_rate_waterfall_qkd). The measured
+    ratio prices the trusted-source assumption. It is NOT a security
+    comparison: the QKD framing tolerates an ACTIVE channel adversary,
+    the source model only a passive one, and both are HNDL-immune at
+    the key layer.
+    """
+    print("\n" + "="*70)
+    print("EXPERIMENT 13: Rate cost of QKD framing vs source-model framing")
+    print("="*70)
+
+    op = OPERATING_POINT
+    raw = op['raw_edge_rate_hz']
+    q = op['qber']
+    src = op['waterfall']
+    qkd = _qkd_arm_waterfalls(raw, q)
+    mode_names = list(QKD_FRAMING['sifting_modes'].keys())
+    short = {"symmetric": "QKD sym 0.50",
+             "efficient-90/10": "QKD eff 0.82",
+             "efficient-asymptotic": "QKD eff 1.00"}
+
+    # (A) stage-by-stage rates, identical physics in every column
+    print(f"\n  (A) Stage rates (kbit/s) at the modeled operating point "
+          f"(raw {raw/1000:.1f} kHz, QBER {q*100:.2f}%):")
+    stages = [("raw", 'raw_coincidence_rate'),
+              ("after sifting", 'after_sifting'),
+              ("after EC", 'after_ec'),
+              ("after PA", 'after_pa'),
+              ("after FER", 'after_verification'),
+              ("final", 'final_secure_rate')]
+    print(f"    {'stage':>14} {'source-model':>13} "
+          + " ".join(f"{short[n]:>14}" for n in mode_names))
+    for label, key in stages:
+        print(f"    {label:>14} {src[key]/1000:>13.2f} "
+              + " ".join(f"{qkd[n][key]/1000:>14.2f}" for n in mode_names))
+    print("    PA charge: source-model removes the GLLP tagged fraction "
+          f"D_tag = {src['tagged_fraction']:.4f} (no Eve bound);\n"
+          "    QKD subtracts the Eve bound h2(e_bit) = "
+          f"{qkd[mode_names[0]]['eve_bound_fraction']:.4f} (no tagging - "
+          "entanglement-based analysis has none:\n    Koashi-Preskill "
+          "2003, Ma-Fung-Lo 2007). Each arm gets its own standard "
+          "analysis.")
+
+    # (B) the measured ratio, per sifting mode
+    ratios = {n: src['final_secure_rate'] / qkd[n]['final_secure_rate']
+              for n in mode_names}
+    floor_ratio = ratios['efficient-asymptotic']
+    print("\n  (B) Source-model / QKD-framed rate ratio (same physics, "
+          "same EC):")
+    for n in mode_names:
+        print(f"      vs {n:<22} (keep {qkd[n]['sifting_keep']:.2f}): "
+              f"{ratios[n]:.2f}x   ({qkd[n]['final_secure_rate']/1000:.2f} "
+              f"kbit/s)")
+    h_q = binary_entropy(q)
+    print(f"      decomposition: (i) sifting keep-fraction, (ii) net PA "
+          f"delta h2(e_bit) - D_tag = {h_q:.4f} - "
+          f"{src['tagged_fraction']:.4f} = {h_q - src['tagged_fraction']:.4f}."
+          f"\n      Asymptotic-sifting floor (part ii alone): "
+          f"{floor_ratio:.2f}x.")
+    print("      This replaces the retired '>2x vs naive QKD framing' "
+          "claim: the ratio is\n      protocol-dependent, and against the "
+          "efficient 90/10 protocol our nearest\n      competitor "
+          "(QuNetQFL) actually runs, it is the middle number, not 2x.")
+
+    # (C) ratio across the QBER sweep - both arms under the SAME EC model
+    # at every point (fixed declared code; tier FER cancels in the ratio)
+    sweep_q = np.linspace(0.005, 0.06, 12)
+    sweep_ratios = {n: [] for n in mode_names}
+    for qq in sweep_q:
+        s = compute_rate_waterfall(
+            raw, qq, code_rate=POST_PROC['ldpc_code_rate'],
+            security_margin=POST_PROC['security_margin_bits'],
+            block_size=POST_PROC['block_size'],
+            bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+            tagged_fraction=op['tagged_fraction'])
+        for n in mode_names:
+            k = compute_rate_waterfall_qkd(
+                raw, qq, QKD_FRAMING['sifting_modes'][n],
+                code_rate=POST_PROC['ldpc_code_rate'],
+                security_margin=POST_PROC['security_margin_bits'],
+                block_size=POST_PROC['block_size'],
+                bell_duty_cycle=POST_PROC['bell_test_duty_cycle'])
+            # matched-EC invariant: identical leak and FER in both arms
+            assert abs(s['ec_overhead_pct'] - k['ec_overhead_pct']) < 1e-12
+            assert s['frame_error_rate'] == k['frame_error_rate']
+            sweep_ratios[n].append(
+                s['final_secure_rate'] / k['final_secure_rate']
+                if k['final_secure_rate'] > 0 else np.nan)
+
+    # (D) what the framing means for key supply per round: params ceiling
+    # at 60 s AND the wait to fill the exp12 reference pool (ClinicalMLP,
+    # 28,866 params x 32 bits = 923,712 bits/edge/round)
+    ref_pool_bits = 28866 * BITS_PER_PARAM
+    print("\n  (D) Key-supply consequences per framing "
+          f"({BITS_PER_PARAM} bits/param/edge; reference pool "
+          f"{ref_pool_bits:,} bits = ClinicalMLP):")
+    for label, wf in [("source-model", src)] + [(short[n], qkd[n])
+                                                for n in mode_names]:
+        r = wf['final_secure_rate']
+        print(f"      {label:<14} {r/1000:>7.2f} kbit/s -> max "
+              f"{r*60/BITS_PER_PARAM/1000:>5.1f}K params/60s round, "
+              f"key_wait {ref_pool_bits/r:>6.1f} s/edge")
+
+    print("\n  Scope and modeling caveats (all resolved in the QKD arm's "
+          "favor where ambiguous):")
+    print("    - e_ph = e_bit: VERIFIED under m1's noise model, not just "
+          "assumed. The Werner\n      component is basis-isotropic and "
+          "the rotation-model birefringence errs the Z\n      and X bases "
+          "equally, so e_X = e_Z exactly (pinned by "
+          "tests/test_qkd_waterfall.py).")
+    print("    - m1's analytic QBER carries no multi-pair error term, so "
+          "the QKD arm charges\n      multi-pair emission NOWHERE in this "
+          "simulation (correctly not as tagging, and\n      not via "
+          "measured QBER either - the fold-in mechanism the literature "
+          "relies on\n      does not operate here).")
+    print("    - MDI-specific hardware penalties are NOT modeled: this "
+          "prices the FRAMING on\n      our modeled device, not a "
+          "reproduction of QuNetQFL's stack. Their measured\n      "
+          "hardware rates (32.8-240 kbit/s) exceed our modeled 12.6 "
+          "kbit/s.")
+    print("    - The EC tier model is a stated placeholder (exp2d); both "
+          "arms charge identical\n      EC, so EC-model uncertainty "
+          "cancels in the ratio and affects absolute rates\n      only.")
+    print("    - NOT a security comparison: QKD framing tolerates an "
+          "active channel adversary;\n      the source model assumes a "
+          "trusted source and passive channel. The ratio is\n      what "
+          "that extra assumption buys.")
+
+    # Figure: stage waterfalls, ratio bars, ratio-vs-QBER sweep
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=VIZ['figsize_wide'])
+
+    stage_labels = ['Raw', 'Sift', 'EC', 'PA', 'FER', 'Final']
+    xs = np.arange(len(stage_labels))
+    ax1.bar(xs - 0.2, [src[k]/1000 for _, k in stages], 0.4,
+            color=C['quantum'], label='source-model')
+    ax1.bar(xs + 0.2, [qkd['efficient-90/10'][k]/1000 for _, k in stages],
+            0.4, color=C['accent'], label='QKD-framed (keep 0.82)')
+    ax1.set_xticks(xs)
+    ax1.set_xticklabels(stage_labels, fontsize=7)
+    ax1.set_ylabel('Rate (kbit/s)')
+    ax1.set_title(f'Same physics, two framings\n(QBER {q*100:.2f}%)',
+                  fontsize=8)
+    ax1.legend(fontsize=6)
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    bar_labels = [short[n] for n in mode_names]
+    ax2.bar(bar_labels, [ratios[n] for n in mode_names],
+            color=[C['unmasked'], C['accent'], C['pareto']])
+    ax2.axhline(y=floor_ratio, color='gray', linestyle=':',
+                label=f'asymptotic-sifting floor {floor_ratio:.2f}x')
+    ax2.axhline(y=1.0, color='gray', linewidth=0.8)
+    for i, n in enumerate(mode_names):
+        ax2.text(i, ratios[n], f'{ratios[n]:.2f}x', ha='center',
+                 va='bottom', fontsize=7)
+    ax2.set_ylabel('source-model rate / QKD-framed rate')
+    ax2.set_ylim(0, max(ratios.values()) * 1.25)
+    ax2.set_title('The framing ratio is\nprotocol-dependent', fontsize=8)
+    ax2.tick_params(axis='x', labelsize=6)
+    ax2.legend(fontsize=6)
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    styles = {'symmetric': '-', 'efficient-90/10': '--',
+              'efficient-asymptotic': ':'}
+    for n in mode_names:
+        ax3.plot(sweep_q, sweep_ratios[n], styles[n], linewidth=2,
+                 label=f'{n} (keep '
+                       f"{QKD_FRAMING['sifting_modes'][n]:.2f})")
+    ax3.axvline(x=q, color=C['dark'], linestyle='--', linewidth=1,
+                label=f'operating point ({q*100:.2f}%)')
+    ax3.set_xlabel('QBER')
+    ax3.set_ylabel('rate ratio')
+    ax3.set_title('Ratio vs QBER\n(same EC model both arms)', fontsize=8)
+    ax3.legend(fontsize=6)
+    ax3.grid(True, alpha=0.3)
+
+    fig.suptitle('Source-model vs QKD framing of the same physical layer '
+                 '- the rate ratio prices the trusted-source assumption\n'
+                 '(comparison-only; not a security ranking - the QKD '
+                 'framing tolerates the stronger adversary)',
+                 fontsize=9, fontweight='bold')
+    fig.tight_layout()
+    save_fig(fig, 'exp13_qkd_framing')
+
+    print("\n  ✓ Experiment 13 complete.")
+    return {
+        "operating_point": {"raw_hz": raw, "qber": q,
+                            "source_model_bps": src['final_secure_rate']},
+        "qkd_framed_bps": {n: qkd[n]['final_secure_rate']
+                           for n in mode_names},
+        "rate_ratios": {n: ratios[n] for n in mode_names},
+        "net_pa_delta": h_q - src['tagged_fraction'],
+        "sweep": {"qber": sweep_q.tolist(),
+                  "ratios": {n: sweep_ratios[n] for n in mode_names}},
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='QD-Entanglement Simulation Runner')
-    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 13)),
-                        help='Experiment numbers to run (default: all 1-8)')
+    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 14)),
+                        help='Experiment numbers to run (default: all 1-13)')
     parser.add_argument('--quick', action='store_true',
                         help='Quick mode with reduced parameter sweeps')
     args = parser.parse_args()
@@ -2578,6 +2826,7 @@ def main():
         10: run_experiment_10,
         11: run_experiment_11,
         12: run_experiment_12,
+        13: run_experiment_13,
     }
 
     for exp_num in sorted(args.exp):

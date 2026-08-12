@@ -394,6 +394,92 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     }
 
 
+def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
+                               code_rate=0.84, security_margin=128,
+                               block_size=50000, bell_duty_cycle=0.02,
+                               frame_error_rate=None,
+                               assume_rate_adapted=False):
+    """Shor-Preskill asymptotic key fraction under entanglement-based QKD
+    framing of the SAME physical layer the source-model waterfall consumes:
+
+        r = sifting_keep * (1 - h2(e_ph) - leak_EC - margin)
+
+    then the shared tier-FER and duty post-factors. e_ph = e_bit, the
+    standard symmetric-channel assumption (exp13 prints the caveat about
+    m1's noise model not being purely depolarizing).
+
+    NO tagged-fraction charge, deliberately: tagging is the
+    prepare-and-measure treatment of multi-photon pulses (GLLP 2004). For
+    an entangled source, the basis-independent-source argument (Koashi &
+    Preskill, PRL 90, 057902, 2003) and the entangled-PDC analysis (Ma,
+    Fung & Lo, PRA 76, 012307, 2007) fold multi-pair emission into the
+    measured error rates via squashing (Beaudry, Moroder & Lutkenhaus,
+    PRL 101, 093601, 2008). Charging tagging here would understate the
+    QKD arm's rate and overstate the source-model arm's advantage. The
+    source-model waterfall keeps its explicit D_tag charge because it
+    never subtracts an Eve bound at all; each arm gets its own standard
+    analysis, not a hybrid.
+
+    leak_EC, the FER tiers, the security margin, and the duty cycle are
+    charged IDENTICALLY to compute_rate_waterfall (same declared LDPC,
+    same code rate), so the delta between the two waterfalls isolates the
+    framing itself: (i) sifting, (ii) the net PA delta h2(e_bit) - D_tag.
+    assume_rate_adapted mirrors the source waterfall's semantics EXACTLY
+    (leakage beta*h(q), design-band FER 0.005): sweep curves must compare
+    the two arms under the same EC model, since mixing a rate-adapted
+    source arm with a fixed-code QKD arm would inflate the ratio below
+    the ~2% crossover.
+
+    Comparison-only; never feeds headline numbers. Returns the same dict
+    shape as compute_rate_waterfall with 'tagged_fraction' fixed at 0.0,
+    plus 'eve_bound_fraction' and 'sifting_keep'.
+    """
+    h_q = binary_entropy(qber)
+    beta = 1.15  # same envelope inefficiency as the source waterfall
+
+    raw_rate = coincidence_rate_hz
+    after_sifting = raw_rate * sifting_keep
+
+    if assume_rate_adapted:
+        syndrome_fraction = h_q * beta
+        if frame_error_rate is None:
+            frame_error_rate = 0.005  # adapted code at its design band
+    else:
+        syndrome_fraction = max(h_q * beta, 1.0 - code_rate)
+        if frame_error_rate is None:
+            frame_error_rate = tier_frame_error_rate(qber, code_rate)
+
+    eve_bound_fraction = h_q  # e_ph = e_bit
+    secure_fraction_per_block = max(0, 1 - eve_bound_fraction
+                                    - syndrome_fraction
+                                    - security_margin / block_size)
+
+    after_ec = after_sifting * (1 - syndrome_fraction)
+    after_pa = after_sifting * secure_fraction_per_block
+    after_verification = after_pa * (1 - frame_error_rate)
+    after_bell = after_verification * (1 - bell_duty_cycle)
+
+    return {
+        "raw_coincidence_rate": raw_rate,
+        "after_sifting": after_sifting,
+        "sifting_overhead_pct": (1 - sifting_keep) * 100,
+        "sifting_keep": sifting_keep,
+        "after_ec": after_ec,
+        "ec_overhead_pct": syndrome_fraction * 100,
+        "after_pa": after_pa,
+        "pa_overhead_pct": eve_bound_fraction * 100,
+        "eve_bound_fraction": eve_bound_fraction,
+        "tagged_fraction": 0.0,
+        "frame_error_rate": frame_error_rate,
+        "assume_rate_adapted": assume_rate_adapted,
+        "after_verification": after_verification,
+        "verification_overhead_pct": frame_error_rate * 100,
+        "final_secure_rate": after_bell,
+        "bell_overhead_pct": bell_duty_cycle * 100,
+        "total_overhead_pct": (1 - after_bell / raw_rate) * 100 if raw_rate > 0 else 100,
+    }
+
+
 def toeplitz_hash(bits, output_length, seed=None, rng=None):
     """Privacy amplification via Toeplitz matrix-vector multiplication.
 
@@ -599,7 +685,8 @@ def randomness_battery(bits, alpha=0.01, serial_m=8,
     return results
 
 
-def validate_bp_against_statistical(qber_values=None, block_size=1000, rng=None):
+def validate_bp_against_statistical(qber_values=None, block_size=1000,
+                                    n_blocks=3, rng=None):
     """Cross-check the fast statistical EC tier model against a real BP
     decoder on a toy random LDPC.
 
@@ -607,16 +694,17 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000, rng=None)
     capacity claim, and it is reported honestly rather than asserted as a
     pass. The code here is a crude column-weight-3 random LDPC at rate
     0.84 - a 3-regular high-rate code has a LOW BSC threshold, far below a
-    5G-NR-grade capacity-approaching code. Measured behavior: it decodes
-    cleanly below ~0.5% QBER, is already MARGINAL at the 0.85% operating
-    point (FER ≈ 0.3 at these block sizes), and fails outright at 2%. So
-    the toy decoder is a conservative FLOOR: it demonstrates that the
-    tier model's low-FER assumption is achievable at the very low end and
-    improves with code quality, but it does NOT by itself certify the
-    tiers across the design band - that needs a real capacity-approaching
-    code. The gap at 0.85-2% is the toy code underperforming the
-    idealized code the tiers assume, NOT the tier model being wrong.
-    Reported alongside the standing placeholder caveat in fast_ec_simulate.
+    5G-NR-grade capacity-approaching code. Measured behavior (10
+    blocks/point, n=1000, fresh random H per block): FER 0.1-0.6 across
+    the 0.5-1% band (0.10 at the 0.85% operating point itself) and 1.0
+    at 2% - everywhere ABOVE the tier model's assumed FER (0.005 in
+    the design band; 0.10 at 2%). So the toy decoder is a conservative FLOOR: it shows the
+    error patterns are BP-decodable at the operating point most of the
+    time even with a code this crude, but it does NOT certify the tiers -
+    that needs a real capacity-approaching code. The gap is the toy code
+    underperforming the idealized code the tiers assume, NOT the tier
+    model being wrong. Reported alongside the standing placeholder
+    caveat in fast_ec_simulate.
 
     Uses a SMALL block (default 1000) decoupled from the rate-model's
     50k-bit blocks: BP on the full block in Python is O(iters·edges) and
@@ -629,12 +717,12 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000, rng=None)
     if rng is None:
         rng = np.random.default_rng(42)
     if qber_values is None:
-        # Design band (0.5-1%, spanning the 0.85% operating point) plus
+        # Design band including the 0.85% operating point itself, plus
         # one degraded-band point (2%) to exhibit the toy code's threshold.
-        qber_values = [0.005, 0.01, 0.02]
+        qber_values = [0.005, 0.0085, 0.01, 0.02]
 
     code_rate = 0.84
-    n_blocks_per_qber = 3
+    n_blocks_per_qber = n_blocks  # FER resolution = 1/n_blocks
     validation_table = []
 
     for qber in qber_values:

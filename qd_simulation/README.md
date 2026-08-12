@@ -41,7 +41,7 @@ This is source-model secret-key agreement (Maurer 1993; Ahlswede–Csiszár 1993
 ```bash
 pip install -r requirements.txt
 python run_all.py             # Full run, all experiments
-python run_all.py --quick     # Reduced sweeps, ~15-20 min
+python run_all.py --quick     # Reduced sweeps, ~1.5 min
 python run_all.py --exp 1 2 3 # Specific experiments
 ```
 
@@ -61,6 +61,7 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 10 | Availability under source failure | Kill one node's source: edges continue at ~half rate from far endpoints (availability/fairness, not security) |
 | 11 | **Gradient inversion (real construction)** | Tabular DLG/iDLG: unmasked leaks (100% attr-infer), modular mask blocks (theorem), plaintext aggregate partially leaks (motivates DP-on-top) |
 | 12 | **SOTA comparison** | Faithful Bonawitz-DH + Flamingo-PRF baselines: ours pays O(d) recovery bytes + key latency for unconditional freshness & HNDL immunity (honest trade, baselines not strawmanned) |
+| 13 | **QKD-framing rate cost** | Same physics, two post-processings: source-model vs Shor-Preskill QKD framing. Ratio 2.2×/1.3×/1.1× by sifting protocol — prices the trusted-source assumption; not a security ranking |
 
 ## Assumptions
 
@@ -84,6 +85,7 @@ Results in `results/`:
 - `exp10_availability.png` — Availability under single-source failure
 - `exp11_gradient_inversion.png` — Gradient inversion on the real construction
 - `exp12_sota_comparison.png` — SOTA comparison vs Bonawitz and Flamingo baselines
+- `exp13_qkd_framing.png` — Rate cost of QKD framing vs source-model framing
 - `summary.json` — Numeric results
 
 ## Hardware Requirements
@@ -130,10 +132,19 @@ privacy proof), `prng`, `dp`, `unmasked`.
   dropout recovery. Same recovery *mechanism* as ours; our differentiator is
   that per-round freshness is *unconditional* (no PRF/DH assumption, no
   key-erasure or forward-secrecy reliance).
-- **QuNetQFL (arXiv:2501.12709)** — QKD-derived masks for FL over a real quantum
-  network, with a central server and transmitted (MDI-QKD) keys; here keys are
-  source-model distilled, never transit, and we quantify the ~2× rate dividend
-  of dropping the QKD framing.
+- **QuNetQFL (arXiv:2501.12709)** — QKD-derived one-time-pad masks for FL,
+  experimentally validated on a real quantum network: fully connected pairwise
+  MDI-QKD among clients, classical aggregation-only server holding no key
+  material, measured 32.8–240 kbit/s pairwise key rates (above our modeled
+  12.6 kbit/s — theirs is hardware, ours simulation), supporting ~1.4K
+  maskable parameters over 160–200 rounds. Same assumption class as ours (ITS
+  keys, HNDL-immune key layer). Our differentiators are narrower and measured
+  (exp13): a higher key rate from the same physics (2.2× vs symmetric-basis
+  sifting, 1.3× vs the efficient 90/10 protocol they run, 1.1× in the
+  asymptotic-sifting limit — bought by the trusted-source assumption, i.e. a
+  weaker tolerated channel adversary), no basis-choice or mid-point
+  measurement hardware, and an analyzed dropout-recovery story, which they do
+  not address.
 - **Gold & Chitambar (arXiv:2505.10385)** — entanglement-derived correlated
   randomness replacing the MPC dealer (multiplication triples, with a Referee);
   we target FL aggregation with no Referee.
