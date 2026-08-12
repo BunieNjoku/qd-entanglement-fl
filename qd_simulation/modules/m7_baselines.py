@@ -104,8 +104,17 @@ class BaselineCost:
     downlink_bytes: int = 0         # global-model broadcast
     aggregator_prg_expansions: int = 0   # PRG mask (re)builds at the server
     aggregator_recovery_s: float = 0.0   # measured recovery wall-clock
-    assumption_class: str = ""      # "unconditional" | "computational"
+    assumption_class: str = ""      # e.g. "unconditional" | "computational"
     hndl_immune_pairwise_leg: bool = False
+    # Per-round pairwise-key setup traffic the protocol pays IN ADDITION
+    # to the shared self-mask machinery (Bonawitz: per-execution DH share
+    # redistribution is already in share_bytes; the dealer arm's pad
+    # distribution goes here). 0 where setup is amortized or local.
+    dealer_setup_bytes: int = 0
+    # Who must be trusted for the pairwise-mask leg to hold.
+    trust_surface: str = ""
+    # Strongest channel adversary the key layer tolerates.
+    channel_adversary_tolerated: str = ""
 
     def uplink_per_client(self):
         up = (self.payload_bytes + self.selfmask_bytes + self.share_bytes
@@ -194,7 +203,9 @@ def run_entangled(gradients, cluster, dropouts, distilled_pool, rng):
         aggregator_prg_expansions=0,
         aggregator_recovery_s=rec_s,
         assumption_class="unconditional",
-        hndl_immune_pairwise_leg=True)
+        hndl_immune_pairwise_leg=True,
+        trust_surface="own source (endpoint-owned hardware)",
+        channel_adversary_tolerated="passive only")
     return agg, cost
 
 
@@ -277,7 +288,9 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
         aggregator_prg_expansions=prg_expansions,
         aggregator_recovery_s=rec_s,
         assumption_class="computational",
-        hndl_immune_pairwise_leg=False)
+        hndl_immune_pairwise_leg=False,
+        trust_surface="none (pairwise DH/PRF)",
+        channel_adversary_tolerated="active")
     return agg, cost
 
 
@@ -342,5 +355,108 @@ def run_flamingo(gradients, cluster, dropouts, round_idx, rng):
         aggregator_prg_expansions=prg_expansions,
         aggregator_recovery_s=rec_s,
         assumption_class="computational",
-        hndl_immune_pairwise_leg=False)
+        hndl_immune_pairwise_leg=False,
+        trust_surface="none (pairwise DH/PRF)",
+        channel_adversary_tolerated="active")
+    return agg, cost
+
+
+def run_it_dealer(gradients, cluster, dropouts, dealer_pool, rng,
+                  provisioning="online"):
+    """Classical IT-dealer baseline (COMPARISON_DESIGN 3b): an offline
+    trusted dealer provisions each client pair with uniform one-time
+    pads; round mechanics are then IDENTICAL to run_entangled by
+    construction (same helpers, same single-use OTP discipline, same
+    reveal-based O(d) dropout recovery - the dealer is offline at round
+    time, so recovery cannot ask it for help). This is the strongest
+    classical objection made executable: information-theoretic masking
+    with NO quantum hardware. What differs is provenance and trust:
+
+      provisioning="online"  - pads distributed over recorded classical
+          channels under computational encryption (TLS). Charged
+          n(n-1) * d * 4 B per round (each pad is sent to BOTH
+          endpoints). A transcript recorder that later breaks the
+          encryption recovers every pad -> every gradient (exp9's
+          it_dealer_online arm). IT-secure masking, computationally
+          secured provisioning: the HNDL hole moves one layer down.
+
+      provisioning="courier" - pads pre-provisioned out of band
+          (courier / HSM install). 0 channel bytes per round; the
+          amortized per-visit batch and the storage-exposure window it
+          creates are reported by exp12, not charged here. No channel
+          transcript exists to break, but the dealer generated and held
+          every pad, and future rounds' pads sit in storage between
+          visits: dealer or storage compromise is total.
+
+    NOT a delegation to run_entangled: that function's cost labels
+    (assumption_class="unconditional", hndl_immune_pairwise_leg=True)
+    are hardcoded for the entangled arm and would mislabel this one.
+    """
+    assert provisioning in ("online", "courier"), provisioning
+    cluster, n, n_params, quant, self_seeds, self_masks, shares = \
+        _common_setup(gradients, cluster, rng)
+    dropouts = set(dropouts)
+    survivors = [c for c in cluster if c not in dropouts]
+
+    # Pairwise pads sliced from the dealer pool - same OTP mechanics and
+    # canonical (min,max) keying as the entangled arm.
+    pair_bits, pair_masks, off = {}, {}, 0
+    bpm = n_params * 32
+    for i, ci in enumerate(cluster):
+        for cj in cluster[i + 1:]:
+            pair_bits[(ci, cj)] = dealer_pool[off:off + bpm]
+            pair_masks[(ci, cj)] = derive_modular_mask(
+                n_params, pair_bits[(ci, cj)])
+            off += bpm
+
+    agg = np.zeros(n_params, dtype=np.uint32)
+    for c in survivors:
+        p = quant[c].copy()
+        for c2 in cluster:
+            if c2 == c:
+                continue
+            lo, hi = (c, c2) if c < c2 else (c2, c)
+            p = apply_modular_mask(p, pair_masks[(lo, hi)],
+                                   sign=+1 if c < c2 else -1)
+        p = apply_modular_mask(p, self_masks[c], sign=+1)
+        agg = (agg + p).astype(np.uint32)
+
+    # Recovery: identical reveal mechanism to the entangled arm - a pad
+    # has no compact seed either.
+    t0 = time.perf_counter()
+    recovery_bytes = 0
+    for d in dropouts:
+        for s in survivors:
+            lo, hi = (s, d) if s < d else (d, s)
+            mask = derive_modular_mask(n_params, pair_bits[(lo, hi)])
+            agg = ((agg - mask) if s < d else (agg + mask)).astype(np.uint32)
+            recovery_bytes += n_params * BYTES_PER_REVEAL_WORD
+    rec_s = time.perf_counter() - t0
+
+    agg = _finish(cluster, dropouts, quant, self_masks, agg)
+
+    # Each of the n(n-1)/2 pads is sent to BOTH endpoints: n(n-1)*d*4 B.
+    setup = n * (n - 1) * n_params * 4 if provisioning == "online" else 0
+    cost = BaselineCost(
+        protocol=f"it_dealer_{provisioning}", n_clients=n, n_params=n_params,
+        n_dropped=len(dropouts),
+        payload_bytes=len(survivors) * n_params * BYTES_PER_MASKED_WORD,
+        selfmask_bytes=len(survivors) * BYTES_PER_SELFMASK_SEED,
+        share_bytes=n * (n - 1) * BYTES_PER_SHAMIR_SHARE,
+        recovery_bytes=recovery_bytes,
+        aggregator_prg_expansions=0,
+        aggregator_recovery_s=rec_s,
+        assumption_class=("IT mask; computational provisioning (TLS)"
+                          if provisioning == "online"
+                          else "IT mask; trusted dealer"),
+        hndl_immune_pairwise_leg=(provisioning == "courier"),
+        dealer_setup_bytes=setup,
+        trust_surface=("dealer holds all pads; TLS transit"
+                       if provisioning == "online"
+                       else "dealer holds all pads; pad storage between visits"),
+        channel_adversary_tolerated=("active at round time; provisioning "
+                                     "rests on TLS"
+                                     if provisioning == "online"
+                                     else "active at round time; provisioning "
+                                          "out of band"))
     return agg, cost

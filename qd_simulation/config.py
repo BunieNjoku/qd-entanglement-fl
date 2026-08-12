@@ -80,6 +80,17 @@ QKD_FRAMING = {
     "phase_error_equals_bit_error": True,
 }
 
+# CLASSICAL IT-DEALER BASELINE (m7.run_it_dealer, exp9/exp12)
+# The strongest classical objection made executable: a trusted dealer
+# provisions pairwise one-time pads over classical channels. Comparison
+# baseline only.
+IT_DEALER = {
+    # Illustrative courier cadence for the amortized-batch report in
+    # exp12 (one physical provisioning visit per this many rounds; the
+    # pads for all interim rounds sit in storage between visits).
+    "courier_rounds_per_visit": 30,
+}
+
 # MASKING WIDTH - single source of truth
 # The implementation masks int32-quantized gradients in the modular ring
 # Z_{2^32} (m4_federated_learning: QUANT_SCALE = 2^20 → 20 fractional bits

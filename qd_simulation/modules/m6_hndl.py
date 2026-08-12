@@ -25,6 +25,15 @@ computer breaking DH / channel encryption / PRFs after the fact):
       so expected retroactive recovery is 0% and residuals stay
       statistically uniform.
 
+  it_dealer_online arm - pairwise masks are dealer-provisioned one-time
+      pads with the SAME OTP mechanics as the entangled arm, but the
+      dealer distributes each round's pads over recorded classical
+      channels under computational encryption (COMPARISON_DESIGN 3b).
+      God-mode decrypts the recorded pad ciphertexts, so every pairwise
+      pad is in the transcript: expected retroactive gradient recovery
+      100%. IT-secure MASKING with computationally-secured PROVISIONING
+      is still HNDL-exposed - the hole moves one layer down.
+
 The t >= 2 structural argument, stated once: a payload loses ALL its
 pairwise masks only if every partner's pairwise material is revealed,
 i.e. all other cluster members dropped - but then survivors < Shamir
@@ -90,6 +99,10 @@ class TranscriptRound:
     # classical arm only: the per-pair mask seeds become god-mode-readable
     # (DH-derivable / decryptable after the fact). None in the entangled arm.
     pair_mask_seeds: Dict[Tuple[int, int], int] = None
+    # it_dealer_online arm only: the dealer's per-round pad distribution,
+    # recorded as TLS ciphertexts on the wire - god-mode decrypts them
+    # (COMPARISON_DESIGN 3b). None in the other arms.
+    dealer_pad_bits: Dict[Tuple[int, int], np.ndarray] = None
     # --- ground truth for scoring (NOT in the transcript) ---
     truth_quant: Dict[int, np.ndarray] = field(default_factory=dict)
 
@@ -104,6 +117,11 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
     arm='classical': pairwise masks PRG-expanded from `pair_mask_seeds`
     (the Bonawitz/Flamingo shape - seeds established over recorded
     channels).
+    arm='it_dealer_online': pairwise masks are dealer-provisioned pads
+    (from `pairwise_pool`, same OTP mechanics as the entangled arm), but
+    the dealer's pad-distribution messages ride recorded classical
+    channels under computational encryption - so the pads themselves
+    join the transcript as ciphertexts god-mode can open later.
 
     Returns (TranscriptRound, aggregate_quantized) where the aggregate is
     the unmasked modular sum of survivor payloads (for the coherence
@@ -125,7 +143,7 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
     for i_idx, ci in enumerate(cluster):
         for cj in cluster[i_idx + 1:]:
             key = (ci, cj)
-            if arm == "entangled":
+            if arm in ("entangled", "it_dealer_online"):
                 bits = pairwise_pool[off:off + bits_per_mask]
                 off += bits_per_mask
                 pair_masks[key] = derive_modular_mask(n_params, bits)
@@ -161,7 +179,7 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
     for c in dropouts:
         for s in survivors:
             lo, hi = (s, c) if s < c else (c, s)
-            if arm == "entangled":
+            if arm in ("entangled", "it_dealer_online"):
                 revealed[(lo, hi)] = pair_bits[(lo, hi)]
             else:
                 revealed[(lo, hi)] = np.int64(pair_mask_seeds[(lo, hi)])
@@ -186,6 +204,10 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
                          for c in survivors},
         revealed_pair_bits=revealed,
         pair_mask_seeds=dict(pair_mask_seeds) if arm == "classical" else None,
+        # The dealer's per-round pad distribution is ON THE WIRE (under
+        # computational encryption) - the recorder keeps the ciphertexts.
+        dealer_pad_bits=(dict(pair_bits) if arm == "it_dealer_online"
+                         else None),
         truth_quant=quant,
     )
     return tr, agg
@@ -227,6 +249,11 @@ def retroactive_attack(transcript: List[TranscriptRound], arm):
                 mask = None
                 if arm == "classical":
                     mask = _prg_mask(tr.pair_mask_seeds[(lo, hi)], n_params)
+                elif arm == "it_dealer_online":
+                    # God-mode decrypts the recorded pad ciphertexts:
+                    # every pairwise pad is in the transcript.
+                    mask = derive_modular_mask(
+                        n_params, tr.dealer_pad_bits[(lo, hi)])
                 elif (lo, hi) in tr.revealed_pair_bits:
                     mask = derive_modular_mask(
                         n_params, tr.revealed_pair_bits[(lo, hi)])

@@ -2029,8 +2029,8 @@ def run_experiment_9(quick=False):
     bits_per_mask = n_params * 32
 
     rng = np.random.default_rng(42)
-    tr_ent, tr_cls = [], []
-    print(f"  Recording {num_rounds} rounds x both arms "
+    tr_ent, tr_cls, tr_dlr = [], [], []
+    print(f"  Recording {num_rounds} rounds x all 3 arms "
           f"(drops at rounds {sorted(dropout_schedule)})...")
     for rd in range(num_rounds):
         drops = dropout_schedule.get(rd, set())
@@ -2052,12 +2052,17 @@ def run_experiment_9(quick=False):
                       for i in range(n_clients)
                       for j in range(i + 1, n_clients)}
 
+        dealer_pool = rng.integers(0, 2, size=3 * bits_per_mask,
+                                   dtype=np.int8)
         t_e, agg_e = run_transcript_round(
             rd, grads, range(n_clients), drops, "entangled",
             pairwise_pool=pool, self_seeds=self_seeds)
         t_c, agg_c = run_transcript_round(
             rd, grads, range(n_clients), drops, "classical",
             pair_mask_seeds=pair_seeds, self_seeds=self_seeds)
+        t_d, agg_d = run_transcript_round(
+            rd, grads, range(n_clients), drops, "it_dealer_online",
+            pairwise_pool=dealer_pool, self_seeds=self_seeds)
         # Coherence assertions: the wire-faithful transcript must equal
         # the LIVE implementation on identical inputs, and the two arms
         # must agree in the clear (they differ only inside the masks).
@@ -2068,38 +2073,48 @@ def run_experiment_9(quick=False):
         assert np.array_equal(agg_e, agg_live.aggregate_quantized), \
             "transcript arm diverges from secure_aggregation_round"
         assert np.array_equal(agg_c, agg_e), "arms diverge in the clear"
+        assert np.array_equal(agg_d, agg_e), "dealer arm diverges in the clear"
         tr_ent.append(t_e)
         tr_cls.append(t_c)
+        tr_dlr.append(t_d)
 
         survivors = n_clients - len(drops)
         set_model_params(global_model,
                          gparams + agg_live.aggregate / survivors)
 
     atk_c = retroactive_attack(tr_cls, "classical")
+    atk_d = retroactive_attack(tr_dlr, "it_dealer_online")
     atk_e = retroactive_attack(tr_ent, "entangled")
 
     print("\n  Retroactive god-mode attack on the recorded transcripts")
     print("  (adversary recomputes every COMPUTATIONAL secret: channel "
-          "encryption ->\n   Shamir shares -> all self-masks in BOTH arms; "
-          "classical arm also all\n   DH/PRF pairwise seeds):")
-    print(f"\n  {'arm':<28} {'payloads':>8} {'recovered':>10} "
+          "encryption ->\n   Shamir shares -> all self-masks in ALL arms; "
+          "classical arm also all\n   DH/PRF pairwise seeds; dealer arm "
+          "all recorded pad ciphertexts):")
+    print(f"\n  {'arm':<32} {'payloads':>8} {'recovered':>10} "
           f"{'min masks left':>15} {'residual p':>11} {'median|err|':>12}")
     for label, atk in [("classical (DH/PRF masks)", atk_c),
+                       ("IT dealer (online provisioning)", atk_d),
                        ("entangled (distilled keys)", atk_e)]:
-        print(f"  {label:<28} {atk['n_payloads']:>8} "
+        print(f"  {label:<32} {atk['n_payloads']:>8} "
               f"{100*atk['recovered_fraction']:>9.1f}% "
               f"{atk['min_masks_remaining']:>15} "
               f"{atk['mean_residual_monobit_p']:>11.3f} "
               f"{atk['median_abs_error']:>12.4g}")
     assert atk_c["recovered_fraction"] == 1.0, \
         "classical arm should be fully recoverable under god-mode"
+    assert atk_d["recovered_fraction"] == 1.0, \
+        "online-dealer arm should be fully recoverable under god-mode"
     assert atk_e["recovered_fraction"] == 0.0, \
         "entangled arm leaked a payload - HNDL claim violated"
     assert atk_e["min_masks_remaining"] >= 1, \
         "a delivered payload lost all pairwise masks - t>=2 argument violated"
 
-    print("\n  → classical arm: 100% of recorded gradients recovered "
-          "retroactively;")
+    print("\n  → classical arm AND online-dealer arm: 100% of recorded "
+          "gradients recovered\n    retroactively - IT-secure masking with "
+          "computationally-secured provisioning\n    is still HNDL-exposed "
+          "(the hole moves from the key agreement to the dealer's\n    "
+          "distribution channel);")
     print("    entangled arm: 0% - every delivered payload retains ≥ 1 "
           "pairwise mask that\n    never appeared in any transcript, and "
           "god-mode residuals remain uniform\n    (mean monobit p above; "
@@ -2107,33 +2122,37 @@ def run_experiment_9(quick=False):
           "classically).")
     print("\n  HONEST SCOPE: the self-mask leg rides classical channels "
           "(Shamir shares)\n  and is only computationally protected - "
-          "god-mode strips it in BOTH arms\n  here. The PAIRWISE leg alone "
+          "god-mode strips it in ALL arms\n  here. The PAIRWISE leg alone "
           "carries the HNDL claim. Recorded EC syndromes\n  are covered by "
           "the PA ε (masks are sliced from post-PA output).")
 
     # Plot: recovery fraction + residual uniformity per arm
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    arms = ["classical\n(DH/PRF)", "entangled\n(distilled)"]
-    ax1.bar(arms, [100 * atk_c["recovered_fraction"],
-                   100 * atk_e["recovered_fraction"]],
-            color=[C['unmasked'], C['quantum']])
+    arms = ["classical\n(DH/PRF)", "IT dealer\n(online prov.)",
+            "entangled\n(distilled)"]
+    fracs = [100 * atk_c["recovered_fraction"],
+             100 * atk_d["recovered_fraction"],
+             100 * atk_e["recovered_fraction"]]
+    ax1.bar(arms, fracs, color=[C['unmasked'], C['dp'], C['quantum']])
     ax1.set_ylabel('Gradients recovered retroactively (%)')
     ax1.set_ylim(0, 114)  # headroom for the bar labels
-    for i, v in enumerate([100 * atk_c["recovered_fraction"],
-                           100 * atk_e["recovered_fraction"]]):
+    for i, v in enumerate(fracs):
         ax1.text(i, v + 2, f'{v:.0f}%', ha='center', fontweight='bold')
     ax1.set_title('Retroactive recovery under god-mode')
     ax1.grid(True, alpha=0.3, axis='y')
 
     pc = [r["residual_monobit_p"] for r in atk_c["records"]]
+    pd_ = [r["residual_monobit_p"] for r in atk_d["records"]]
     pe = [r["residual_monobit_p"] for r in atk_e["records"]]
     ax2.scatter(np.zeros(len(pc)) + 0.0, pc, color=C['unmasked'],
                 alpha=0.7, label='classical: residual = the gradient')
-    ax2.scatter(np.zeros(len(pe)) + 1.0, pe, color=C['quantum'],
+    ax2.scatter(np.zeros(len(pd_)) + 1.0, pd_, color=C['dp'],
+                alpha=0.7, label='IT dealer (online): residual = the gradient')
+    ax2.scatter(np.zeros(len(pe)) + 2.0, pe, color=C['quantum'],
                 alpha=0.7, label='entangled: residual stays uniform')
     ax2.axhline(y=0.01, color='gray', linestyle=':', linewidth=1,
                 label='α = 0.01')
-    ax2.set_xticks([0, 1])
+    ax2.set_xticks([0, 1, 2])
     ax2.set_xticklabels(arms)
     ax2.set_ylabel('Monobit p-value of post-attack residual')
     ax2.set_ylim(-0.05, 1.05)
@@ -2151,6 +2170,8 @@ def run_experiment_9(quick=False):
     print("  ✓ Experiment 9 complete.")
     return {
         "classical": {k: v for k, v in atk_c.items() if k != "records"},
+        "it_dealer_online": {k: v for k, v in atk_d.items()
+                             if k != "records"},
         "entangled": {k: v for k, v in atk_e.items() if k != "records"},
         "rounds": num_rounds,
         "payloads_per_arm": atk_c["n_payloads"],
@@ -2321,12 +2342,17 @@ def run_experiment_10(quick=False):
 
 
 def run_experiment_12(quick=False):
-    """SOTA comparison: this system vs faithful Bonawitz-DH and
-    Flamingo-PRF classical baselines (HANDOFF 4.1-4.3).
+    """SOTA comparison: this system vs faithful Bonawitz-DH,
+    Flamingo-PRF, and classical IT-dealer baselines (HANDOFF 4.1-4.3;
+    dealer arms per COMPARISON_DESIGN 3b).
 
-    All three share the same modular masking, payload/self-mask wire
+    All five arms share the same modular masking, payload/self-mask wire
     format, and FL-layer byte scoping; they differ only in pairwise-mask
-    source and dropout-recovery mechanism (see modules/m7_baselines.py).
+    source, provisioning, and dropout-recovery mechanism (see
+    modules/m7_baselines.py). The dealer arms answer the strongest
+    CLASSICAL objection - IT-secure masking needs no quantum hardware -
+    by making its cost explicit: the provisioning channel (online: HNDL-
+    exposed, exp9) or the dealer itself (courier: holds every pad).
     Compared on: per-round bytes by phase, dropout recovery cost (bytes +
     aggregator compute), scaling in the vector dimension d and client
     count n, and assumption class / HNDL exposure. Systems results that
@@ -2340,13 +2366,15 @@ def run_experiment_12(quick=False):
     """
     print("\n" + "="*70)
     print("EXPERIMENT 12: SOTA comparison - this system vs Bonawitz / "
-          "Flamingo")
+          "Flamingo / IT-dealer")
     print("="*70)
 
     import torch
     from modules.m4_federated_learning import ClinicalMLP, load_clinical_data
     from modules.m7_baselines import (
-        run_entangled, run_bonawitz, run_flamingo)
+        run_entangled, run_bonawitz, run_flamingo, run_it_dealer)
+    from modules.m3_mesh_topology import generate_campus_mesh
+    from config import IT_DEALER
 
     # Real gradients at the ClinicalMLP scale (28,866 params)
     client_data, test_data, input_dim = load_clinical_data(
@@ -2368,37 +2396,60 @@ def run_experiment_12(quick=False):
     pool = rng.integers(0, 2, size=len(cluster) * (len(cluster) - 1) // 2 * bpm,
                         dtype=np.int8)
 
-    def run_all_three(dropouts):
-        ae, ce = run_entangled({c: g.clone() for c, g in grads.items()},
-                               cluster, dropouts, pool, np.random.default_rng(1))
-        ab, cb = run_bonawitz({c: g.clone() for c, g in grads.items()},
-                              cluster, dropouts, np.random.default_rng(1))
-        af, cf = run_flamingo({c: g.clone() for c, g in grads.items()},
-                              cluster, dropouts, 3, np.random.default_rng(1))
-        assert np.array_equal(ae, ab) and np.array_equal(ab, af), \
-            "protocols disagree on the recovered aggregate"
-        return {"entangled": ce, "bonawitz": cb, "flamingo": cf}
+    pool_dealer_on = rng.integers(
+        0, 2, size=len(cluster) * (len(cluster) - 1) // 2 * bpm, dtype=np.int8)
+    pool_dealer_co = rng.integers(
+        0, 2, size=len(cluster) * (len(cluster) - 1) // 2 * bpm, dtype=np.int8)
+
+    def run_all_arms(dropouts):
+        g_ = lambda: {c: g.clone() for c, g in grads.items()}
+        ae, ce = run_entangled(g_(), cluster, dropouts, pool,
+                               np.random.default_rng(1))
+        ab, cb = run_bonawitz(g_(), cluster, dropouts,
+                              np.random.default_rng(1))
+        af, cf = run_flamingo(g_(), cluster, dropouts, 3,
+                              np.random.default_rng(1))
+        ao, co = run_it_dealer(g_(), cluster, dropouts, pool_dealer_on,
+                               np.random.default_rng(1),
+                               provisioning="online")
+        ac, cc = run_it_dealer(g_(), cluster, dropouts, pool_dealer_co,
+                               np.random.default_rng(1),
+                               provisioning="courier")
+        for other in (ab, af, ao, ac):
+            assert np.array_equal(ae, other), \
+                "protocols disagree on the recovered aggregate"
+        return {"entangled": ce, "bonawitz": cb, "flamingo": cf,
+                "it_dealer_online": co, "it_dealer_courier": cc}
 
     # (A) Per-round cost with 1 dropped client
-    costs1 = run_all_three({2})
+    costs1 = run_all_arms({2})
+    ARMS = ["entangled", "bonawitz", "flamingo",
+            "it_dealer_online", "it_dealer_courier"]
+    SHORT_ASSUME = {"entangled": "unconditional",
+                    "bonawitz": "computational",
+                    "flamingo": "computational",
+                    "it_dealer_online": "IT+comp.prov",
+                    "it_dealer_courier": "IT+dealer"}
     print(f"\n  (A) Per-round cost, 4-client cluster, ClinicalMLP "
           f"(n_params={n_params:,}), 1 dropout:")
-    print(f"  {'protocol':>10} {'payload/cl':>11} {'recovery B':>11} "
-          f"{'agg PRG exp':>12} {'agg recov ms':>13} {'assumption':>14} "
-          f"{'HNDL-imm':>9}")
-    for name in ["entangled", "bonawitz", "flamingo"]:
+    print(f"  {'protocol':>17} {'payload/cl':>11} {'recovery B':>11} "
+          f"{'setup B':>10} {'agg PRG exp':>12} {'agg recov ms':>13} "
+          f"{'assumption':>14} {'HNDL-imm':>9}")
+    for name in ARMS:
         c = costs1[name]
-        print(f"  {name:>10} "
+        print(f"  {name:>17} "
               f"{c.payload_bytes // max(c.n_clients - c.n_dropped, 1):>11,} "
-              f"{c.recovery_bytes:>11,} {c.aggregator_prg_expansions:>12} "
+              f"{c.recovery_bytes:>11,} {c.dealer_setup_bytes:>10,} "
+              f"{c.aggregator_prg_expansions:>12} "
               f"{1000*c.aggregator_recovery_s:>13.2f} "
-              f"{c.assumption_class:>14} {str(c.hndl_immune_pairwise_leg):>9}")
+              f"{SHORT_ASSUME[name]:>14} "
+              f"{str(c.hndl_immune_pairwise_leg):>9}")
     ratio = costs1["entangled"].recovery_bytes / max(
         costs1["flamingo"].recovery_bytes, 1)
     print(f"    → this system's recovery traffic is {ratio:,.0f}x the "
           f"seed-based baselines' (= n_params: a one-time pad has no\n"
           f"      compact seed to send). Non-recovery per-round bytes: "
-          f"payload+self-mask identical across all three;\n"
+          f"payload+self-mask identical across all five;\n"
           f"      Bonawitz additionally redistributes n(n-1) DH-secret "
           f"Shamir shares per round (per-execution\n      ephemeral DH - "
           f"the setup cost Flamingo's long-term-secret ratchet avoids), so "
@@ -2409,29 +2460,47 @@ def run_experiment_12(quick=False):
           f"~{1000*costs1['flamingo'].aggregator_recovery_s:.2f} ms): it "
           f"does 0 PRG expansions but O(d)\n      bit-repacking, which "
           f"costs more here than the baselines' few PRG calls. No axis is "
-          f"hidden.")
+          f"hidden.\n      The dealer arms match this system's O(d) reveal "
+          f"recovery exactly (a pad has no compact seed\n      either); the "
+          f"ONLINE dealer additionally pays n(n-1)*d*4 = "
+          f"{costs1['it_dealer_online'].dealer_setup_bytes:,} B/round of "
+          f"pad\n      distribution, and its HNDL-immune column is False "
+          f"because that distribution rides recorded\n      channels "
+          f"(exp9). The COURIER dealer pays 0 channel bytes/round; its "
+          f"True is against a CHANNEL\n      recorder only - the dealer "
+          f"holds every pad, and a "
+          f"{IT_DEALER['courier_rounds_per_visit']}-round provisioning "
+          f"batch ("
+          f"{IT_DEALER['courier_rounds_per_visit'] * costs1['it_dealer_online'].dealer_setup_bytes:,}"
+          f" B) sits in\n      storage between visits.")
 
     # (B) Recovery-byte scaling in the vector dimension d
     dims = [128, 1024, 8192, n_params]
     print("\n  (B) Dropout-recovery bytes vs vector dimension d "
           "(1 dropout, 3 survivors):")
-    print(f"  {'d':>8} {'entangled':>12} {'bonawitz':>10} {'flamingo':>10}")
+    print(f"  {'d':>8} {'entangled':>12} {'bonawitz':>10} {'flamingo':>10} "
+          f"{'it_dealer':>11}")
     scaling = {}
     for d in dims:
         gd = {c: torch.zeros(d) for c in cluster}
         pd = rng.integers(0, 2, size=6 * d * 32, dtype=np.int8)
+        pdd = rng.integers(0, 2, size=6 * d * 32, dtype=np.int8)
         _, ced = run_entangled({c: g.clone() for c, g in gd.items()},
                                cluster, {2}, pd, np.random.default_rng(1))
         _, cbd = run_bonawitz({c: g.clone() for c, g in gd.items()},
                               cluster, {2}, np.random.default_rng(1))
         _, cfd = run_flamingo({c: g.clone() for c, g in gd.items()},
                               cluster, {2}, 3, np.random.default_rng(1))
-        scaling[d] = (ced.recovery_bytes, cbd.recovery_bytes, cfd.recovery_bytes)
+        _, cdd = run_it_dealer({c: g.clone() for c, g in gd.items()},
+                               cluster, {2}, pdd, np.random.default_rng(1))
+        scaling[d] = (ced.recovery_bytes, cbd.recovery_bytes,
+                      cfd.recovery_bytes, cdd.recovery_bytes)
         print(f"  {d:>8} {ced.recovery_bytes:>12,} {cbd.recovery_bytes:>10,} "
-              f"{cfd.recovery_bytes:>10,}")
-    print("    → this system O(d); both baselines O(1) in d (scalar seed/"
-          "shares). The gap is the price of\n      the one-time pad, and "
-          "it grows with model size.")
+              f"{cfd.recovery_bytes:>10,} {cdd.recovery_bytes:>11,}")
+    print("    → this system and the dealer arms are O(d) (a one-time pad "
+          "has no compact seed);\n      the seed-based baselines are O(1) "
+          "in d. The O(d) gap is the price of the pad,\n      whatever "
+          "provisioned it.")
 
     # (C) Key-supply latency this system pays and the baselines do NOT,
     # at BOTH operating points (HANDOFF 4.3)
@@ -2440,8 +2509,8 @@ def run_experiment_12(quick=False):
     # One pairwise pool per cluster edge per round: bits_per_mask = n_params*32.
     key_wait_op = bpm / op
     key_wait_proj = bpm / proj
-    print("\n  (C) Key-supply latency (this system only; baselines use "
-          "DH/PRF, no distilled key):")
+    print("\n  (C) Key-supply latency (this system only; the baselines "
+          "distill no key):")
     print(f"      pairwise pool per edge/round = {bpm:,} bits")
     print(f"      modeled operating point ({op/1000:.1f} kbit/s): "
           f"key_wait {key_wait_op:.1f} s/edge")
@@ -2449,7 +2518,13 @@ def run_experiment_12(quick=False):
           f"hypothetical): key_wait {key_wait_proj:.1f} s/edge")
     print("      Bonawitz/Flamingo pay 0 s here - computational key setup "
           "is ~instant. This latency is\n      the operational cost of "
-          "the unconditional-freshness guarantee.")
+          "the unconditional-freshness guarantee. The dealer arms also "
+          "pay 0 s of\n      distillation; the online variant instead "
+          "moves n(n-1)*d*4 B/round of pads over the wire\n      "
+          "(= 11.1 Mbit: ~11 ms at 1 Gbps serial, ~2.8 ms/client in "
+          "parallel) and the courier\n      variant moves it in "
+          "pre-provisioned batches - the dealer's cost is trust, not "
+          "latency.")
 
     # (D) Matched-metric table for systems that cannot be re-run
     # (HANDOFF 4.2, corrected per COMPARISON_DESIGN 3c: QuNetQFL is a
@@ -2459,35 +2534,76 @@ def run_experiment_12(quick=False):
     # it. Verified against arXiv 2501.12709; 6G row against 2603.15649.
     # The "keys on channel?" column is retired: what matters is what a
     # channel RECORDER captures and whether it breaks later.)
-    print("\n  (D) Matched-metric comparison (columns matched; external "
-          "rows from published descriptions):")
-    hdr = ["system", "key source", "recorder captures", "server",
-           "dropout recovery", "assumption", "HNDL-immune leg"]
-    rows = [
+    print("\n  (D1) Matched-metric comparison, SECURITY axes (executing "
+          "arms + external rows from\n       published descriptions):")
+    hdr1 = ["system", "key source", "recorder captures",
+            "trusted 3rd party", "tolerated channel adversary",
+            "HNDL-immune leg"]
+    rows1 = [
         ["This system", "source-model distilled (entangled)",
-         "nothing usable (keys local)",
-         "honest-but-curious", "reveal pairwise bits (O(d))",
-         "unconditional (ITS key)", "yes* (pairwise)"],
+         "nothing usable (keys local)", "none (own source)**",
+         "passive only", "yes* (pairwise)"],
         ["Bonawitz SecAgg (CCS'17)", "ephemeral DH + PRG",
-         "DH msgs (breaks later)",
-         "honest-but-curious", "Shamir DH secret + recompute",
-         "computational", "no"],
+         "DH msgs (breaks later)", "none",
+         "active", "no"],
         ["Flamingo (S&P'23)", "per-round PRF seed",
-         "enc. seeds (break later)",
-         "honest-but-curious", "reveal PRF seed (O(1))",
-         "computational", "no"],
+         "enc. seeds (break later)", "none",
+         "active", "no"],
+        ["IT dealer, online prov.", "dealer-provisioned OTPs",
+         "pad ciphertexts (break later)", "dealer (holds all pads)",
+         "active at round; TLS at provisioning", "no (exp9: 100%)"],
+        ["IT dealer, courier prov.", "dealer-provisioned OTPs",
+         "nothing usable (pads out of band)", "dealer (holds all pads)",
+         "active at round; courier out of band", "vs recorder only***"],
         ["QuNetQFL (2501.12709)", "pairwise MDI-QKD (fully conn.)",
-         "unclonable quantum states",
-         "classical, agg-only", "not addressed",
-         "unconditional (ITS key)", "yes (key layer)"],
+         "unclonable quantum states", "none (MDI node untrusted)",
+         "active", "yes (key layer)"],
         ["6G QKD-FL (2603.15649)", "BB84-class QKD keys",
-         "unclonable quantum states",
-         "agg-only (masked)", "not addressed",
-         "unconditional (ITS key)", "yes (key layer)"],
+         "unclonable quantum states", "none",
+         "active", "yes (key layer)"],
     ]
-    for r in [hdr] + rows:
-        print("      | " + " | ".join(f"{c:<34}" if i == 0 else f"{c:<27}"
+    for r in [hdr1] + rows1:
+        print("      | " + " | ".join(f"{c:<24}" if i == 0 else f"{c:<33}"
                                        for i, c in enumerate(r)) + " |")
+
+    # Logical vs physical key-relationship scaling, computed from m3 -
+    # labeled per layer so QuNetQFL's fully-connected LOGICAL key graph
+    # (multiplexed through a Sagnac loop, NOT K(K-1)/2 physical fibers)
+    # is never compared against our PHYSICAL edge count.
+    _n_demo = 12
+    _, _tris, _G = generate_campus_mesh(_n_demo)
+    _phys = _G.number_of_edges()
+    _logical_ours = _phys + max(len(_tris) - 1, 0)  # edge keys + tree keys
+    _logical_fc = _n_demo * (_n_demo - 1) // 2
+    print(f"\n  (D2) Cost axes at K = {_n_demo} clients "
+          f"(key relationships computed from m3):")
+    print(f"      | {'system':<24} | {'dropout recovery':<28} | "
+          f"{'per-round setup traffic':<31} | {'logical pairwise keys':<21} "
+          f"| {'physical links':<26} |")
+    _d2 = [
+        ["This system", "reveal pairwise bits, O(d)",
+         "none (keys distilled locally)",
+         f"{_logical_ours} (edges+tree)",
+         f"{_phys} Delaunay fiber edges"],
+        ["Bonawitz SecAgg (CCS'17)", "Shamir DH secret, O(1)",
+         "n(n-1) DH shares (per-exec DH)", f"{_logical_fc}",
+         "0 quantum (classical net)"],
+        ["Flamingo (S&P'23)", "reveal PRF seed, O(1)",
+         "none (long-term secret ratchet)", f"{_logical_fc}",
+         "0 quantum (classical net)"],
+        ["IT dealer, online prov.", "reveal pad bits, O(d)",
+         "n(n-1)*d*4 B pad distribution", f"{_logical_fc}",
+         "0 quantum (classical net)"],
+        ["IT dealer, courier prov.", "reveal pad bits, O(d)",
+         "0 (amortized courier batches)", f"{_logical_fc}",
+         "0 quantum (classical net)"],
+        ["QuNetQFL (2501.12709)", "not addressed",
+         "QKD post-processing traffic", f"{_logical_fc}",
+         "shared Sagnac loop + per-client"],
+    ]
+    for r in _d2:
+        print(f"      | {r[0]:<24} | {r[1]:<28} | {r[2]:<31} | "
+              f"{r[3]:<21} | {r[4]:<26} |")
     # The rate differentiator vs the QKD rows, computed (exp13), never
     # asserted: same physics, both framings, per sifting protocol.
     _qkd = _qkd_arm_waterfalls(OPERATING_POINT['raw_edge_rate_hz'],
@@ -2510,7 +2626,14 @@ def run_experiment_12(quick=False):
           "reveal-based dropout recovery, which those works do\n      "
           "not analyze. QuNetQFL's measured hardware rates (32.8-240 "
           "kbit/s) exceed our modeled\n      12.6 kbit/s; theirs is "
-          "hardware, ours is simulation.")
+          "hardware, ours is simulation.\n    ** 'None' here means no "
+          "THIRD party: the source is trusted, but it is endpoint-owned "
+          "equipment -\n      an assumption about our own hardware, not "
+          "about someone else's.\n    *** The courier dealer's immunity "
+          "is against a CHANNEL recorder only: no transcript exists to"
+          "\n      break, but the dealer generated and held every pad - "
+          "dealer or pad-storage compromise is\n      total, and no "
+          "per-round freshness exists between courier visits.")
 
     # Plot: recovery-byte scaling in d (left) + assumption/HNDL and
     # aggregator compute (right)
@@ -2522,37 +2645,52 @@ def run_experiment_12(quick=False):
                linewidth=2, label='Bonawitz (Shamir DH scalar, O(1))')
     ax1.loglog(ds, [scaling[d][2] for d in ds], '^:', color=C['dp'],
                linewidth=2, label='Flamingo (PRF seed, O(1))')
+    ax1.loglog(ds, [scaling[d][3] for d in ds], 'd-.', color=C['accent'],
+               linewidth=1.2,
+               label='IT dealer (reveal pad bits, O(d) = this system)')
     ax1.axvline(x=n_params, color='gray', linestyle=':', alpha=0.6)
     ax1.text(n_params, ax1.get_ylim()[0] * 2, ' ClinicalMLP', fontsize=6,
              color='gray', rotation=90, va='bottom')
     ax1.set_xlabel('Vector dimension d (params)')
     ax1.set_ylabel('Dropout-recovery bytes (1 drop, 3 survivors)')
-    ax1.set_title('Recovery cost scales with d only for this system')
+    ax1.set_title('Recovery cost scales with d for every OTP arm')
     ax1.legend(fontsize=7)
     ax1.grid(True, alpha=0.3, which='both')
 
-    names = ["entangled", "bonawitz", "flamingo"]
-    labels = ["this system", "Bonawitz", "Flamingo"]
-    cols = [C['quantum'], C['unmasked'], C['dp']]
+    names = ARMS
+    labels = ["this system", "Bonawitz", "Flamingo",
+              "dealer\n(online)", "dealer\n(courier)"]
+    cols = [C['quantum'], C['unmasked'], C['dp'], C['accent'], C['pareto']]
     ax2.bar(labels, [costs1[n].recovery_bytes / 1024 for n in names],
             color=cols)
     ax2.set_ylabel('Recovery bytes / dropout (KB, ClinicalMLP)')
     ax2.set_yscale('symlog')
     # headroom for the 3-line bar annotations
     ax2.set_ylim(0, max(costs1[n].recovery_bytes for n in names) / 1024 * 20)
+    HNDL_NOTE = {"entangled": "HNDL-imm.*",
+                 "bonawitz": "HNDL-exp.",
+                 "flamingo": "HNDL-exp.",
+                 "it_dealer_online": "HNDL-exp.",
+                 "it_dealer_courier": "HNDL-imm.\n(vs ch. recorder)"}
     for i, n in enumerate(names):
         c = costs1[n]
         ax2.text(i, c.recovery_bytes / 1024,
-                 f'{c.assumption_class}\n'
-                 f'{"HNDL-immune" if c.hndl_immune_pairwise_leg else "HNDL-exposed"}\n'
+                 f'{SHORT_ASSUME[n]}\n'
+                 f'{HNDL_NOTE[n]}\n'
                  f'{c.aggregator_prg_expansions} PRG exp',
                  ha='center', va='bottom', fontsize=6)
+    ax2.tick_params(axis='x', labelsize=6)
+    ax2.text(0.99, 0.01,
+             '* contingent on GLLP PA margin + Shamir t>=2 (exp9)',
+             transform=ax2.transAxes, ha='right', va='bottom', fontsize=5,
+             color='gray')
     ax2.set_title('The trade: bytes vs assumption class + HNDL')
     ax2.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle('SOTA comparison - this system pays O(d) '
-                 'recovery bytes + key latency\nfor unconditional freshness '
-                 '& HNDL immunity; baselines are cheaper but computational',
+    fig.suptitle('SOTA comparison, five executing arms - every OTP arm '
+                 'pays O(d) recovery; what differs is\nwho you trust: '
+                 'computational assumptions (DH/PRF), a dealer, or your '
+                 'own entangled source',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp12_sota_comparison')
@@ -2566,10 +2704,15 @@ def run_experiment_12(quick=False):
             "aggregator_prg_expansions": costs1[n].aggregator_prg_expansions,
             "aggregator_recovery_ms": 1000 * costs1[n].aggregator_recovery_s,
             "assumption_class": costs1[n].assumption_class,
+            "dealer_setup_bytes": costs1[n].dealer_setup_bytes,
+            "trust_surface": costs1[n].trust_surface,
+            "channel_adversary_tolerated":
+                costs1[n].channel_adversary_tolerated,
             "hndl_immune_pairwise_leg": costs1[n].hndl_immune_pairwise_leg}
-            for n in ["entangled", "bonawitz", "flamingo"]},
+            for n in ARMS},
         "recovery_bytes_vs_dim": {str(d): {"entangled": v[0],
-                                           "bonawitz": v[1], "flamingo": v[2]}
+                                           "bonawitz": v[1], "flamingo": v[2],
+                                           "it_dealer": v[3]}
                                   for d, v in scaling.items()},
         "key_wait_s": {"modeled": key_wait_op, "projected": key_wait_proj},
         "n_params": n_params,
