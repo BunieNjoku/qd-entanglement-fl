@@ -8,7 +8,7 @@ partially-mixed Bell state; for near-pure sources (F > 0.95) the qualitative
 behavior matches depolarizing-channel models.
 
 Co-located architecture: QD source at one node; Photon 1 measured locally,
-Photon 2 frequency-converted (780nm → 1550nm via PPLN, Weber et al. 2019)
+Photon 2 frequency-converted (780nm -> 1550nm via PPLN, Weber et al. 2019)
 and transmitted over standard telecom fiber (0.2 dB/km) to partner node.
 
 This module produces correlated bit pairs at the two endpoints. Under the
@@ -147,7 +147,7 @@ def simulate_source(
         alice_efficiency = local_optics_efficiency * spad_efficiency
         bob_efficiency = coupling_efficiency * fiber_transmission * spad_efficiency
         if use_qfc:
-            # QFC stage on remote photon before fiber (780nm → 1550nm via PPLN)
+            # QFC stage on remote photon before fiber (780nm -> 1550nm via PPLN)
             bob_efficiency *= qfc_efficiency
     else:
         # Mid-fiber model: both photons traverse fiber (legacy)

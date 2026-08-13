@@ -1,4 +1,4 @@
-"""Tests for the IT-dealer baseline arm (COMPARISON_DESIGN 6, tests 4-7).
+"""Tests for the IT-dealer baseline arm.
 
 Plain-python asserts, no test framework. Run:
 

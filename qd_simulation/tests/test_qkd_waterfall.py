@@ -1,4 +1,4 @@
-"""Tests for the exp13 QKD-framed rate waterfall (COMPARISON_DESIGN 6).
+"""Tests for the exp13 QKD-framed rate waterfall.
 
 Plain-python asserts, no test framework (the repo has none). Run:
 
@@ -115,8 +115,8 @@ def test_no_tagging_path():
 def test_matched_ec_model():
     """Design test 3b: at every sweep point, both arms charge identical
     leak_EC and FER - in the fixed-code model and in the rate-adapted
-    envelope alike. Mixing EC models across arms is the round-2 MAJOR
-    this pins out."""
+    envelope alike. Mixing EC models across the arms would bias the
+    sweep ratio; this pins it out."""
     for adapted in (False, True):
         for qq in np.linspace(0.005, 0.06, 12):
             s = src_wf(RAW, qq, assume_rate_adapted=adapted)
@@ -168,8 +168,8 @@ def test_phase_error_symmetry():
 
 
 def test_operating_point_ratios():
-    """The design-review estimates, now pinned as regression values:
-    ratios ~2.2x / ~1.3x / ~1.1x at the modeled operating point."""
+    """Regression pins for the operating-point ratios:
+    ~2.2x / ~1.3x / ~1.1x."""
     src_rate = src_wf(RAW, Q)['final_secure_rate']
     modes = QKD_FRAMING['sifting_modes']
     ratios = {n: src_rate / qkd_wf(RAW, Q, keep)['final_secure_rate']

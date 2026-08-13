@@ -1,7 +1,7 @@
 """
 Module 6: Harvest-now / decrypt-later (HNDL) transcript experiment.
 
-HANDOFF 3.1 - turns the strongest security claim into a figure. Records
+Turns the strongest security claim into a figure. Records
 the FULL classical transcript of two-mask aggregation rounds in two arms
 that differ ONLY in where pairwise masks come from, then grants a
 recording adversary retroactive god-mode over every COMPUTATIONAL secret
@@ -28,7 +28,7 @@ computer breaking DH / channel encryption / PRFs after the fact):
   it_dealer_online arm - pairwise masks are dealer-provisioned one-time
       pads with the SAME OTP mechanics as the entangled arm, but the
       dealer distributes each round's pads over recorded classical
-      channels under computational encryption (COMPARISON_DESIGN 3b).
+      channels under computational encryption.
       God-mode decrypts the recorded pad ciphertexts, so every pairwise
       pad is in the transcript: expected retroactive gradient recovery
       100%. IT-secure MASKING with computationally-secured PROVISIONING
@@ -41,7 +41,7 @@ threshold, the cluster ABORTS at the live-set announcement, and the
 payload is never transmitted (see RoundComm in m4). Delivered payloads
 therefore always keep at least one unrevealed mask.
 
-Honest scope (HANDOFF 3.1 caveat, applies to BOTH arms here): the
+Honest scope (applies to ALL arms here): the
 self-mask leg rides classical channels via Shamir shares and is only
 computationally protected - god-mode strips every self-mask in this
 experiment. The pairwise leg ALONE carries the HNDL claim. EC syndromes
@@ -100,8 +100,8 @@ class TranscriptRound:
     # (DH-derivable / decryptable after the fact). None in the entangled arm.
     pair_mask_seeds: Dict[Tuple[int, int], int] = None
     # it_dealer_online arm only: the dealer's per-round pad distribution,
-    # recorded as TLS ciphertexts on the wire - god-mode decrypts them
-    # (COMPARISON_DESIGN 3b). None in the other arms.
+    # recorded as TLS ciphertexts on the wire; god-mode decrypts them.
+    # None in the other arms.
     dealer_pad_bits: Dict[Tuple[int, int], np.ndarray] = None
     # --- ground truth for scoring (NOT in the transcript) ---
     truth_quant: Dict[int, np.ndarray] = field(default_factory=dict)

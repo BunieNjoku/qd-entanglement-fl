@@ -1,5 +1,5 @@
 """
-Module 7: Faithful classical secure-aggregation baselines (HANDOFF 4.1).
+Module 7: Faithful classical secure-aggregation baselines.
 
 Implements the two classical protocols the secure-aggregation literature
 compares against, at the level of fidelity that determines the honest
@@ -270,13 +270,13 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
     rec_s = time.perf_counter() - t0
 
     agg = _finish(cluster, dropouts, quant, self_masks, agg)
-    # Bonawitz uses PER-EXECUTION ephemeral DH (HANDOFF 4.1a); in a
+    # Bonawitz uses PER-EXECUTION ephemeral DH; in a
     # multi-round FL run each round is an execution, so each round
     # redistributes n(n-1) Shamir shares of the fresh DH secrets IN
     # ADDITION to the self-mask seed shares. Charging both is faithful -
     # this per-round DH-setup share traffic is exactly the cost Flamingo
     # was designed to avoid with its long-term-secret + PRF ratchet, and
-    # NOT counting it would undercount (flatter) Bonawitz (Gate-4 F-min1).
+    # NOT counting it would undercount (flatter) Bonawitz.
     cost = BaselineCost(
         protocol="bonawitz", n_clients=n, n_params=n_params,
         n_dropped=len(dropouts),
@@ -363,7 +363,7 @@ def run_flamingo(gradients, cluster, dropouts, round_idx, rng):
 
 def run_it_dealer(gradients, cluster, dropouts, dealer_pool, rng,
                   provisioning="online"):
-    """Classical IT-dealer baseline (COMPARISON_DESIGN 3b): an offline
+    """Classical IT-dealer baseline: an offline
     trusted dealer provisions each client pair with uniform one-time
     pads; round mechanics are then IDENTICAL to run_entangled by
     construction (same helpers, same single-use OTP discipline, same

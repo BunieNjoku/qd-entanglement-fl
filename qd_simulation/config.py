@@ -39,7 +39,7 @@ QUANTUM = {
     # derives birefringence from fiber_birefringence_rad_per_km_per_C ×
     # length × ΔT; for campus links (≤3 km) this allowance upper-bounds
     # that contribution. Config-visible so OPERATING_POINT moves with
-    # declared physics (Gate-1 F4).
+    # declared physics.
     "analytic_qber_birefringence_allowance": 0.001,
     "fiber_birefringence_rad_per_km_per_C": 0.01,  # Compensated SMF (pol. controller)
     "temperature_variation_C": 2.0,
@@ -93,7 +93,7 @@ IT_DEALER = {
 
 # MASKING WIDTH - single source of truth
 # The implementation masks int32-quantized gradients in the modular ring
-# Z_{2^32} (m4_federated_learning: QUANT_SCALE = 2^20 → 20 fractional bits
+# Z_{2^32} (m4_federated_learning: QUANT_SCALE = 2^20 -> 20 fractional bits
 # plus sign and dynamic range). Every throughput, cost, and feasibility
 # calculation must therefore charge 32 bits of distilled key per parameter
 # per edge per round. A 16-bit (BF16-style) payload is NOT implementable
@@ -182,7 +182,7 @@ def _derive_operating_point():
         "secret_rate_bps": wf["final_secure_rate"],
         "tagged_fraction": wf["tagged_fraction"],
         "waterfall": wf,
-        # Honesty caveat (Gate-1 F11): the reconciliation stage behind this
+        # Honesty caveat: the reconciliation stage behind this
         # rate is the statistical placeholder m2.fast_ec_simulate (its FER
         # tiers are asserted, not derived); the repo's real BP decoder
         # currently fails frames at low QBER in exp2d. Rates are
@@ -222,7 +222,7 @@ def _derive_projected_operating_point():
         # Same honesty caveat as OPERATING_POINT - and it bites harder
         # here: at 2% QBER the declared rate-0.84 code sits in the tier
         # model's DEGRADED band, so this point is charged FER 0.10
-        # (Gate-1 round-2 finding 1).
+        #.
         "ec_model_caveat": "EC modeled by statistical placeholder "
                            "(m2.fast_ec_simulate tier model; FER 0.10 at "
                            "this QBER - the declared rate-0.84 code is in "

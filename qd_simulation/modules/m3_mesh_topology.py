@@ -196,7 +196,7 @@ def compute_max_mesh_size(
         return 0, 0
     # Infeasible: a single level's mask-generation time already exceeds
     # the whole round period. Report 0 rather than clamping to a fake
-    # 2-node mesh (Gate-1 F2).
+    # 2-node mesh.
     if t_per_level > training_round_s:
         return 0, 0
 
@@ -208,7 +208,7 @@ def compute_max_mesh_size(
     # exponent over random placements.
     max_triangles = max_depth ** 2
     # A single triangle needs 3 nodes; the 2×triangles heuristic undercounts
-    # below that (Gate-1 F2).
+    # below that.
     max_nodes = max(3, int(max_triangles * 2))
 
     return max_triangles, max_nodes

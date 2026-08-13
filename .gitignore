@@ -40,3 +40,7 @@ qd_simulation/results/*.pdf
 qd_simulation/results/summary.json
 qd_simulation/results/data/
 qd_simulation/results/*.log
+
+# Internal working documents (never publish)
+HANDOFF.md
+COMPARISON_DESIGN.md

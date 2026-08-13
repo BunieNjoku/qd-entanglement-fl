@@ -106,7 +106,7 @@ def save_fig(fig, name):
 
 
 def print_comm_summary(fl_result, label=""):
-    """Per-client per-round communication summary (HANDOFF Phase 2).
+    """Per-client per-round communication summary.
 
     Means over rounds; uplink split by phase. key_wait and wire latency
     are MODELED (config operating point / CLASSICAL_LINK_BPS); local,
@@ -309,7 +309,7 @@ def run_experiment_1(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp1c_coupling_sensitivity')
 
-    print("  ✓ Experiment 1 complete.")
+    print("  Experiment 1 complete.")
     return {"qbers": qbers_sim, "s_values": s_values, "rates": rates}
 
 
@@ -320,7 +320,7 @@ def run_experiment_2(quick=False):
     print("="*70)
 
     qber_sweep = POST_PROC['qber_sweep'] if not quick else np.linspace(0.01, 0.05, 5)
-    # Operating points from config - single source of truth (HANDOFF 1.1).
+    # Operating points from config - single source of truth.
     # base_rate is the MODELED device's raw edge rate, not an assumed 1 MHz.
     op = OPERATING_POINT
     proj = PROJECTED_OPERATING_POINT
@@ -339,7 +339,7 @@ def run_experiment_2(quick=False):
     # 2a: Rate waterfall at both operating points
     print("  [2a] Rate waterfall - modeled device vs labeled projection...")
     wf = _wf(op['raw_edge_rate_hz'], op['qber'])
-    # Sanity (HANDOFF 1.1.4): this experiment's waterfall input IS the config
+    # Sanity: this experiment's waterfall input IS the config
     # operating point, and its output must reproduce config's derived rate -
     # otherwise the single source of truth has been violated somewhere.
     assert abs(wf['final_secure_rate'] - op['secret_rate_bps']) < 1e-6, (
@@ -366,7 +366,7 @@ def run_experiment_2(quick=False):
                 ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
                         oh, ha='center', va='bottom', fontsize=6, color='gray')
         ax.set_ylabel('Rate (kbit/s)')
-        ax.set_title(f"{point['label']}\nQBER {point['qber']*100:.2f}% → "
+        ax.set_title(f"{point['label']}\nQBER {point['qber']*100:.2f}% -> "
                      f"{w['final_secure_rate']/1000:.1f} kbit/s", fontsize=8)
         ax.grid(True, alpha=0.2, axis='y')
     fig.suptitle('Rate waterfall - modeled device vs labeled projection',
@@ -374,9 +374,9 @@ def run_experiment_2(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp2a_rate_waterfall')
 
-    print(f"    modeled device : {op['raw_edge_rate_hz']:>11,.0f} Hz raw → "
+    print(f"    modeled device : {op['raw_edge_rate_hz']:>11,.0f} Hz raw -> "
           f"{wf['final_secure_rate']:>9,.0f} bps secret  (QBER {op['qber']:.4f})")
-    print(f"    PROJECTED      : {proj['raw_edge_rate_hz']:>11,.0f} Hz raw → "
+    print(f"    PROJECTED      : {proj['raw_edge_rate_hz']:>11,.0f} Hz raw -> "
           f"{wf_proj['final_secure_rate']:>9,.0f} bps secret  (QBER {proj['qber']:.4f})"
           f"  - hypothetical 1 MHz-class, not modeled")
 
@@ -484,10 +484,9 @@ def run_experiment_2(quick=False):
           "ABSOLUTE rates only: the\n    exp13 framing ratio charges "
           "identical EC to both arms, so it cancels\n    there.")
 
-    # 2e: NIST SP 800-22 subset battery on the PA output (HANDOFF 3.2;
-    # replaces the former 10,000-bit monobit spot check). The input is the
+    # 2e: NIST SP 800-22 subset battery on the PA output. The input is the
     # PIPELINE's output, not synthetic rng bits: simulated source at the
-    # config fidelity (100 m fiber) → reconciled frames → Toeplitz PA at
+    # config fidelity (100 m fiber) -> reconciled frames -> Toeplitz PA at
     # the LHL-consistent compression for the measured QBER.
     print("  [2e] NIST SP 800-22 subset battery on privacy-amplified "
           "pipeline output...")
@@ -514,7 +513,7 @@ def run_experiment_2(quick=False):
                   - 2 * POST_PROC['security_margin_bits'])
     secure_output = toeplitz_hash(rec_bits, pa_out_len, rng=rng_pa)
     print(f"    pipeline: {len(src_pa.raw_bits_alice):,} sifted bits @ "
-          f"QBER {src_pa.qber:.4f} → {len(rec_bits):,} reconciled → "
+          f"QBER {src_pa.qber:.4f} -> {len(rec_bits):,} reconciled -> "
           f"{len(secure_output):,} PA output bits "
           f"(LHL rate {_ent_rate:.3f}, margin "
           f"{POST_PROC['security_margin_bits']})")
@@ -524,11 +523,11 @@ def run_experiment_2(quick=False):
     for r in battery:
         print(f"    {r['test']:<28} {r['p_value']:>10.4f}  "
               f"{'PASS' if r['passed'] else 'FAIL'}")
-    print(f"    → {n_pass}/{len(battery)} tests pass at α = 0.01 "
+    print(f"    -> {n_pass}/{len(battery)} tests pass at α = 0.01 "
           f"(expected false rejections for uniform input: "
           f"≈{0.01 * len(battery):.2f})")
 
-    print("  ✓ Experiment 2 complete.")
+    print("  Experiment 2 complete.")
     return {
         "operating_point_secret_bps": op['secret_rate_bps'],
         "projected_secret_bps": wf_proj['final_secure_rate'],
@@ -553,7 +552,7 @@ def run_experiment_3(quick=False):
     node_counts = MESH['node_counts_sweep'] if not quick else [3, 6, 12, 24, 40]
     model_sizes = [5e4, 1e5, 5e5, 1e6, 2e6] if not quick else [1e5, 5e5, 1e6]
     round_periods = [15, 30, 60, 120, 300] if not quick else [30, 60, 300]
-    # Operating points from config - single source of truth (HANDOFF 1.1).
+    # Operating points from config - single source of truth.
     op_rate = OPERATING_POINT['secret_rate_bps']
     proj_rate = PROJECTED_OPERATING_POINT['secret_rate_bps']
 
@@ -633,7 +632,7 @@ def run_experiment_3(quick=False):
                         for j in range(len(round_periods)))
         print(f"      {int(ms/1000):>5}K  {row}")
 
-    print("  ✓ Experiment 3 complete.")
+    print("  Experiment 3 complete.")
     return {"depths": depths,
             "heatmap_modeled": heatmaps[0].tolist(),
             "heatmap_projected": heatmaps[1].tolist()}
@@ -643,7 +642,7 @@ def run_experiment_3(quick=False):
 def run_experiment_4(quick=False):
     """Secure-aggregation fidelity (HEADLINE) + convergence parity (validation).
 
-    HANDOFF 3.5: exact modular masking provably does not change the
+    exact modular masking provably does not change the
     aggregate, so accuracy parity across modes is a CORRECTNESS CHECK,
     not a finding. The load-bearing metric is aggregate fidelity:
       (a) masking exactness - the masked pipeline's integer aggregate
@@ -668,7 +667,7 @@ def run_experiment_4(quick=False):
     num_rounds = 60 if not quick else 30
     num_clients = 3
     target_acc = 0.92
-    # HANDOFF 3.5: >= 10 seeds in both modes; quick-mode results get
+    # >= 10 seeds in both modes; quick-mode results get
     # quoted, so they need the same statistical power.
     num_repeats = max(10, FL.get('num_repeats', 10))
     dirichlet_alpha = FL.get('dirichlet_alpha', 0.5)
@@ -776,7 +775,7 @@ def run_experiment_4(quick=False):
           "masking. The DP arm is shown only to display its accuracy "
           "cost.")
 
-    # Communication accounting (HANDOFF Phase 2)
+    # Communication accounting
     print("\n  Communication accounting (last repeat per mode; prng/dp/"
           "unmasked count payload+downlink only - faithful classical "
           "baselines land in Phase 4;\n  key-distillation classical "
@@ -841,7 +840,7 @@ def run_experiment_4(quick=False):
               f"{s['mean_acc']:.4f} ± {s['std_acc']:.4f} "
               f"{s['mean_rounds']:>8.1f} ± {s['std_rounds']:.1f}")
 
-    print("  ✓ Experiment 4 complete.")
+    print("  Experiment 4 complete.")
     return {
         "fidelity": {
             "exactness_mismatches": int(total_mismatches),
@@ -870,7 +869,7 @@ def run_experiment_5(quick=False):
     expected, (iii) the chi-squared VALIDATION check stays silent at every
     dropout rate (indistinguishability under uniform modular masks is a
     theorem - the check is an implementation-bug detector, not a security
-    result; HANDOFF 3.9).
+    result; ).
 
     Classical parity baseline: the same reveal-based recovery is exercised
     with a Flamingo-style per-round pool (Ma et al., IEEE S&P 2023) to show
@@ -891,7 +890,7 @@ def run_experiment_5(quick=False):
     target_acc = 0.90
     n_clients = 6  # 3 triangles, allows interesting dropout patterns
     n_triangles = 3
-    # HANDOFF 3.6: >= 10 seeds, dropout swept 0-40%. The old single-seed
+    # >= 10 seeds, dropout swept 0-40%. The old single-seed
     # design produced pure-noise orderings (0% arm scoring below 15%).
     num_seeds = 10
     dropout_rates = ([0.0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
@@ -920,7 +919,7 @@ def run_experiment_5(quick=False):
             )
             results[dr].append((res, aux))
         print(f"  seed {seed}: " + "  ".join(
-            f"{int(dr*100)}%→{results[dr][-1][0].final_accuracy:.3f}"
+            f"{int(dr*100)}%->{results[dr][-1][0].final_accuracy:.3f}"
             for dr in dropout_rates))
 
     from scipy.stats import t as _t_dist
@@ -938,7 +937,7 @@ def run_experiment_5(quick=False):
         accs = [r.final_accuracy for r, _ in results[dr]]
         rec_pct = [100 * np.mean(a['recovery_invoked_per_round'])
                    for _, a in results[dr]]
-        # HEADLINE costs of recovery (HANDOFF 3.6):
+        # HEADLINE costs of recovery:
         # bytes - reveals (+ recovery shares, identically 0 here) per
         # client per round, from the Phase-2 ledger;
         rec_bytes = [np.mean([rc.recovery_bytes() / max(rc.n_clients, 1)
@@ -1059,10 +1058,10 @@ def run_experiment_5(quick=False):
                                         _tri, _pool, _seeds, dropouts={2})
         _exact = bool(_torch.allclose(_res.aggregate, _grads[0] + _grads[1], atol=1e-3))
         print(f"  {_label:>32}  {str(_res.recovery_invoked):>8}  {str(_exact):>9}  {_assump}")
-    print("  → identical mechanism and recovery in both pools; the quantum claim")
+    print("  -> identical mechanism and recovery in both pools; the quantum claim")
     print("    is the ASSUMPTION CLASS (unconditional freshness), not the mechanism.")
 
-    print("  ✓ Experiment 5 complete.")
+    print("  Experiment 5 complete.")
     return {"dropout_results": {f"{int(dr*100)}%": {
         "final_acc_mean": float(stats[dr]["acc"][0]),
         "final_acc_std": float(stats[dr]["acc"][1]),
@@ -1077,7 +1076,7 @@ def run_experiment_5(quick=False):
 
 
 # EXPERIMENT 11: Gradient-inversion attack on the REAL construction
-# (rebuild of the deleted CIFAR/PSNR legacy - HANDOFF 3.8)
+# (rebuild of the deleted CIFAR/PSNR legacy - )
 def _tabular_dlg(model, target_grad_params, y_label, input_dim,
                  n_iters, lr, device='cpu', seed=0):
     """DLG/iDLG tabular gradient-inversion (Zhu et al. NeurIPS 2019;
@@ -1086,7 +1085,7 @@ def _tabular_dlg(model, target_grad_params, y_label, input_dim,
     squared-L2 gradient-matching. No image priors (no total variation) -
     the target is a 30-feature clinical vector, so tabular from the
     ground up (the deleted legacy applied image PSNR/SSIM to tabular
-    data and attacked the proof-less Gaussian mask; HANDOFF 3.8)."""
+    data and attacked the proof-less Gaussian mask; )."""
     import torch
     import torch.nn as nn
     torch.manual_seed(seed)
@@ -1109,16 +1108,15 @@ def _tabular_dlg(model, target_grad_params, y_label, input_dim,
 
 
 def run_experiment_11(quick=False):
-    """Gradient-inversion privacy demonstration on the REAL system
-    (HANDOFF 3.8): tabular DLG/iDLG against the ClinicalMLP and the
+    """Gradient-inversion privacy demonstration on the REAL system: tabular DLG/iDLG against the ClinicalMLP and the
     modular-OTP construction, across three targets with honest,
     theorem-consistent expectations:
-      (1) unmasked gradient      → attack SUCCEEDS (per-feature MSE low,
+      (1) unmasked gradient      -> attack SUCCEEDS (per-feature MSE low,
                                     attribute inference well above chance)
-      (2) modular-masked payload → attack FAILS (one-time pad makes the
+      (2) modular-masked payload -> attack FAILS (one-time pad makes the
                                     payload independent of the gradient -
                                     a theorem; reconstruction ≈ prior)
-      (3) plaintext aggregate    → attack PARTIALLY succeeds (the FedAvg
+      (3) plaintext aggregate    -> attack PARTIALLY succeeds (the FedAvg
                                     sum leaks a mixture; this is the
                                     honest scoping limit that motivates
                                     DP-on-top-of-masking)
@@ -1150,7 +1148,7 @@ def run_experiment_11(quick=False):
     bits_per_mask = n_params * 32
     rng = np.random.default_rng(42)
 
-    # Median per feature over the training pool → attribute-inference bits.
+    # Median per feature over the training pool -> attribute-inference bits.
     all_X = torch.cat([client_data[c][:][0] for c in range(3)], dim=0)
     feat_median = all_X.median(dim=0).values
 
@@ -1298,7 +1296,7 @@ def run_experiment_11(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp11_gradient_inversion')
 
-    print("  ✓ Experiment 11 complete.")
+    print("  Experiment 11 complete.")
     return {"targets": summary, "prior_mse": prior_mse,
             "n_targets": n_targets, "n_iters": n_iters}
 
@@ -1309,7 +1307,7 @@ def measure_local_compute_time(n_params_target, local_epochs=2, batch_size=32,
                                lr=0.01, reps=3, seed=42):
     """Measured local-training time for an MLP of ≈n_params_target params.
 
-    Replaces exp6's fabricated 2.0 s constant (HANDOFF 1.3) with a direct
+    Replaces exp6's fabricated 2.0 s constant with a direct
     measurement: build a width-scaled two-hidden-layer MLP (params ≈
     h² + (input_dim+4)·h for input_dim features, 2 classes), run the same
     local step the FL loop performs (local_epochs over one client's share
@@ -1358,7 +1356,7 @@ def run_experiment_6(quick=False):
     print("="*70)
 
     model_sizes = FL['model_sizes_sweep'] if not quick else [5e4, 1e5, 5e5, 1e6]
-    # Operating points from config - single source of truth (HANDOFF 1.1).
+    # Operating points from config - single source of truth.
     # The sweep brackets the two labeled points; no unlabeled rate literals.
     op_rate = OPERATING_POINT['secret_rate_bps']
     proj_rate = PROJECTED_OPERATING_POINT['secret_rate_bps']
@@ -1368,7 +1366,7 @@ def run_experiment_6(quick=False):
         proj_rate: f'{proj_rate/1000:.0f} kbit/s - PROJECTED 1 MHz-class (hypothetical)',
     }
 
-    # Measured local compute time per model size (HANDOFF 1.3)
+    # Measured local compute time per model size
     reps = 1 if quick else 3
     print(f"  Measuring local compute time per model size (median of {reps} "
           f"round(s) each, warm-up discarded)...")
@@ -1427,11 +1425,11 @@ def run_experiment_6(quick=False):
                   f"{period_name} rounds: max {max_params/1000:.0f}K params "
                   f"({max_params*BITS_PER_PARAM/8/1e6:.2f} MB of key per edge)")
 
-    print("  ✓ Experiment 6 complete.")
+    print("  Experiment 6 complete.")
     return {"rounds_per_hour": rounds_per_hour.tolist()}
 
 
-# EXPERIMENT 7: QBER → PRIVACY-BUDGET CURVE
+# EXPERIMENT 7: QBER -> PRIVACY-BUDGET CURVE
 def run_experiment_7(quick=False):
     """Map physical QBER to the key-rate / capacity envelope: shared-bit
     rate, the LHL mask-entropy floor, and the maximum maskable model size
@@ -1457,7 +1455,7 @@ def run_experiment_7(quick=False):
     security_margin = POST_PROC['security_margin_bits']
 
     # Modeled-device raw edge rate from config - single source of truth
-    # (HANDOFF 1.1). Identical to m1.compute_coincidence_rate at the config
+    #. Identical to m1.compute_coincidence_rate at the config
     # parameters; derived once in config._derive_operating_point() rather
     # than re-derived here.
     raw_rate = OPERATING_POINT['raw_edge_rate_hz']
@@ -1479,7 +1477,7 @@ def run_experiment_7(quick=False):
         # HYPOTHETICAL rate-adapted envelope, plotted alongside with an
         # explicit label: past the declared 0.84 code's capacity the solid
         # curve collapses (tier FER 0.90) and only this labeled assumption
-        # keeps a usable rate (Gate-1 round-2 finding 4).
+        # keeps a usable rate.
         envelope_rates.append(compute_rate_waterfall(
             raw_rate, q, code_rate=code_rate,
             security_margin=security_margin, block_size=block_size,
@@ -1584,7 +1582,7 @@ def run_experiment_7(quick=False):
           f"collapses (tier FER 0.90) and max-params follows the collapse.")
     if cutoff_qber:
         print(f"\n  Cutoff QBER (rate < 1 kbit/s): {cutoff_qber:.3f}")
-    print("  ✓ Experiment 7 complete.")
+    print("  Experiment 7 complete.")
     return {
         "qbers": qbers.tolist(),
         "shared_rates_bps": shared_rates,
@@ -1732,7 +1730,7 @@ def run_experiment_7_cost(quick=False):
     fig.tight_layout(rect=[0, 0.08, 1, 0.94])
     save_fig(fig, 'exp7b_cost_breakdown')
 
-    print("  ✓ Experiment 7 complete.")
+    print("  Experiment 7 complete.")
     return {"quantum_annual": quantum_annual, "baselines": {k: v['annual'] for k, v in baselines.items()}}
 
 
@@ -1759,7 +1757,7 @@ def run_experiment_8(quick=False):
 
         # Use Module 3 Delaunay topology for larger scales, hardcoded for small
         if n_clients >= 6:
-            # Modeled-device rate from config (HANDOFF 1.1) - topology metrics
+            # Modeled-device rate from config - topology metrics
             # are geometric; the mesh's latency fields use the honest rate.
             mesh = analyze_mesh(n_clients, 1e5, OPERATING_POINT['secret_rate_bps'],
                                 rng=np.random.default_rng(42))
@@ -1922,7 +1920,7 @@ def run_experiment_8(quick=False):
     save_fig(fig, 'exp8b_multitri_scaling_bars')
 
     # PLOT 3: Aggregation overhead at both operating points
-    # Modeled device AND the labeled hypothetical projection (HANDOFF 1.1.3).
+    # Modeled device AND the labeled hypothetical projection.
     rate_points = [
         (OPERATING_POINT['secret_rate_bps'], 'modeled device'),
         (PROJECTED_OPERATING_POINT['secret_rate_bps'],
@@ -1980,14 +1978,14 @@ def run_experiment_8(quick=False):
 
     print("\n  KEY FINDING: Multi-triangle hierarchical aggregation")
     if all(results[n]['result'].final_accuracy > 0.85 for n in scales):
-        print("  ✓ converges at ALL scales (3-12 clients)")
-        print("  ✓ Tree-of-triangles protocol produces correct global aggregate")
+        print("  converges at ALL scales (3-12 clients)")
+        print("  Tree-of-triangles protocol produces correct global aggregate")
     else:
         print("  ⚠ Some scales did not converge - note: quick mode runs only "
               "30 rounds,\n     below convergence at 9-12 clients (full mode "
               "uses 60 rounds)")
 
-    print("  ✓ Experiment 8 complete.")
+    print("  Experiment 8 complete.")
 
     return {
         str(n): {
@@ -2003,7 +2001,7 @@ def run_experiment_8(quick=False):
 def run_experiment_9(quick=False):
     """HNDL - harvest-now / decrypt-later retroactive transcript attack.
 
-    HANDOFF 3.1: makes claim (b) empirical. Two arms differ ONLY in the
+    makes claim (b) empirical. Two arms differ ONLY in the
     pairwise-mask source; both record the full classical transcript
     (masked payloads, Shamir shares, seed disclosures, dropout reveals),
     then a recording adversary is granted retroactive god-mode over every
@@ -2123,7 +2121,7 @@ def run_experiment_9(quick=False):
     assert atk_e["min_masks_remaining"] >= 1, \
         "a delivered payload lost all pairwise masks - t>=2 argument violated"
 
-    print("\n  → classical arm AND online-dealer arm: 100% of recorded "
+    print("\n  -> classical arm AND online-dealer arm: 100% of recorded "
           "gradients recovered\n    retroactively - IT-secure masking with "
           "computationally-secured provisioning\n    is still HNDL-exposed "
           "(the hole moves from the key agreement to the dealer's\n    "
@@ -2180,7 +2178,7 @@ def run_experiment_9(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp9_hndl_transcript')
 
-    print("  ✓ Experiment 9 complete.")
+    print("  Experiment 9 complete.")
     return {
         "classical": {k: v for k, v in atk_c.items() if k != "records"},
         "it_dealer_online": {k: v for k, v in atk_d.items()
@@ -2192,7 +2190,7 @@ def run_experiment_9(quick=False):
 
 
 def run_experiment_10(quick=False):
-    """Availability under single-source failure (HANDOFF 3.4).
+    """Availability under single-source failure.
 
     Operationalizes source_symmetry_ratio ≈ 0.5. Every edge is keyed
     from BOTH endpoints' sources
@@ -2223,7 +2221,7 @@ def run_experiment_10(quick=False):
     # simulate_source(duration_s = dur * 0.5) call with the same source
     # params. So this is NOT an unrelated half-rate proxy; it is the
     # surviving endpoint's own leg from the symmetric-edge decomposition
-    # (Gate-3 round-1 F2). The far endpoint keeps routing switch_split of
+    #. The far endpoint keeps routing switch_split of
     # its pairs down the edge with unchanged per-pair physics.
     edge_degraded = simulate_source(
         duration_s=dur * 0.5, rng=np.random.default_rng(43), **kw)
@@ -2233,7 +2231,7 @@ def run_experiment_10(quick=False):
     print(f"  (a) Edge keyed from both endpoints: {n_full:,} coincidences "
           f"in {dur}s\n      one source killed: {n_deg:,} "
           f"({100*ratio:.1f}% of the two-source rate; expected ≈ 50%)\n"
-          f"      QBER {edge_full.qber:.4f} → {edge_degraded.qber:.4f} "
+          f"      QBER {edge_full.qber:.4f} -> {edge_degraded.qber:.4f} "
           f"(unchanged - same physics, fewer pairs)\n"
           f"      symmetry witness on the healthy edge: "
           f"{edge_full.params['source_symmetry_ratio']:.3f} (0.5 = no "
@@ -2290,10 +2288,10 @@ def run_experiment_10(quick=False):
           f"      (per-edge demand from the exps-5/8 ledger model, "
           f"secret rate {r/1000:.1f} kbit/s):")
     print(f"      symmetric switching (implemented): key_wait "
-          f"{kw_before:.2f}s → {kw_sym:.2f}s "
+          f"{kw_before:.2f}s -> {kw_sym:.2f}s "
           f"(×{kw_sym/kw_before:.2f}); ALL {len(triangles)} triangles "
           f"continue;\n        20-round key-wait wall-clock "
-          f"{wall_healthy:.0f}s → {wall_sym:.0f}s "
+          f"{wall_healthy:.0f}s -> {wall_sym:.0f}s "
           f"(+{100*(wall_sym/wall_healthy - 1):.0f}%)")
     print(f"      fixed-source-per-edge (hypothetical alternative): edges "
           f"{dead_edges} DEAD;\n        triangles {stalled_tris} stall "
@@ -2339,7 +2337,7 @@ def run_experiment_10(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp10_availability')
 
-    print("  ✓ Experiment 10 complete.")
+    print("  Experiment 10 complete.")
     return {
         "source_level": {"full_coincidences": int(n_full),
                          "degraded_coincidences": int(n_deg),
@@ -2356,8 +2354,7 @@ def run_experiment_10(quick=False):
 
 def run_experiment_12(quick=False):
     """SOTA comparison: this system vs faithful Bonawitz-DH,
-    Flamingo-PRF, and classical IT-dealer baselines (HANDOFF 4.1-4.3;
-    dealer arms per COMPARISON_DESIGN 3b).
+    Flamingo-PRF, and classical IT-dealer baselines.
 
     All five arms share the same modular masking, payload/self-mask wire
     format, and FL-layer byte scoping; they differ only in pairwise-mask
@@ -2371,7 +2368,7 @@ def run_experiment_12(quick=False):
     count n, and assumption class / HNDL exposure. Systems results that
     depend on the quantum key rate are reported at BOTH operating points.
 
-    HONEST expected result (HANDOFF 4.1): this system is SLIGHTLY WORSE on
+    HONEST expected result: this system is SLIGHTLY WORSE on
     recovery communication (a one-time pad has no compact seed, so the
     pairwise reveal is n_params words, not one scalar) and it alone pays a
     key-distillation latency, in exchange for unconditional freshness and
@@ -2459,7 +2456,7 @@ def run_experiment_12(quick=False):
               f"{str(c.hndl_immune_pairwise_leg):>9}")
     ratio = costs1["entangled"].recovery_bytes / max(
         costs1["flamingo"].recovery_bytes, 1)
-    print(f"    → this system's recovery traffic is {ratio:,.0f}x the "
+    print(f"    -> this system's recovery traffic is {ratio:,.0f}x the "
           f"seed-based baselines' (= n_params: a one-time pad has no\n"
           f"      compact seed to send). Non-recovery per-round bytes: "
           f"payload+self-mask identical across all five;\n"
@@ -2510,13 +2507,13 @@ def run_experiment_12(quick=False):
                       cfd.recovery_bytes, cdd.recovery_bytes)
         print(f"  {d:>8} {ced.recovery_bytes:>12,} {cbd.recovery_bytes:>10,} "
               f"{cfd.recovery_bytes:>10,} {cdd.recovery_bytes:>11,}")
-    print("    → this system and the dealer arms are O(d) (a one-time pad "
+    print("    -> this system and the dealer arms are O(d) (a one-time pad "
           "has no compact seed);\n      the seed-based baselines are O(1) "
           "in d. The O(d) gap is the price of the pad,\n      whatever "
           "provisioned it.")
 
     # (C) Key-supply latency this system pays and the baselines do NOT,
-    # at BOTH operating points (HANDOFF 4.3)
+    # at BOTH operating points
     op = OPERATING_POINT['secret_rate_bps']
     proj = PROJECTED_OPERATING_POINT['secret_rate_bps']
     # One pairwise pool per cluster edge per round: bits_per_mask = n_params*32.
@@ -2540,13 +2537,7 @@ def run_experiment_12(quick=False):
           "latency.")
 
     # (D) Matched-metric table for systems that cannot be re-run
-    # (HANDOFF 4.2, corrected per COMPARISON_DESIGN 3c: QuNetQFL is a
-    # fully connected pairwise MDI-QKD network with a classical
-    # aggregation-only server and no key relay - the earlier "via relay /
-    # transmitted / server present [in the key path]" row misdescribed
-    # it. Verified against arXiv 2501.12709; 6G row against 2603.15649.
-    # The "keys on channel?" column is retired: what matters is what a
-    # channel RECORDER captures and whether it breaks later.)
+    #
     print("\n  (D1) Matched-metric comparison, SECURITY axes (executing "
           "arms + external rows from\n       published descriptions):")
     hdr1 = ["system", "key source", "recorder captures",
@@ -2627,7 +2618,7 @@ def run_experiment_12(quick=False):
     _r_asy = _src_rate / _qkd['efficient-asymptotic']['final_secure_rate']
     print("    * This system's HNDL immunity is CONTINGENT on the GLLP "
           "tagged-fraction PA margin and the\n      Shamir threshold t≥2 "
-          "(HANDOFF §2b; mechanism in exp9). The QKD rows share the "
+          ". The QKD rows share the "
           "key-layer HNDL\n      immunity AND the ITS assumption class - "
           "the honest differentiators are narrower: a higher\n      key "
           f"rate from the same physics (exp13: {_r_sym:.1f}x vs "
@@ -2708,7 +2699,7 @@ def run_experiment_12(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp12_sota_comparison')
 
-    print("\n  ✓ Experiment 12 complete.")
+    print("\n  Experiment 12 complete.")
     return {
         "per_round_1drop": {n: {
             "payload_per_client": costs1[n].payload_bytes
@@ -2748,8 +2739,7 @@ def _qkd_arm_waterfalls(raw_hz, qber, assume_rate_adapted=False):
 
 
 def run_experiment_13(quick=False):
-    """Rate cost of QKD framing vs source-model framing, same physics
-    (COMPARISON_DESIGN 3a).
+    """Rate cost of QKD framing vs source-model framing, same physics.
 
     Both arms consume the identical m1 device model (raw coincidence
     rate, QBER) and identical EC / FER / margin / duty charges from m2;
@@ -2939,7 +2929,7 @@ def run_experiment_13(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp13_qkd_framing')
 
-    print("\n  ✓ Experiment 13 complete.")
+    print("\n  Experiment 13 complete.")
     return {
         "operating_point": {"raw_hz": raw, "qber": q,
                             "source_model_bps": src['final_secure_rate']},
@@ -2992,9 +2982,9 @@ def main():
                 result = experiment_fns[exp_num](quick=args.quick)
                 all_results[f"exp{exp_num}"] = result
                 elapsed = time.time() - exp_start
-                print(f"  ⏱ Experiment {exp_num} took {elapsed:.1f}s")
+                print(f"  Experiment {exp_num} took {elapsed:.1f}s")
             except Exception as e:
-                print(f"  ✗ Experiment {exp_num} failed: {e}")
+                print(f"  FAILED: Experiment {exp_num} failed: {e}")
                 import traceback
                 traceback.print_exc()
 
