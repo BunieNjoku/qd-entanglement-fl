@@ -35,9 +35,9 @@ htmlcov/
 Thumbs.db
 
 # Simulation outputs (regenerated on `python run_all.py`)
-qd_simulation/results/*.png
-qd_simulation/results/*.pdf
-qd_simulation/results/summary.json
+qd_simulation/results/**/*.png
+qd_simulation/results/**/*.pdf
+qd_simulation/results/summary*.json
 qd_simulation/results/data/
 qd_simulation/results/*.log
 

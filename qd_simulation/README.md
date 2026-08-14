@@ -62,6 +62,7 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 11 | **Gradient inversion (real construction)** | Tabular DLG/iDLG: unmasked leaks (100% attr-infer), modular mask blocks (theorem), plaintext aggregate partially leaks (motivates DP-on-top) |
 | 12 | **SOTA comparison** | Five executing arms: Bonawitz-DH, Flamingo-PRF, and a classical IT-dealer (online + courier provisioning). Every OTP arm pays O(d) recovery; the arms differ in what must be trusted: DH/PRF hardness, a dealer, or one's own source |
 | 13 | **QKD-framing rate cost** | Same physics, two post-processings: source-model vs Shor-Preskill QKD framing. Ratio 2.2×/1.3×/1.1× by sifting protocol - prices the trusted-source assumption; not a security ranking |
+| 14 | **Executing BBM92 arm** | The QKD framing executed on sampled bits (basis choice, sifting, TLGR finite-key PA): the same key-basis intercept-resend tap is invisible to the fixed-basis protocol (flat QBER, Eve predicts 99.9% of accepted key at full tap) and aborts BBM92 near the analytic threshold f* = 0.023. Finite-key surcharge priced honestly (executing ratio 4.1x at 8M-pair runs vs 1.32x asymptotic; fixed-length TLGR charge at the a-priori q_tol) |
 
 ## Assumptions
 
@@ -72,21 +73,25 @@ python run_all.py --exp 1 2 3 # Specific experiments
 
 ## Output
 
-Results in `results/`:
-- `exp1*` - Source characterization
-- `exp2*` - Rate budget
-- `exp3*` - Mesh scaling
-- `exp4*` - FL training convergence
-- `exp5_dropout_recovery.png` - Dropout recovery validation
-- `exp6_throughput.png` - Rate-constrained throughput
-- `exp7_qber_key_rate_envelope.png` - QBER -> key-rate / capacity envelope
-- `exp8*` - Multi-triangle scaling
-- `exp9_hndl_transcript.png` - HNDL retroactive-recovery comparison
-- `exp10_availability.png` - Availability under single-source failure
-- `exp11_gradient_inversion.png` - Gradient inversion on the real construction
-- `exp12_sota_comparison.png` - SOTA comparison, five executing arms
-- `exp13_qkd_framing.png` - Rate cost of QKD framing vs source-model framing
-- `summary.json` - Numeric results
+Results in `results/`, tiered for the publication figure budget
+(IEEE Network: six figures/tables total):
+
+- `main/` - publication candidates: exp5 (dropout cost), exp7 (QBER
+  envelope), exp9 (HNDL), exp12 (five-arm comparison), exp13
+  (QKD-framing cost), exp14 (executing BBM92 arm)
+- `peripheral/` - validation, sensitivity, and scaling figures kept
+  for the technical-report version and reviewers (exp1-4, 6, 8, 10,
+  11, exp14b basis split, quick-mode variants)
+- `figure_captions.md` - paper-ready captions; figure titles are kept
+  short and technical, the configuration and scope context lives here
+- `replaced_by_text.md` - prose blocks replacing peripheral figures
+  in the manuscript
+- `summary.json` - numeric results (source of record)
+
+The tier assignment is `MAIN_FIGURES` in run_all.py. Quick mode
+(`--quick`) writes `*_quick`-suffixed files into `peripheral/` so
+reduced-sweep runs never overwrite full-mode artifacts. Subset runs
+(`--exp N`) merge into the existing summary rather than replacing it.
 
 ## Hardware Requirements
 
