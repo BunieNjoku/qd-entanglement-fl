@@ -80,6 +80,34 @@ QKD_FRAMING = {
     "phase_error_equals_bit_error": True,
 }
 
+# BBM92 EXECUTING ARM (m1.simulate_bbm92 + m2.bbm92_distill, exp14)
+# Same m1 physics as the source-model arm; measurement-side protocol
+# upgrade to entanglement-based QKD (Bennett-Brassard-Mermin 1992) that
+# tolerates an ACTIVE channel adversary. Executing counterpart of the
+# exp13 waterfall comparison.
+BBM92 = {
+    "p_z": 0.9,           # Z-basis probability, efficient asymmetric split
+                          # (Lo-Chau-Ardehali 2005) - matches exp13's
+                          # efficient-90/10 mode (keep 0.82)
+    # Abort threshold on the observed X-basis error rate. Set at the
+    # declared rate-0.84 LDPC code's design QBER: beyond it the fixed
+    # code fails frames anyway (m2.tier_frame_error_rate), so the
+    # protocol has no key to lose by aborting.
+    "q_tol": 0.02,
+    # Composable security parameters for the TLGR finite-key bound
+    # (Tomamichel-Lim-Gisin-Renner 2012, Eq. 2). Values in the range
+    # used by Lim et al., PRA 89, 022307 (2014). The resulting PA floor
+    # log2(2/(eps_sec^2 eps_cor)) is ~111 bits at run level (~115/block
+    # when the eps are split across 3 blocks), comparable to the
+    # source-model arm's fixed 128-bit margin.
+    "eps_sec": 1e-9,
+    "eps_cor": 1e-15,
+    # Intercept-resend tap-fraction sweep for exp14 (fine steps below
+    # the detection threshold ~2*q_tol, coarse above).
+    "eve_fraction_sweep": [0.0, 0.01, 0.02, 0.03, 0.05, 0.08, 0.12,
+                           0.20, 0.35, 0.50, 0.75, 1.0],
+}
+
 # CLASSICAL IT-DEALER BASELINE (m7.run_it_dealer, exp9/exp12)
 # The strongest classical objection made executable: a trusted dealer
 # provisions pairwise one-time pads over classical channels. Comparison

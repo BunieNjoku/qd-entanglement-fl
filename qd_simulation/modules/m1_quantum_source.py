@@ -281,6 +281,305 @@ def compute_coincidence_rate(
         return source_rep_rate_hz * source_brightness * link_eff ** 2
 
 
+# BBM92 MEASUREMENT LAYER
+#
+# Same source, fiber, and detection physics as simulate_source; the delta
+# is measurement-side only (Bennett, Brassard & Mermin, PRL 68, 557, 1992):
+# each site adds a passive basis choice between Z (0 deg) and X (45 deg)
+# analyzers, matched-basis events are kept (sifting), and the X-X subset
+# estimates the phase error rate of the Z-Z key (squashing argument:
+# Beaudry, Moroder & Lutkenhaus, PRL 101, 093601, 2008). Asymmetric basis
+# probabilities follow Lo, Chau & Ardehali (J. Cryptology 18, 133, 2005).
+# With p_z_alice = p_z_bob = 1.0 this reduces to the fixed-basis
+# source-model measurement of simulate_source (keep fraction 1, no test
+# set) - exp14 uses that limit as its fixed-basis arm so both protocol
+# arms share one sampling path.
+#
+# The intercept-resend adversary models a tap on the FIBER photon
+# (photon 2) only: for a tapped coincidence, Eve measures photon 2 in her
+# basis and resends the corresponding eigenstate. Standard analysis
+# (Bennett & Brassard 1984; Gisin et al., Rev. Mod. Phys. 74, 145, 2002,
+# sec. II.C.3): an Eve fixed in the key basis is invisible to a
+# fixed-basis protocol and learns the key; against BBM92 the tapped
+# fraction f contributes ~f/2 error in the conjugate basis.
+
+@dataclass
+class Bbm92Result:
+    """One BBM92 (or fixed-basis, p_z = 1) measurement run on an edge."""
+    n_coincidences: int
+    n_key: int                 # Z-Z sifted events (key candidates)
+    n_test: int                # X-X sifted events (parameter estimation)
+    key_bits_alice: np.ndarray
+    key_bits_bob: np.ndarray
+    e_x_observed: float        # error rate on the X-X test set
+    e_z_actual: float          # true Z-Z error rate (hardware finds via EC)
+    sifting_keep: float        # (n_key + n_test) / n_coincidences
+    eve_fraction: float
+    eve_basis_mode: str        # 'z' | 'random' | 'none'
+    eve_guess_accuracy: float  # fraction of Bob's key bits Eve predicts
+    n_accidental: int
+    birefringence_angle: float
+    params: dict
+
+
+def _eigenstate(angle, outcome):
+    """Analyzer eigenstate resent by an intercept-resend adversary."""
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([c, s]) if outcome == 0 else np.array([-s, c])
+
+
+def simulate_bbm92(
+    fidelity=0.987,
+    source_rep_rate_hz=80e6,
+    source_brightness=0.01,
+    fiber_length_m=500,
+    fiber_loss_db_per_km=3.0,
+    coupling_efficiency=0.15,
+    spad_efficiency=0.65,
+    spad_dark_count_hz=50,
+    coincidence_window_ns=2.0,
+    pbs_extinction_ratio=1000,
+    fiber_birefringence_rad_per_km_per_C=0.1,
+    temperature_variation_C=5.0,
+    duration_s=1.0,
+    n_pairs=None,
+    colocated=True,
+    local_optics_efficiency=0.90,
+    use_qfc=False,
+    qfc_efficiency=0.35,
+    p_z_alice=0.9,
+    p_z_bob=0.9,
+    eve_fraction=0.0,
+    eve_basis_mode='none',
+    rng=None,
+):
+    """Simulate one edge under BBM92 measurement with optional tap.
+
+    Reuses simulate_source's pair-generation, transmission, dark-count,
+    and extinction models bit for bit; only the measurement stage differs.
+    p_z_*: probability the passive splitter routes a photon to the Z
+    analyzer (0 deg). The X analyzer sits at 45 deg. Bob's analyzers are
+    additionally rotated by the sampled birefringence offset, so channel
+    rotation errs both bases equally (the e_x = e_z property exp13's
+    tests pin analytically).
+
+    eve_basis_mode: 'none', 'z' (Eve fixed in the Z basis - the attack a
+    fixed-basis protocol cannot see), or 'random' (basis guessed 50/50
+    per photon). eve_fraction is the tapped fraction of fiber photons.
+
+    Returns Bbm92Result. Accidentals join the stream with uniform random
+    bases and bits on both sides, as dark counts land in whichever
+    analyzer fires.
+    """
+    if rng is None:
+        rng = np.random.default_rng(42)
+    if not (0.0 <= p_z_alice <= 1.0 and 0.0 <= p_z_bob <= 1.0):
+        raise ValueError("basis probabilities must be in [0, 1]")
+    if not 0.0 <= eve_fraction <= 1.0:
+        raise ValueError("eve_fraction must be in [0, 1]")
+    if eve_basis_mode not in ('none', 'z', 'random'):
+        raise ValueError("eve_basis_mode must be 'none', 'z' or 'random'")
+    if eve_fraction > 0 and eve_basis_mode == 'none':
+        eve_basis_mode = 'z'
+
+    # Pair generation and per-photon transmission: identical to
+    # simulate_source.
+    if n_pairs is None:
+        n_pulses = int(source_rep_rate_hz * duration_s)
+        n_emitted = rng.binomial(n_pulses, source_brightness)
+    else:
+        n_emitted = n_pairs
+
+    empty = np.array([], dtype=np.int8)
+    if n_emitted == 0:
+        return Bbm92Result(0, 0, 0, empty, empty, 0.0, 0.0, 0.0,
+                           eve_fraction, eve_basis_mode, 0.0, 0, 0.0, {})
+
+    fiber_loss_db = fiber_loss_db_per_km * (fiber_length_m / 1000)
+    fiber_transmission = 10 ** (-fiber_loss_db / 10)
+    if colocated:
+        alice_efficiency = local_optics_efficiency * spad_efficiency
+        bob_efficiency = coupling_efficiency * fiber_transmission * spad_efficiency
+        if use_qfc:
+            bob_efficiency *= qfc_efficiency
+    else:
+        total = coupling_efficiency * fiber_transmission * spad_efficiency
+        if use_qfc:
+            total *= qfc_efficiency
+        alice_efficiency = total
+        bob_efficiency = total
+
+    alice_detected = rng.random(n_emitted) < alice_efficiency
+    bob_detected = rng.random(n_emitted) < bob_efficiency
+    n_true_coinc = int(np.sum(alice_detected & bob_detected))
+
+    dark_rate_per_window = spad_dark_count_hz * (coincidence_window_ns * 1e-9)
+    n_accidental = rng.poisson(
+        dark_rate_per_window * n_emitted * (alice_efficiency + bob_efficiency))
+    n_accidental = min(n_accidental, n_true_coinc // 2)
+
+    rho = werner_state(fidelity)
+    bire_std = (fiber_birefringence_rad_per_km_per_C *
+                (fiber_length_m / 1000) * temperature_variation_C)
+    birefringence_angle = rng.normal(0, bire_std) if bire_std > 0 else 0.0
+
+    # Analyzer angles: Alice ideal, Bob offset by the channel rotation.
+    a_angles = {0: 0.0, 1: np.pi / 4}                       # 0 = Z, 1 = X
+    b_angles = {0: birefringence_angle,
+                1: np.pi / 4 + birefringence_angle}
+
+    basis_a = (rng.random(n_true_coinc) >= p_z_alice).astype(np.int8)
+    basis_b = (rng.random(n_true_coinc) >= p_z_bob).astype(np.int8)
+    tapped = rng.random(n_true_coinc) < eve_fraction
+    if eve_basis_mode == 'random':
+        eve_basis = rng.integers(0, 2, size=n_true_coinc, dtype=np.int8)
+    else:
+        eve_basis = np.zeros(n_true_coinc, dtype=np.int8)   # Z
+
+    bits_a = np.zeros(n_true_coinc, dtype=np.int8)
+    bits_b = np.zeros(n_true_coinc, dtype=np.int8)
+    eve_record = np.full(n_true_coinc, -1, dtype=np.int8)
+
+    # Untapped events: joint outcomes from Tr(rho * Pa x Pb) per basis
+    # combination.
+    for ba in (0, 1):
+        for bb in (0, 1):
+            mask = (~tapped) & (basis_a == ba) & (basis_b == bb)
+            n_sel = int(np.sum(mask))
+            if n_sel == 0:
+                continue
+            probs = np.zeros(4)
+            for oa in range(2):
+                for ob in range(2):
+                    proj = two_photon_projector(
+                        a_angles[ba], b_angles[bb], oa, ob)
+                    probs[2 * oa + ob] = max(0, np.real(np.trace(rho @ proj)))
+            probs /= probs.sum()
+            outcomes = rng.choice(4, size=n_sel, p=probs)
+            bits_a[mask] = (outcomes >= 2).astype(np.int8)
+            bits_b[mask] = (outcomes % 2).astype(np.int8)
+
+    # Tapped events: Alice-Eve joint outcome from the state, then Bob
+    # measures Eve's resent eigenstate.
+    if np.any(tapped):
+        for ba in (0, 1):
+            for be in (0, 1):
+                mask = tapped & (basis_a == ba) & (eve_basis == be)
+                n_sel = int(np.sum(mask))
+                if n_sel == 0:
+                    continue
+                # Eve taps mid-fiber: she sees the channel rotation too,
+                # so her analyzer carries the same offset as Bob's.
+                e_angle = b_angles[be]
+                probs = np.zeros(4)
+                for oa in range(2):
+                    for oe in range(2):
+                        proj = two_photon_projector(
+                            a_angles[ba], e_angle, oa, oe)
+                        probs[2 * oa + oe] = max(
+                            0, np.real(np.trace(rho @ proj)))
+                probs /= probs.sum()
+                outcomes = rng.choice(4, size=n_sel, p=probs)
+                oa_sel = (outcomes >= 2).astype(np.int8)
+                oe_sel = (outcomes % 2).astype(np.int8)
+                bits_a[mask] = oa_sel
+                eve_record[mask] = oe_sel
+                # Resent eigenstate measured by Bob in his basis.
+                idx = np.where(mask)[0]
+                for bb in (0, 1):
+                    sub = idx[basis_b[idx] == bb]
+                    if len(sub) == 0:
+                        continue
+                    p0_proj, _ = measurement_projector(b_angles[bb])
+                    for oe in (0, 1):
+                        sub_oe = sub[eve_record[sub] == oe]
+                        if len(sub_oe) == 0:
+                            continue
+                        e_vec = _eigenstate(e_angle, oe)
+                        p0 = float(np.real(e_vec @ p0_proj @ e_vec))
+                        p0 = min(1.0, max(0.0, p0))
+                        bits_b[sub_oe] = (
+                            rng.random(len(sub_oe)) >= p0).astype(np.int8)
+
+    # Finite PBS extinction: detector-level bit flips, both sides.
+    pbs_error_prob = 1.0 / pbs_extinction_ratio
+    flips_a = rng.random(n_true_coinc) < pbs_error_prob
+    flips_b = rng.random(n_true_coinc) < pbs_error_prob
+    bits_a[flips_a] = 1 - bits_a[flips_a]
+    bits_b[flips_b] = 1 - bits_b[flips_b]
+
+    # Accidentals: uniform bases and bits, no Eve knowledge.
+    if n_accidental > 0:
+        acc_basis_a = (rng.random(n_accidental) >= p_z_alice).astype(np.int8)
+        acc_basis_b = (rng.random(n_accidental) >= p_z_bob).astype(np.int8)
+        basis_a = np.concatenate([basis_a, acc_basis_a])
+        basis_b = np.concatenate([basis_b, acc_basis_b])
+        bits_a = np.concatenate(
+            [bits_a, rng.integers(0, 2, n_accidental, dtype=np.int8)])
+        bits_b = np.concatenate(
+            [bits_b, rng.integers(0, 2, n_accidental, dtype=np.int8)])
+        eve_record = np.concatenate(
+            [eve_record, np.full(n_accidental, -1, dtype=np.int8)])
+        eve_basis = np.concatenate(
+            [eve_basis, np.zeros(n_accidental, dtype=np.int8)])
+        tapped = np.concatenate(
+            [tapped, np.zeros(n_accidental, dtype=bool)])
+        # Accidentals are interspersed with true coincidences in time
+        # (same shuffle simulate_source applies).
+        perm = rng.permutation(len(bits_a))
+        basis_a, basis_b = basis_a[perm], basis_b[perm]
+        bits_a, bits_b = bits_a[perm], bits_b[perm]
+        eve_record, eve_basis = eve_record[perm], eve_basis[perm]
+        tapped = tapped[perm]
+
+    n_total = len(bits_a)
+
+    # Sifting: matched-basis events only.
+    key_mask = (basis_a == 0) & (basis_b == 0)
+    test_mask = (basis_a == 1) & (basis_b == 1)
+    n_key = int(np.sum(key_mask))
+    n_test = int(np.sum(test_mask))
+
+    key_a = bits_a[key_mask].copy()
+    key_b = bits_b[key_mask].copy()
+    e_z = float(np.mean(key_a != key_b)) if n_key > 0 else 0.0
+    e_x = float(np.mean(bits_a[test_mask] != bits_b[test_mask])) \
+        if n_test > 0 else 0.0
+
+    # Eve's guess of Bob's sifted key: her record where she tapped in the
+    # key basis, a coin flip elsewhere.
+    if n_key > 0:
+        ev = eve_record[key_mask]
+        eb = eve_basis[key_mask]
+        guess = rng.integers(0, 2, n_key, dtype=np.int8)
+        informed = (ev >= 0) & (eb == 0)
+        guess[informed] = ev[informed]
+        eve_acc = float(np.mean(guess == key_b))
+    else:
+        eve_acc = 0.5
+
+    return Bbm92Result(
+        n_coincidences=n_total,
+        n_key=n_key,
+        n_test=n_test,
+        key_bits_alice=key_a,
+        key_bits_bob=key_b,
+        e_x_observed=e_x,
+        e_z_actual=e_z,
+        sifting_keep=(n_key + n_test) / max(n_total, 1),
+        eve_fraction=eve_fraction,
+        eve_basis_mode=eve_basis_mode if eve_fraction > 0 else 'none',
+        eve_guess_accuracy=eve_acc,
+        n_accidental=n_accidental,
+        birefringence_angle=float(birefringence_angle),
+        params={
+            "fidelity": fidelity, "fiber_length_m": fiber_length_m,
+            "p_z_alice": p_z_alice, "p_z_bob": p_z_bob,
+            "n_emitted": n_emitted, "n_true_coinc": n_true_coinc,
+        },
+    )
+
+
 # SYMMETRIC BEAMSPLITTER-MULTIPLEXED EDGE KEYING
 #
 # Architecture (matches the cost model: 1 QD + 1 two-way optical switch per

@@ -478,6 +478,140 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
     }
 
 
+def tlgr_deviation(n_key, n_test, eps_sec):
+    """Finite-key statistical fluctuation mu of Tomamichel, Lim, Gisin &
+    Renner (Nat. Commun. 3, 634, 2012), Eq. 2:
+
+        mu = sqrt( (n+k)/(n*k) * (k+1)/k * ln(4/eps_sec) )
+
+    with n key-generation bits and k parameter-estimation bits. The
+    observed test-set error rate plus mu upper-bounds the phase error
+    rate of the key set except with probability ~eps_sec (Serfling 1974
+    hypergeometric tail bound).
+    """
+    n, k = n_key, n_test
+    if n <= 0 or k <= 0:
+        return 0.5
+    return float(np.sqrt((n + k) / (n * k) * (k + 1) / k
+                         * np.log(4 / eps_sec)))
+
+
+@dataclass
+class Bbm92DistillResult:
+    """EC + PA of one BBM92 run's sifted key under the TLGR bound."""
+    aborted: bool
+    abort_reason: str
+    n_key_bits: int
+    n_test_bits: int
+    e_x_observed: float
+    e_ph_bound: float          # q_tol + mu (a-priori charge, TLGR Eq. 2)
+    mu: float                  # binding per-block deviation (largest)
+    n_blocks: int
+    n_blocks_succeeded: int
+    secure_bits: np.ndarray    # actual Toeplitz output (identical both ends)
+    n_secure_bits: int
+    leak_ec_bits: int
+    secure_fraction: float     # n_secure / n_key
+
+
+def bbm92_distill(key_bits_alice, key_bits_bob, e_x_observed, n_test,
+                  q_tol=0.02, code_rate=0.84, block_size=50000,
+                  eps_sec=1e-9, eps_cor=1e-15, rng=None):
+    """Distill a BBM92 run's sifted Z key: abort check, blockwise EC
+    (same fixed declared LDPC + tier FER model as fast_ec_simulate), then
+    Toeplitz PA sized by the TLGR fixed-length finite-key bound (Eq. 2):
+
+        ell = n * (1 - h2(q_tol + mu)) - leak_EC - log2(2/(eps_sec^2*eps_cor))
+
+    The phase-error charge uses the A-PRIORI tolerance q_tol, not the
+    observed e_x, exactly as in TLGR's fixed-length protocol: sizing the
+    key by the observed rate would make the output length adaptive,
+    which their proof does not cover. Preparation quality q = 1
+    (projective measurements in exactly diagonal bases - true of the m1
+    measurement model by construction; TLGR p. 4). NO GLLP
+    tagged-fraction charge, per the entanglement-based analysis
+    (Koashi-Preskill 2003; Ma-Fung-Lo 2007) - see
+    compute_rate_waterfall_qkd's note.
+
+    Abort rule (TLGR protocol table): observed test error above q_tol.
+    q_tol defaults to the declared rate-0.84 code's design QBER - beyond
+    it the fixed code fails frames anyway (tier_frame_error_rate).
+
+    Blocking: ceil(n / block_size) blocks, the last one partial, so
+    every sifted bit is accounted. The security parameters are split
+    uniformly across blocks (union bound): each block is charged its own
+    mu(block_n, n_test) at eps_sec / n_blocks and the floor
+    log2(2/((eps_sec/n_blocks)^2 * (eps_cor/n_blocks))).
+    """
+    if rng is None:
+        rng = np.random.default_rng(42)
+
+    n = min(len(key_bits_alice), len(key_bits_bob))
+    empty = np.array([], dtype=np.int8)
+
+    n_blocks = max(1, int(np.ceil(n / block_size))) if n > 0 else 0
+    # Reported mu/e_ph are the binding (largest) per-block values; the
+    # smallest block has the largest deviation.
+    mu = 0.5
+    e_ph = min(0.5, q_tol + mu)
+
+    def result(aborted, reason, blocks, ok, secure, leak):
+        secure = np.concatenate(secure) if secure else empty
+        return Bbm92DistillResult(
+            aborted=aborted, abort_reason=reason,
+            n_key_bits=n, n_test_bits=n_test,
+            e_x_observed=e_x_observed, e_ph_bound=e_ph, mu=mu,
+            n_blocks=blocks, n_blocks_succeeded=ok,
+            secure_bits=secure, n_secure_bits=len(secure),
+            leak_ec_bits=leak,
+            secure_fraction=len(secure) / max(n, 1))
+
+    if n == 0 or n_test == 0:
+        return result(True, "empty run (no key or no test bits)", 0, 0, [], 0)
+    if e_x_observed > q_tol:
+        return result(True,
+                      f"e_x {e_x_observed:.4f} > q_tol {q_tol:.4f}", 0, 0, [], 0)
+
+    eps_s = eps_sec / n_blocks
+    eps_c = eps_cor / n_blocks
+    margin_bits = np.log2(2 / (eps_s ** 2 * eps_c))
+    secure_chunks = []
+    ok = 0
+    leak_total = 0
+    mu_max = 0.0
+    for b in range(n_blocks):
+        start = b * block_size
+        end = min(start + block_size, n)
+        block_a = key_bits_alice[start:end]
+        block_b = key_bits_bob[start:end]
+        block_n = len(block_a)
+
+        mu_b = tlgr_deviation(block_n, n_test, eps_s)
+        mu_max = max(mu_max, mu_b)
+        e_ph_b = min(0.5, q_tol + mu_b)
+
+        e_z_block = float(np.mean(block_a != block_b))
+        syndrome_bits = int(block_n * (1 - code_rate))
+        leak_total += syndrome_bits
+
+        success = rng.random() < (
+            1.0 - tier_frame_error_rate(e_z_block, code_rate))
+        if not success:
+            continue
+        ok += 1
+
+        ell = int(block_n * (1 - binary_entropy(e_ph_b))
+                  - syndrome_bits - margin_bits)
+        if ell <= 0:
+            continue
+        # After successful EC both ends hold Alice's block; hash it.
+        secure_chunks.append(toeplitz_hash(block_a, ell, rng=rng))
+
+    mu = mu_max
+    e_ph = min(0.5, q_tol + mu)
+    return result(False, "", n_blocks, ok, secure_chunks, leak_total)
+
+
 def toeplitz_hash(bits, output_length, seed=None, rng=None):
     """Privacy amplification via Toeplitz matrix-vector multiplication.
 
