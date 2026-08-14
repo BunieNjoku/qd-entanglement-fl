@@ -45,17 +45,18 @@ import matplotlib.patches as mpatches
 sys.path.insert(0, os.path.dirname(__file__))
 from config import (QUANTUM, POST_PROC, MESH, FL, COST, VIZ, RESULTS_DIR,
                     BITS_PER_PARAM, OPERATING_POINT, PROJECTED_OPERATING_POINT,
-                    CLASSICAL_LINK_BPS, QKD_FRAMING)
+                    CLASSICAL_LINK_BPS, QKD_FRAMING, BBM92)
 
 from modules.m1_quantum_source import (
     simulate_source, compute_chsh_s, werner_state,
     compute_qber_analytical, compute_coincidence_rate,
-    simulate_symmetric_edge,
+    simulate_symmetric_edge, simulate_bbm92,
 )
 from modules.m2_post_processing import (
     fast_ec_simulate, compute_rate_waterfall, compute_rate_waterfall_qkd,
     binary_entropy, validate_bp_against_statistical, toeplitz_hash,
     validate_pa_output, estimate_capacity_qber, randomness_battery,
+    bbm92_distill, tlgr_deviation,
 )
 from modules.m3_mesh_topology import (
     generate_campus_mesh, build_aggregation_tree,
@@ -95,14 +96,44 @@ plt.rcParams.update({
 C = VIZ['colors']
 
 
+# Quick mode writes to suffixed filenames so reduced-sweep runs never
+# overwrite the full-mode figures and summary.
+_OUTPUT_SUFFIX = ""
+
+# Publication tiering (IEEE Network: six figures/tables total). Figures
+# named here land in results/main/, everything else in
+# results/peripheral/; quick-mode outputs always go to peripheral.
+# Captions carrying the context stripped from figure titles live in
+# results/figure_captions.md; prose replacing demoted figures lives in
+# results/replaced_by_text.md.
+MAIN_FIGURES = {
+    'exp5_dropout_recovery',
+    'exp7_qber_key_rate_envelope',
+    'exp9_hndl_transcript',
+    'exp12_sota_comparison',
+    'exp13_qkd_framing',
+    'exp14_bbm92_executing',
+}
+
+
+def set_output_suffix(suffix):
+    global _OUTPUT_SUFFIX
+    _OUTPUT_SUFFIX = suffix
+
+
 def save_fig(fig, name):
     """Save figure as both PNG (preview) and PDF (LaTeX inclusion)."""
+    tier = 'main' if name in MAIN_FIGURES and not _OUTPUT_SUFFIX \
+        else 'peripheral'
+    out_dir = os.path.join(RESULTS_DIR, tier)
+    os.makedirs(out_dir, exist_ok=True)
+    name = f"{name}{_OUTPUT_SUFFIX}"
     for ext in ['png', 'pdf']:
-        path = os.path.join(RESULTS_DIR, f"{name}.{ext}")
+        path = os.path.join(out_dir, f"{name}.{ext}")
         fig.savefig(path, dpi=VIZ['dpi'], bbox_inches='tight',
                     facecolor='white', pad_inches=0.03)
     plt.close(fig)
-    print(f"    Saved: {name}.png/pdf")
+    print(f"    Saved: {tier}/{name}.png/pdf")
 
 
 def print_comm_summary(fl_result, label=""):
@@ -227,10 +258,10 @@ def run_experiment_1(quick=False):
     ax2.fill_between(fidelities, 2.0, s_values, alpha=0.15, color=C['quantum'], label='Quantum advantage region')
     ax2.set_xlabel('Entanglement Fidelity F')
     ax2.set_ylabel('CHSH S-parameter')
-    ax2.set_title('Bell Inequality Violation (Assumption B)')
+    ax2.set_title('CHSH S-parameter vs fidelity')
     ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
-    fig.suptitle('Source Characterization - Fidelity Sweep', fontsize=10, fontweight='bold')
+    fig.suptitle('Source characterization: fidelity sweep', fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp1a_fidelity_sweep')
 
@@ -267,8 +298,7 @@ def run_experiment_1(quick=False):
     ax.set_xlabel('Fiber Length (km)')
     ax.set_ylabel('Coincidence Rate (kHz)')
     qfc_note = f', QFC eff={qfc_eff}' if use_qfc else ''
-    ax.set_title(f'Coincidence Rate vs Fiber Length\n'
-                 f'({wavelength_label}, coupling={QUANTUM["coupling_efficiency"]}{qfc_note})')
+    ax.set_title('Coincidence rate vs fiber length')
     ax.legend()
 
     # Set y-axis to show the actual data range clearly
@@ -303,7 +333,7 @@ def run_experiment_1(quick=False):
                label='1 MHz-class (hypothetical projection)')
     ax.set_xlabel('Source-to-Fiber Coupling Efficiency')
     ax.set_ylabel('Coincidence Rate (Hz)')
-    ax.set_title('Rate Sensitivity to Coupling Efficiency')
+    ax.set_title('Coincidence rate vs coupling efficiency')
     ax.legend()
     ax.grid(True, alpha=0.3, which='both')
     fig.tight_layout()
@@ -369,8 +399,7 @@ def run_experiment_2(quick=False):
         ax.set_title(f"{point['label']}\nQBER {point['qber']*100:.2f}% -> "
                      f"{w['final_secure_rate']/1000:.1f} kbit/s", fontsize=8)
         ax.grid(True, alpha=0.2, axis='y')
-    fig.suptitle('Rate waterfall - modeled device vs labeled projection',
-                 fontsize=10, fontweight='bold')
+    fig.suptitle('Shared-bit rate waterfall', fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp2a_rate_waterfall')
 
@@ -419,7 +448,8 @@ def run_experiment_2(quick=False):
     ax2.set_title('Error Correction Overhead vs QBER')
     ax2.grid(True, alpha=0.3)
 
-    fig.suptitle('Post-Processing Sensitivity', fontsize=10, fontweight='bold')
+    fig.suptitle('Secure rate and reconciliation overhead vs QBER',
+                 fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp2b_rate_vs_qber')
 
@@ -444,10 +474,7 @@ def run_experiment_2(quick=False):
                      label='Rate gain from trusted-source assumption')
     ax.set_xlabel('QBER (%)')
     ax.set_ylabel('Shared bit rate (kbit/s)')
-    ax.set_title(f'Fixed-basis vs sifting rate at modeled-device '
-                 f'raw rate ({base_rate/1000:.1f} kHz)\n'
-                 f'(Fixed-basis requires trusted source; sifting does not. '
-                 f'Sifting loss only - full QKD accounting: exp13)',
+    ax.set_title('Fixed-basis vs sifting-based shared-bit rate',
                  fontsize=9)
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -583,7 +610,7 @@ def run_experiment_3(quick=False):
     ax2.set_title('Triangulation Density')
     ax2.grid(True, alpha=0.3)
 
-    fig.suptitle('Mesh Topology Scaling', fontsize=10, fontweight='bold')
+    fig.suptitle('Delaunay mesh scaling', fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp3a_mesh_scaling')
 
@@ -618,8 +645,7 @@ def run_experiment_3(quick=False):
                         color='white' if val > 0.55 * vmax else 'black',
                         fontweight='bold')
         fig.colorbar(im, ax=ax, label='Max nodes')
-    fig.suptitle('Maximum feasible nodes - modeled vs projected rate\n'
-                 '(0 = infeasible: per-level mask time exceeds the round period)',
+    fig.suptitle('Maximum feasible nodes vs model size and round period',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp3b_max_nodes_heatmap')
@@ -799,9 +825,7 @@ def run_experiment_4(quick=False):
                 label=f'$2^{{-20}}$ quantization bound ({quant_bound:.1e})')
     ax1.set_xlabel('Training Round')
     ax1.set_ylabel('‖masked mean − float mean‖∞ (float64)')
-    ax1.set_title(f'HEADLINE: aggregate fidelity, {num_repeats} seeds\n'
-                  f'(masking exactness: {total_mismatches} mismatched words '
-                  f'- theorem holds)')
+    ax1.set_title('Masked-aggregate deviation from float mean')
     ax1.legend(fontsize=7, loc='lower right')
     ax1.grid(True, alpha=0.3, which='both')
 
@@ -816,16 +840,12 @@ def run_experiment_4(quick=False):
                          alpha=0.15, color=colors[mode])
     ax2.set_xlabel('Training Round')
     ax2.set_ylabel('Test Accuracy')
-    ax2.set_title('VALIDATION: convergence parity (mean ± 1σ)\n'
-                  'parity is expected - exact masking is a theorem')
+    ax2.set_title('Convergence parity')
     ax2.legend(fontsize=7)
     ax2.grid(True, alpha=0.3)
     ax2.set_ylim(0.2, 1.02)
 
-    fig.suptitle(f'Secure-aggregation fidelity - breast-cancer '
-                 f'clinical FL\n{num_clients} clients, Dirichlet '
-                 f'α={dirichlet_alpha} non-IID, {num_repeats} paired seeds, '
-                 f'FedAvg',
+    fig.suptitle('Secure-aggregation fidelity, 3-client clinical FL',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp4_training_convergence')
@@ -1007,15 +1027,13 @@ def run_experiment_5(quick=False):
     ax2.set_ylabel('Recovery bytes (KB/client·round)', color=C['pareto'])
     ax2b.set_ylabel('Threshold failures (% of triangle-rounds)',
                     color=C['unmasked'])
-    ax2.set_title('HEADLINE: the cost of reveal-based recovery')
+    ax2.set_title('Reveal-based recovery cost')
     h1, l1 = ax2.get_legend_handles_labels()
     h2, l2 = ax2b.get_legend_handles_labels()
     ax2.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper left')
     ax2.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle('Dropout recovery - accuracy and COST, '
-                 f'{num_seeds} paired seeds\n'
-                 'Reveal-based recovery under per-round-fresh pairwise keys',
+    fig.suptitle('Dropout recovery: accuracy and cost',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp5_dropout_recovery')
@@ -1288,10 +1306,7 @@ def run_experiment_11(quick=False):
     ax2.legend(fontsize=7)
     ax2.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle('Gradient inversion on the REAL '
-                 'construction (tabular DLG/iDLG)\nunmasked leaks · '
-                 'modular mask blocks (theorem) · plaintext aggregate '
-                 'partially leaks',
+    fig.suptitle('Gradient inversion on the implemented construction',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp11_gradient_inversion')
@@ -1407,9 +1422,7 @@ def run_experiment_6(quick=False):
     ax.set_ylabel('Training Rounds per Hour')
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.set_title('Rate-Constrained Training Throughput\n'
-                 'Mask time from key rate; local compute measured per size '
-                 'on this machine')
+    ax.set_title('Rate-constrained training throughput')
     ax.legend(fontsize=7, loc='center right')
     ax.grid(True, alpha=0.3, which='both')
     fig.tight_layout()
@@ -1562,9 +1575,7 @@ def run_experiment_7(quick=False):
     ax2.set_title('Max maskable model size vs QBER (rate-driven)')
     ax2.grid(True, alpha=0.3, which='both')
 
-    fig.suptitle('QBER -> key-rate / capacity envelope\n'
-                 'Channel quality bounds key SUPPLY (rate, model size); '
-                 'the PA entropy floor stays flat',
+    fig.suptitle('QBER, key rate, and mask entropy',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp7_qber_key_rate_envelope')
@@ -1645,9 +1656,8 @@ def run_experiment_7_cost(quick=False):
     ax.set_xlabel('Annual Cost per Deployment (€)', fontsize=7)
     ax.set_ylabel('Model Accuracy at Convergence', fontsize=7)
     ax.set_xscale('log')
-    ax.set_title(f'Cost-Privacy-Accuracy Pareto Frontier\n'
-                 f'{n_nodes} nodes, {n_triangles} triangles, 60s training rounds',
-                 fontsize=10, fontweight='bold')
+    ax.set_title('Cost vs accuracy by approach', fontsize=10,
+                 fontweight='bold')
     ax.legend(loc='lower right', fontsize=7)
     ax.grid(True, alpha=0.3, which='both')
     ax.set_ylim(0.75, 1.0)
@@ -1699,7 +1709,8 @@ def run_experiment_7_cost(quick=False):
     ax1.legend(wedges1, legend_labels, loc='upper center',
                bbox_to_anchor=(0.5, -0.02), fontsize=6.5, ncol=2,
                frameon=False, columnspacing=1.0, handletextpad=0.5)
-    ax1.set_title(f'CAPEX Breakdown - Total: €{capex["total"]/1000:.0f}K',
+    ax1.set_title(f'CAPEX breakdown (total EUR '
+                  f'{capex["total"]/1000:.0f}K)',
                   fontsize=9, fontweight='bold', pad=8)
 
     # OPEX donut
@@ -1722,11 +1733,11 @@ def run_experiment_7_cost(quick=False):
     ax2.legend(wedges2, legend_labels2, loc='upper center',
                bbox_to_anchor=(0.5, -0.02), fontsize=6.5, ncol=1,
                frameon=False, handletextpad=0.5)
-    ax2.set_title(f'Annual OPEX - Total: €{opex["total"]:,.0f}/yr  |  '
-                  f'Power: {opex["power_w"]/1000:.1f} kW',
+    ax2.set_title(f'Annual OPEX (EUR {opex["total"]:,.0f}/yr, '
+                  f'{opex["power_w"]/1000:.1f} kW)',
                   fontsize=9, fontweight='bold', pad=8)
 
-    fig.suptitle('Cost Structure', fontsize=10, fontweight='bold')
+    fig.suptitle('Cost structure', fontsize=10, fontweight='bold')
     fig.tight_layout(rect=[0, 0.08, 1, 0.94])
     save_fig(fig, 'exp7b_cost_breakdown')
 
@@ -1845,8 +1856,7 @@ def run_experiment_8(quick=False):
     ax2.legend(fontsize=7)
     ax2.grid(True, alpha=0.3, which='both')
 
-    fig.suptitle('Multi-Triangle FL Scaling\n'
-                 'Hierarchical secure aggregation across overlapping triangle meshes',
+    fig.suptitle('Multi-triangle FL convergence',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp8a_multitri_convergence')
@@ -1914,7 +1924,7 @@ def run_experiment_8(quick=False):
     axes[3].set_ylim(0, max_wc * 1.18)
     label_bars(axes[3], wall_clocks, fmt='{:.1f}s')
 
-    fig.suptitle('Multi-Triangle Scaling Metrics (c = clients, t = triangles)',
+    fig.suptitle('Multi-triangle scaling metrics',
                  fontsize=10, fontweight='bold')
     fig.tight_layout(rect=[0, 0, 1, 0.92])
     save_fig(fig, 'exp8b_multitri_scaling_bars')
@@ -1959,8 +1969,8 @@ def run_experiment_8(quick=False):
             ax.axhline(y=period, color='gray', linestyle=':', alpha=0.4)
             ax.text(scales[-1], period * 1.08, plabel, fontsize=6,
                     color='gray', ha='right')
-    fig.suptitle('Projected aggregation overhead - '
-                 'modeled vs projected rate', fontsize=10, fontweight='bold')
+    fig.suptitle('Hierarchical aggregation overhead',
+                 fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp8c_aggregation_overhead')
 
@@ -2149,7 +2159,7 @@ def run_experiment_9(quick=False):
     ax1.set_ylim(0, 114)  # headroom for the bar labels
     for i, v in enumerate(fracs):
         ax1.text(i, v + 2, f'{v:.0f}%', ha='center', fontweight='bold')
-    ax1.set_title('Retroactive recovery under god-mode')
+    ax1.set_title('Gradients recovered retroactively')
     ax1.grid(True, alpha=0.3, axis='y')
 
     pc = [r["residual_monobit_p"] for r in atk_c["records"]]
@@ -2168,12 +2178,10 @@ def run_experiment_9(quick=False):
     ax2.set_ylabel('Monobit p-value of post-attack residual')
     ax2.set_ylim(-0.05, 1.05)
     ax2.legend(fontsize=7)
-    ax2.set_title('What god-mode is left with')
+    ax2.set_title('Post-attack residual uniformity')
     ax2.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle('Harvest-now / decrypt-later - record '
-                 'everything, break all\ncomputational secrets later; '
-                 'only the never-transmitted pairwise bits survive',
+    fig.suptitle('HNDL transcript attack: retroactive recovery',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp9_hndl_transcript')
@@ -2330,9 +2338,7 @@ def run_experiment_10(quick=False):
                   f'{100*ratio:.0f}% rate')
     ax2.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle('Availability under single-source failure - '
-                 'an availability/fairness\nproperty of two-endpoint keying '
-                 '(NOT a security mechanism; trusted-source model)',
+    fig.suptitle('Availability under single-source failure',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp10_availability')
@@ -2657,7 +2663,7 @@ def run_experiment_12(quick=False):
              color='gray', rotation=90, va='bottom')
     ax1.set_xlabel('Vector dimension d (params)')
     ax1.set_ylabel('Dropout-recovery bytes (1 drop, 3 survivors)')
-    ax1.set_title('Recovery cost scales with d for every OTP arm')
+    ax1.set_title('Recovery bytes vs model dimension')
     ax1.legend(fontsize=7)
     ax1.grid(True, alpha=0.3, which='both')
 
@@ -2688,13 +2694,10 @@ def run_experiment_12(quick=False):
     ax2.tick_params(axis='x', labelsize=6)
     ax2.set_xlabel('* contingent on GLLP PA margin + Shamir t>=2 (exp9)',
                    fontsize=5, color='gray')
-    ax2.set_title('The trade: bytes vs assumption class + HNDL')
+    ax2.set_title('Recovery bytes and assumption class (ClinicalMLP)')
     ax2.grid(True, alpha=0.3, axis='y')
 
-    fig.suptitle('SOTA comparison, five executing arms - every OTP arm '
-                 'pays O(d) recovery; what differs is\nwho you trust: '
-                 'computational assumptions (DH/PRF), a dealer, or your '
-                 'own entangled source',
+    fig.suptitle('Dropout-recovery cost and trust assumptions, five arms',
                  fontsize=10, fontweight='bold')
     fig.tight_layout()
     save_fig(fig, 'exp12_sota_comparison')
@@ -2886,7 +2889,7 @@ def run_experiment_13(quick=False):
     ax1.set_xticks(xs)
     ax1.set_xticklabels(stage_labels, fontsize=7)
     ax1.set_ylabel('Rate (kbit/s)')
-    ax1.set_title(f'Same physics, two framings\n(QBER {q*100:.2f}%)',
+    ax1.set_title(f'Stage rates (QBER {q*100:.2f}%)',
                   fontsize=8)
     ax1.legend(fontsize=6)
     ax1.grid(True, alpha=0.3, axis='y')
@@ -2902,7 +2905,7 @@ def run_experiment_13(quick=False):
                  va='bottom', fontsize=7)
     ax2.set_ylabel('source-model rate / QKD-framed rate')
     ax2.set_ylim(0, max(ratios.values()) * 1.25)
-    ax2.set_title('The framing ratio is\nprotocol-dependent', fontsize=8)
+    ax2.set_title('Rate ratio by sifting protocol', fontsize=8)
     ax2.tick_params(axis='x', labelsize=6)
     ax2.legend(fontsize=6)
     ax2.grid(True, alpha=0.3, axis='y')
@@ -2917,7 +2920,7 @@ def run_experiment_13(quick=False):
                 label=f'operating point ({q*100:.2f}%)')
     ax3.set_xlabel('QBER')
     ax3.set_ylabel('rate ratio')
-    ax3.set_title('Ratio vs QBER\n(same EC model both arms)', fontsize=8)
+    ax3.set_title('Ratio vs QBER', fontsize=8)
     ax3.legend(fontsize=6)
     ax3.grid(True, alpha=0.3)
 
@@ -2942,13 +2945,512 @@ def run_experiment_13(quick=False):
     }
 
 
+def _bbm92_source_kwargs():
+    """m1 parameters at the config operating point, shared by both exp14
+    arms (fixed-basis arm = same function at p_z = 1)."""
+    use_qfc = QUANTUM.get('use_qfc', False)
+    return dict(
+        fidelity=QUANTUM['fidelity'],
+        source_rep_rate_hz=QUANTUM['source_rep_rate_hz'],
+        source_brightness=QUANTUM['source_brightness'],
+        fiber_length_m=QUANTUM['fiber_length_m'],
+        fiber_loss_db_per_km=(QUANTUM['fiber_loss_db_per_km_1550nm']
+                              if use_qfc
+                              else QUANTUM['fiber_loss_db_per_km_780nm']),
+        coupling_efficiency=QUANTUM['coupling_efficiency'],
+        spad_efficiency=QUANTUM['spad_efficiency'],
+        spad_dark_count_hz=QUANTUM['spad_dark_count_hz'],
+        coincidence_window_ns=QUANTUM['coincidence_window_ns'],
+        pbs_extinction_ratio=QUANTUM['pbs_extinction_ratio'],
+        fiber_birefringence_rad_per_km_per_C=(
+            QUANTUM['fiber_birefringence_rad_per_km_per_C']),
+        temperature_variation_C=QUANTUM['temperature_variation_C'],
+        colocated=QUANTUM['colocated'],
+        local_optics_efficiency=QUANTUM['local_optics_efficiency'],
+        use_qfc=use_qfc,
+        qfc_efficiency=QUANTUM['qfc_efficiency'],
+    )
+
+
+def run_experiment_14(quick=False):
+    """Executing BBM92 arm and intercept-resend visibility.
+
+    Exp13 priced the QKD framing at the waterfall (model) level; this
+    experiment EXECUTES it on sampled bits: basis choice, sifting,
+    X-basis parameter estimation, EC, and Toeplitz PA sized by the TLGR
+    finite-key bound (Tomamichel-Lim-Gisin-Renner 2012). Four parts:
+
+    (A) The executing chain at the operating point, 10 seeds, against
+        the exp13 asymptotic model - the delta is the finite-key
+        surcharge mu at realistic run sizes.
+    (B) The basis-split tradeoff at finite run size (peripheral figure
+        exp14b): the asymptotically optimal 90/10 split starves the
+        test set; the finite-key optimum sits at a less asymmetric
+        split (TLGR's p_x(n,k) observation).
+    (C) The same intercept-resend tap against both protocol arms, 10
+        seeds per point: fixed in the key basis, it is invisible to the
+        fixed-basis source-model protocol (which assumes it away -
+        Assumption B) and detected by BBM92 parameter estimation with
+        probability rising to 1 past f* ~ 2(q_tol - e0). Detection is
+        reported as an abort PROBABILITY, not a verdict.
+    (D) Surcharge convergence: the executing fixed-basis/BBM92 ratio vs
+        run length, against the deterministic finite-key model and the
+        asymptotic waterfall ratio - showing the exp13 asymptote is
+        approached as accumulated key/test bits grow.
+
+    (C) demonstrates DETECTION of one concrete attack, not security
+    against general attacks; the general claim rests on the h2(e_ph)
+    bound charged in PA (Shor-Preskill; Koashi-Preskill for the
+    basis-independent source).
+    """
+    print("\n" + "="*70)
+    print("EXPERIMENT 14: Executing BBM92 arm + intercept-resend visibility")
+    print("="*70)
+
+    kw = _bbm92_source_kwargs()
+    p_z = BBM92['p_z']
+    q_tol = BBM92['q_tol']
+    eps_sec, eps_cor = BBM92['eps_sec'], BBM92['eps_cor']
+    code_rate = POST_PROC['ldpc_code_rate']
+    block = POST_PROC['block_size']
+
+    n_pairs_a = 2_000_000 if quick else 8_000_000
+    n_pairs_c = 1_000_000 if quick else 4_000_000
+    seeds_a = [0, 1] if quick else list(range(10))
+    seeds_c = [0, 1] if quick else list(range(10))
+    duty = POST_PROC['bell_test_duty_cycle']
+
+    def run_pair(seed, n_pairs):
+        """Both arms at one seed and run length; returns
+        (bbm92_run, bbm92_distill, fixed_run, fixed_secure_bits)."""
+        rb = simulate_bbm92(n_pairs=n_pairs, p_z_alice=p_z, p_z_bob=p_z,
+                            rng=np.random.default_rng(seed), **kw)
+        db = bbm92_distill(rb.key_bits_alice, rb.key_bits_bob,
+                           rb.e_x_observed, rb.n_test, q_tol=q_tol,
+                           code_rate=code_rate, block_size=block,
+                           eps_sec=eps_sec, eps_cor=eps_cor,
+                           rng=np.random.default_rng(10_000 + seed))
+        rf = simulate_bbm92(n_pairs=n_pairs, p_z_alice=1.0, p_z_bob=1.0,
+                            rng=np.random.default_rng(seed), **kw)
+        # fast_ec_simulate drops bits beyond n_blocks*block_size; process
+        # the tail separately so both arms account every sifted bit, and
+        # charge the fixed-basis arm its 2% CHSH duty (its waterfall
+        # does; the sampled run spent no coincidences on it).
+        rng_ec = np.random.default_rng(20_000 + seed)
+        n_whole = (len(rf.key_bits_alice) // block) * block
+        ec = []
+        if n_whole > 0:
+            ec += fast_ec_simulate(rf.key_bits_alice[:n_whole],
+                                   rf.key_bits_bob[:n_whole],
+                                   qber_estimate=rf.e_z_actual,
+                                   code_rate=code_rate, block_size=block,
+                                   rng=rng_ec)
+        if len(rf.key_bits_alice) > n_whole:
+            ec += fast_ec_simulate(rf.key_bits_alice[n_whole:],
+                                   rf.key_bits_bob[n_whole:],
+                                   qber_estimate=rf.e_z_actual,
+                                   code_rate=code_rate, block_size=block,
+                                   rng=rng_ec)
+        fixed = int(sum(r.n_secure_bits for r in ec) * (1 - duty))
+        return rb, db, rf, fixed
+
+    # (A) executing chains at the operating point, multi-seed
+    print(f"\n  (A) Executing chains, {n_pairs_a:,} emitted pairs, "
+          f"{len(seeds_a)} seeds:")
+    a_runs = [run_pair(s, n_pairs_a) for s in seeds_a]
+    a_keep = np.array([r[0].sifting_keep for r in a_runs])
+    a_ex = np.array([r[0].e_x_observed for r in a_runs])
+    a_ez = np.array([r[0].e_z_actual for r in a_runs])
+    a_bb = np.array([r[1].n_secure_bits for r in a_runs])
+    a_fx = np.array([r[3] for r in a_runs])
+    run_b, dist_b = a_runs[0][0], a_runs[0][1]
+
+    exp_keep = p_z ** 2 + (1 - p_z) ** 2
+    print(f"    BBM92 arm (p_z={p_z}): keep {a_keep.mean():.4f} +- "
+          f"{a_keep.std():.4f} (model {exp_keep:.3f}); "
+          f"n_key ~{run_b.n_key:,}, n_test ~{run_b.n_test:,}/seed")
+    print(f"      e_z {a_ez.mean()*100:.2f} +- {a_ez.std()*100:.2f}%  "
+          f"e_x {a_ex.mean()*100:.2f} +- {a_ex.std()*100:.2f}%  "
+          f"(equal-rates property; analytic QBER "
+          f"{OPERATING_POINT['qber']*100:.2f}%)")
+    nb = max(dist_b.n_blocks, 1)
+    margin_floor = float(np.log2(
+        2 / ((eps_sec / nb) ** 2 * (eps_cor / nb))))
+    print(f"      finite-key: mu {dist_b.mu:.4f} -> e_ph bound "
+          f"{dist_b.e_ph_bound*100:.2f}%, PA floor {margin_floor:.0f} "
+          f"bits/block (eps split over {nb} blocks)")
+    print(f"      secure bits {a_bb.mean():,.0f} +- {a_bb.std():,.0f} "
+          f"({a_bb.mean()/max(run_b.n_key,1):.3f} of sifted key)")
+    asym_frac = max(0.0, 1 - binary_entropy(float(a_ex.mean()))
+                    - (1 - code_rate))
+    tol_frac = max(0.0, 1 - binary_entropy(q_tol) - (1 - code_rate))
+    print(f"      asymptotic (mu=0) secure fraction: {asym_frac:.3f} at "
+          f"the observed e_x, {tol_frac:.3f} at the\n      a-priori "
+          f"q_tol the fixed-length bound charges.")
+    print(f"    fixed-basis arm (p_z=1): secure bits {a_fx.mean():,.0f} "
+          f"+- {a_fx.std():,.0f} (source-model distillation)")
+    keep = exp_keep
+    model_ratio = (OPERATING_POINT['waterfall']['final_secure_rate']
+                   / compute_rate_waterfall_qkd(
+                       OPERATING_POINT['raw_edge_rate_hz'],
+                       OPERATING_POINT['qber'], keep,
+                       code_rate=code_rate,
+                       security_margin=POST_PROC['security_margin_bits'],
+                       block_size=block,
+                       bell_duty_cycle=duty)['final_secure_rate'])
+    exec_ratio = float(a_fx.sum() / a_bb.sum()) if a_bb.sum() > 0 \
+        else float('nan')
+    print(f"    executing rate ratio fixed-basis/BBM92 (pooled over "
+          f"seeds): {exec_ratio:.2f}x\n      (asymptotic waterfall "
+          f"model at keep {keep:.2f}: {model_ratio:.2f}x; the excess is "
+          f"the finite-key\n      charge: per-block mu at the a-priori "
+          f"q_tol, plus per-block floors)")
+    print("      note: the BBM92 arm charges NO CHSH duty cycle - "
+          "parameter estimation replaces\n      the source-QA witness; "
+          "the fixed-basis arm's secure bits are scaled by its 2% Bell "
+          "duty.")
+
+    # (B) basis-split tradeoff at finite run size
+    p_z_sweep = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95]
+    seeds_b = [2] if quick else [2, 3, 4]
+    b_secure, b_std, b_asym = [], [], []
+    for pz in p_z_sweep:
+        vals, asyms = [], []
+        for s in seeds_b:
+            r = simulate_bbm92(n_pairs=n_pairs_a, p_z_alice=pz,
+                               p_z_bob=pz,
+                               rng=np.random.default_rng(s), **kw)
+            d = bbm92_distill(r.key_bits_alice, r.key_bits_bob,
+                              r.e_x_observed, r.n_test, q_tol=q_tol,
+                              code_rate=code_rate, block_size=block,
+                              eps_sec=eps_sec, eps_cor=eps_cor,
+                              rng=np.random.default_rng(30_000 + s))
+            vals.append(d.n_secure_bits)
+            # mu = 0 limit of the same fixed-length charge (h2 at the
+            # a-priori q_tol, per-block floors dropped): labeled model
+            # line, not an executing result
+            asyms.append(max(0.0, r.n_key * (1 - binary_entropy(q_tol)
+                                             - (1 - code_rate))))
+        b_secure.append(float(np.mean(vals)))
+        b_std.append(float(np.std(vals)))
+        b_asym.append(float(np.mean(asyms)))
+    best_pz = p_z_sweep[int(np.argmax(b_secure))]
+    print(f"\n  (B) Basis-split tradeoff at {n_pairs_a:,} pairs "
+          f"({len(seeds_b)} seeds): finite-key optimum p_z = {best_pz}")
+    print("      (asymptotic optimum approaches 1.0); short runs pay "
+          "for asymmetry with\n      test-set starvation (mu grows as "
+          "k shrinks). Figure: exp14b (peripheral).")
+
+    # (C) intercept-resend visibility, same attack both arms
+    f_sweep = BBM92['eve_fraction_sweep'] if not quick \
+        else [0.0, 0.02, 0.05, 0.2, 0.5, 1.0]
+    arms = {"fixed-basis": 1.0, "bbm92": p_z}
+    c_res = {a: {"err_mean": [], "err_std": [], "acc_mean": [],
+                 "acc_accepted": [], "accepted": [], "abort_prob": []}
+             for a in arms}
+    for f in f_sweep:
+        for arm, pz in arms.items():
+            errs, accs, accepts = [], [], []
+            for s in seeds_c:
+                r = simulate_bbm92(n_pairs=n_pairs_c, p_z_alice=pz,
+                                   p_z_bob=pz, eve_fraction=f,
+                                   eve_basis_mode='z',
+                                   rng=np.random.default_rng(100 + s),
+                                   **kw)
+                if arm == "bbm92":
+                    errs.append(r.e_x_observed)
+                    accepts.append(r.e_x_observed <= q_tol)
+                    c_res[arm].setdefault("n_test_all", []).append(r.n_test)
+                else:
+                    # the fixed-basis protocol's only observable is the
+                    # key-basis error rate EC reveals
+                    errs.append(r.e_z_actual)
+                    accepts.append(True)
+                accs.append(r.eve_guess_accuracy)
+            accs = np.array(accs)
+            accepts_arr = np.array(accepts)
+            c_res[arm]["err_mean"].append(float(np.mean(errs)))
+            c_res[arm]["err_std"].append(float(np.std(errs)))
+            c_res[arm]["acc_mean"].append(float(np.mean(accs)))
+            c_res[arm]["acc_accepted"].append(
+                float(np.mean(accs[accepts_arr]))
+                if np.any(accepts_arr) else float('nan'))
+            c_res[arm]["accepted"].append(bool(np.all(accepts_arr)))
+            c_res[arm]["abort_prob"].append(
+                float(1.0 - np.mean(accepts_arr)))
+            c_res[arm].setdefault("accept_count", []).append(
+                int(np.sum(accepts_arr)))
+
+    e0 = OPERATING_POINT['qber']
+    f_star = 2 * (q_tol - e0) / (1 - 2 * e0)
+    detected_f = [f for f, a in zip(f_sweep, c_res["bbm92"]["accepted"])
+                  if not a]
+    first_detected = detected_f[0] if detected_f else None
+    print(f"\n  (C) Intercept-resend (Eve fixed in the key basis), "
+          f"{len(seeds_c)} seed(s) x {n_pairs_c:,} pairs per point:")
+    print(f"    {'tap f':>7} {'fixed QBER':>11} {'fixed EveAcc':>13} "
+          f"{'bbm92 e_x':>10} {'bbm92 verdict':>14}")
+    n_seeds = len(seeds_c)
+    for i, f in enumerate(f_sweep):
+        ok = c_res["bbm92"]["accept_count"][i]
+        verdict = f"ACCEPT {ok}/{n_seeds}" if ok == n_seeds \
+            else f"ABORT {n_seeds - ok}/{n_seeds}"
+        print(f"    {f:>7.2f} "
+              f"{c_res['fixed-basis']['err_mean'][i]*100:>10.2f}% "
+              f"{c_res['fixed-basis']['acc_mean'][i]:>13.3f} "
+              f"{c_res['bbm92']['err_mean'][i]*100:>9.2f}% {verdict:>14}")
+    test_bits = int(np.mean(c_res["bbm92"]["n_test_all"]))
+    print(f"    Near-threshold verdicts are probabilistic: the test set "
+          f"at this run size is ~{test_bits}\n    bits (sigma ~"
+          f"{100*np.sqrt(q_tol*(1-q_tol)/max(test_bits,1)):.2f}% on "
+          f"e_x), so taps near f* escape or trip by seed. Larger\n"
+          f"    accumulated test sets sharpen the threshold; the abort "
+          f"rule itself is per-run.")
+    print(f"    fixed-basis arm: error rate flat at every tap fraction - "
+          f"the attack is invisible;\n    at f=1 Eve predicts "
+          f"{c_res['fixed-basis']['acc_mean'][-1]*100:.1f}% of the "
+          f"'secure' key. The source-model protocol\n    EXCLUDES this "
+          f"adversary by assumption; this arm shows what the assumption "
+          f"carries.")
+    print(f"    bbm92 arm: e_x rises as (1-f)e0 + f/2; abort threshold "
+          f"q_tol {q_tol} crossed at\n    analytic f* = "
+          f"{f_star:.3f}, first swept abort at f = {first_detected}.")
+    print("    Detection here is for THIS attack; general security is "
+          "the h2(e_ph) PA charge, not this sweep.")
+
+    # (D) surcharge convergence: executing ratio vs run length, against
+    # the deterministic finite-key model. FER is omitted from BOTH model
+    # arms (identical tier charge, cancels in the ratio); the executing
+    # points carry it.
+    p_coinc = float(np.mean([r[0].n_coincidences for r in a_runs])
+                    / n_pairs_a)
+    d_tag = OPERATING_POINT['tagged_fraction']
+
+    def ratio_model(n_pairs_pt):
+        coinc = n_pairs_pt * p_coinc
+        n_key = coinc * p_z ** 2
+        n_test = coinc * (1 - p_z) ** 2
+        nb_m = max(1, int(np.ceil(n_key / block)))
+        eps_s = eps_sec / nb_m
+        floor = np.log2(2 / (eps_s ** 2 * (eps_cor / nb_m)))
+        bb = 0.0
+        for b in range(nb_m):
+            bn = block if b < nb_m - 1 else n_key - (nb_m - 1) * block
+            mu_b = tlgr_deviation(int(bn), int(max(n_test, 1)), eps_s)
+            bb += max(0.0, bn * (1 - binary_entropy(
+                min(0.5, q_tol + mu_b))) - bn * (1 - code_rate) - floor)
+        nf = int(coinc)
+        nbf = max(1, int(np.ceil(nf / block)))
+        fx = 0.0
+        for b in range(nbf):
+            bn = block if b < nbf - 1 else nf - (nbf - 1) * block
+            fx += max(0.0, bn * (1 - d_tag) - bn * (1 - code_rate)
+                      - POST_PROC['security_margin_bits'])
+        fx *= (1 - duty)
+        return fx / bb if bb > 0 else float('nan')
+
+    pairs_sweep = [1_000_000, 4_000_000] if quick \
+        else [2_000_000, 8_000_000, 32_000_000]
+    seeds_d = [0, 1] if quick else list(range(10))
+    # Near the certification cliff (small runs), some seeds certify
+    # ZERO key and the ratio diverges: report the median and range of
+    # the finite ratios plus the zero-certification count, never a
+    # mean +- std over a divergent distribution.
+    d_stats = []
+    for np_pt in pairs_sweep:
+        ratios = []
+        n_zero = 0
+        for s in seeds_d:
+            _, db_d, _, fx_d = run_pair(50 + s, np_pt)
+            if db_d.n_secure_bits > 0:
+                ratios.append(fx_d / db_d.n_secure_bits)
+            else:
+                n_zero += 1
+        d_stats.append({
+            "pairs": np_pt,
+            "median": float(np.median(ratios)) if ratios else None,
+            "min": float(np.min(ratios)) if ratios else None,
+            "max": float(np.max(ratios)) if ratios else None,
+            "n_zero_cert": n_zero,
+            "n_seeds": len(seeds_d),
+        })
+    model_pairs = np.geomspace(pairs_sweep[0] / 2,
+                               pairs_sweep[-1] * 8, 40)
+    model_curve = [ratio_model(npp) for npp in model_pairs]
+    print(f"\n  (D) Surcharge convergence ({len(seeds_d)} seeds per "
+          f"point):")
+    for st in d_stats:
+        if st["median"] is None:
+            print(f"      {st['pairs']/1e6:>5.0f}M pairs: no certified "
+                  f"key in any seed (certification cliff, "
+                  f"{st['n_zero_cert']}/{st['n_seeds']} zero)")
+        else:
+            zero_note = (f", {st['n_zero_cert']}/{st['n_seeds']} seeds "
+                         f"certify zero key (ratio unbounded)"
+                         if st['n_zero_cert'] else "")
+            print(f"      {st['pairs']/1e6:>5.0f}M pairs: median ratio "
+                  f"{st['median']:.2f}x, range "
+                  f"[{st['min']:.2f}, {st['max']:.2f}]{zero_note}")
+    print(f"      asymptotic waterfall ratio {model_ratio:.2f}x; the "
+          f"executing ratio approaches it as\n      accumulated "
+          f"key/test bits grow. The deterministic finite-key model is "
+          f"drawn for\n      comparison; near the cliff, sampling of "
+          f"the ~400-bit test set moves individual\n      seeds far "
+          f"around it. FER omitted from both model arms - it cancels "
+          f"in the ratio.")
+
+    # Main figure: 2x2
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2,
+                                                 figsize=(7.16, 6.2))
+
+    fs = np.array(f_sweep)
+    ax1.errorbar(fs, np.array(c_res['fixed-basis']['err_mean'])*100,
+                 yerr=np.array(c_res['fixed-basis']['err_std'])*100,
+                 fmt='o-', color=C['quantum'], markersize=3,
+                 label='fixed-basis: monitored QBER (e_z)')
+    ax1.errorbar(fs, np.array(c_res['bbm92']['err_mean'])*100,
+                 yerr=np.array(c_res['bbm92']['err_std'])*100,
+                 fmt='s-', color=C['pareto'], markersize=3,
+                 label='BBM92: test-set e_x')
+    ax1.axhline(q_tol*100, color=C['unmasked'], linestyle='--',
+                linewidth=1, label=f'abort threshold q_tol = {q_tol}')
+    ax1.set_xlabel('tapped fraction f')
+    ax1.set_ylabel('observed error rate (%)')
+    ax1.set_title('Observed error vs tap fraction', fontsize=8)
+    ax1.legend(fontsize=6)
+    ax1.grid(True, alpha=0.3)
+
+    acc_fixed = np.array(c_res['fixed-basis']['acc_mean'])
+    ax2.plot(fs, acc_fixed, 'o-', color=C['unmasked'], markersize=3,
+             label='fixed-basis (key always accepted)')
+    acc_b = [(f, a) for f, a in zip(fs, c_res['bbm92']['acc_accepted'])
+             if not np.isnan(a)]
+    if acc_b:
+        ax2.plot([x[0] for x in acc_b], [x[1] for x in acc_b], 's-',
+                 color=C['pareto'], markersize=3,
+                 label='BBM92 (accepted keys only)')
+    ax2.axhline(0.5, color='gray', linewidth=0.8, linestyle=':')
+    ax2.set_xlabel('tapped fraction f')
+    ax2.set_ylabel('Eve accuracy on accepted key')
+    ax2.set_ylim(0.45, 1.02)
+    ax2.set_title('Eve accuracy on accepted keys', fontsize=8)
+    ax2.legend(fontsize=6)
+    ax2.grid(True, alpha=0.3)
+
+    ax3.plot(fs, c_res['bbm92']['abort_prob'], 's-', color=C['pareto'],
+             markersize=3, label=f'BBM92 ({len(seeds_c)} seeds/point)')
+    ax3.plot(fs, c_res['fixed-basis']['abort_prob'], 'o-',
+             color=C['quantum'], markersize=3,
+             label='fixed-basis (never aborts)')
+    ax3.axvline(f_star, color=C['unmasked'], linestyle='--', linewidth=1,
+                label=f'analytic f* = {f_star:.3f}')
+    ax3.set_xlabel('tapped fraction f')
+    ax3.set_ylabel('abort probability')
+    ax3.set_xscale('symlog', linthresh=0.05)
+    ax3.set_ylim(-0.05, 1.05)
+    ax3.set_title('Abort probability vs tap fraction', fontsize=8)
+    ax3.legend(fontsize=6)
+    ax3.grid(True, alpha=0.3)
+
+    ax4.plot(model_pairs/1e6, model_curve, '-', color=C['dark'],
+             linewidth=1.2, label='finite-key model')
+    d_pts = [st for st in d_stats if st["median"] is not None]
+    if d_pts:
+        xs4 = np.array([st["pairs"] for st in d_pts]) / 1e6
+        med4 = np.array([st["median"] for st in d_pts])
+        lo4 = med4 - np.array([st["min"] for st in d_pts])
+        hi4 = np.array([st["max"] for st in d_pts]) - med4
+        ax4.errorbar(xs4, med4, yerr=[lo4, hi4], fmt='s',
+                     color=C['pareto'], markersize=4,
+                     label=f'executing (median, range, '
+                           f'{len(seeds_d)} seeds)')
+        for st in d_pts:
+            if st["n_zero_cert"]:
+                ax4.annotate(f'{st["n_zero_cert"]}/{st["n_seeds"]} '
+                             f'seeds: zero key',
+                             xy=(st["pairs"]/1e6, st["median"]),
+                             xytext=(4, -14),
+                             textcoords='offset points', fontsize=6,
+                             color=C['unmasked'])
+    ax4.axhline(model_ratio, color=C['accent'], linestyle='--',
+                linewidth=1,
+                label=f'asymptotic ratio {model_ratio:.2f}x')
+    ax4.set_xscale('log')
+    ax4.set_yscale('log')
+    ax4.set_xlabel('emitted pairs per run (millions)')
+    ax4.set_ylabel('fixed-basis / BBM92 secure-bit ratio')
+    ax4.set_title('Finite-key surcharge vs run length', fontsize=8)
+    ax4.legend(fontsize=6)
+    ax4.grid(True, alpha=0.3)
+
+    fig.suptitle('Fixed-basis vs BBM92 arms under intercept-resend',
+                 fontsize=10, fontweight='bold')
+    fig.tight_layout()
+    save_fig(fig, 'exp14_bbm92_executing')
+
+    # Peripheral figure: basis-split tradeoff
+    figb, axb = plt.subplots(1, 1, figsize=VIZ['figsize_single'])
+    axb.errorbar(p_z_sweep, np.array(b_secure)/1000,
+                 yerr=np.array(b_std)/1000, fmt='o-', color=C['pareto'],
+                 markersize=3, label='executing (TLGR finite-key)')
+    axb.plot(p_z_sweep, np.array(b_asym)/1000, ':', color=C['dark'],
+             label='mu = 0 limit at q_tol')
+    axb.axvline(p_z, color=C['accent'], linestyle='--', linewidth=1,
+                label=f'config p_z = {p_z}')
+    axb.set_xlabel('basis probability p_z')
+    axb.set_ylabel('secure kbits per run')
+    axb.set_title('Finite-key basis-split tradeoff', fontsize=9)
+    axb.legend(fontsize=6)
+    axb.grid(True, alpha=0.3)
+    figb.tight_layout()
+    save_fig(figb, 'exp14b_basis_split')
+
+    print("\n  Experiment 14 complete.")
+    return {
+        "arm_a": {
+            "n_seeds": len(seeds_a),
+            "bbm92": {"keep_mean": float(a_keep.mean()),
+                      "keep_std": float(a_keep.std()),
+                      "e_z_mean": float(a_ez.mean()),
+                      "e_x_mean": float(a_ex.mean()),
+                      "mu": dist_b.mu,
+                      "secure_bits_mean": float(a_bb.mean()),
+                      "secure_bits_std": float(a_bb.std())},
+            "fixed_basis": {"secure_bits_mean": float(a_fx.mean()),
+                            "secure_bits_std": float(a_fx.std())},
+            "executing_ratio_pooled": exec_ratio,
+            "model_ratio_asymptotic": float(model_ratio),
+        },
+        "p_z_tradeoff": {"p_z": p_z_sweep, "secure_bits": b_secure,
+                         "secure_bits_std": b_std,
+                         "asymptotic_model_bits": b_asym,
+                         "finite_key_optimum_p_z": best_pz,
+                         "n_seeds": len(seeds_b)},
+        "intercept_resend": {
+            "f_sweep": list(f_sweep),
+            "n_seeds": len(seeds_c),
+            "fixed_qber": c_res['fixed-basis']['err_mean'],
+            "fixed_eve_acc": c_res['fixed-basis']['acc_mean'],
+            "bbm92_e_x": c_res['bbm92']['err_mean'],
+            "bbm92_abort_prob": c_res['bbm92']['abort_prob'],
+            "bbm92_acc_accepted": c_res['bbm92']['acc_accepted'],
+            "analytic_f_star": f_star,
+            "first_swept_abort_f": first_detected,
+        },
+        "surcharge_convergence": d_stats,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='QD-Entanglement Simulation Runner')
-    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 14)),
-                        help='Experiment numbers to run (default: all 1-13)')
+    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 15)),
+                        help='Experiment numbers to run (default: all 1-14)')
     parser.add_argument('--quick', action='store_true',
                         help='Quick mode with reduced parameter sweeps')
     args = parser.parse_args()
+
+    if args.quick:
+        set_output_suffix("_quick")
 
     print("Entanglement-derived one-time masks for federated learning")
     print("over campus fiber meshes - source-model key distillation")
@@ -2973,6 +3475,7 @@ def main():
         11: run_experiment_11,
         12: run_experiment_12,
         13: run_experiment_13,
+        14: run_experiment_14,
     }
 
     for exp_num in sorted(args.exp):
@@ -2990,8 +3493,11 @@ def main():
 
     total_elapsed = time.time() - total_start
 
-    # Save summary
-    summary_path = os.path.join(RESULTS_DIR, "summary.json")
+    # Save summary. Subset runs merge into the existing file so a
+    # single-experiment rerun updates its own entry without discarding
+    # the rest of the suite's results; quick mode writes to
+    # summary_quick.json (see _OUTPUT_SUFFIX).
+    summary_path = os.path.join(RESULTS_DIR, f"summary{_OUTPUT_SUFFIX}.json")
     # Convert numpy types for JSON serialization
     def convert(obj):
         if isinstance(obj, np.integer):
@@ -3002,9 +3508,27 @@ def main():
             return obj.tolist()
         return obj
 
+    def sanitize(obj):
+        """NaN is not valid JSON; serialize it as null."""
+        if isinstance(obj, dict):
+            return {k: sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [sanitize(v) for v in obj]
+        if isinstance(obj, (float, np.floating)) and np.isnan(obj):
+            return None
+        return obj
+
     try:
+        merged = {}
+        if os.path.exists(summary_path):
+            try:
+                with open(summary_path) as f:
+                    merged = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                merged = {}
+        merged.update(all_results)
         with open(summary_path, 'w') as f:
-            json.dump(all_results, f, indent=2, default=convert)
+            json.dump(sanitize(merged), f, indent=2, default=convert)
         print(f"\nSummary saved to: {summary_path}")
     except Exception:
         pass
