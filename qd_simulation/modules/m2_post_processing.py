@@ -189,16 +189,15 @@ def bp_decode(H, syndrome, channel_llr, max_iter=50):
 def fast_ec_simulate(alice_bits, bob_bits, qber_estimate, code_rate=0.84,
                      tagged_fraction=None,
                      block_size=50000, max_iter=50, rng=None):
-    """Statistical reconciliation model with hardcoded FER curve.
+    """Statistical reconciliation model.
 
-    KNOWN LIMITATION: the 99.5/90/10% success-rate tiers below are a
-    placeholder for production LDPC performance. They are NOT derived from
-    density-evolution analysis nor measured from a real decoder. For
-    publication-quality numbers, replace with empirical FER from a 5G NR
-    LDPC reference decoder or finite-blocklength bound (Polyanskiy 2010).
-    Retained here so that rate-budget sweeps can run in CPU-seconds; the
-    full BP decoder (`bp_decode` above) is slow in Python and not suitable
-    for parameter sweeps.
+    Frame success comes from the shared finite-blocklength FER model
+    (tier_frame_error_rate): the Polyanskiy 2010 normal-approximation
+    outage of a competently implemented code at efficiency
+    ec_decoder_beta. Idealized relative to this repo's toy weight-3 BP
+    decoder (exp2d), which underperforms it; retained so rate-budget
+    sweeps run in CPU-seconds (the full BP decoder above is slow in
+    Python and not suitable for sweeps).
     """
     if rng is None:
         rng = np.random.default_rng(42)
@@ -231,11 +230,12 @@ def fast_ec_simulate(alice_bits, bob_bits, qber_estimate, code_rate=0.84,
             beta = 1.0
 
         # Frame success probability (modeled from LDPC performance curves)
-        # via the shared tier model - a SINGLE definition, also used by
+        # via the shared FER model - a SINGLE definition, also used by
         # compute_rate_waterfall, so rate budgets can never disagree with
         # the block-level EC model.
         frame_success = rng.random() < (
-            1.0 - tier_frame_error_rate(actual_qber, code_rate))
+            1.0 - tier_frame_error_rate(actual_qber, code_rate,
+                                        block_size=block_n))
 
         if frame_success:
             # After successful EC, both parties hold identical bits
@@ -293,25 +293,78 @@ def estimate_capacity_qber(code_rate):
     return mid
 
 
-def tier_frame_error_rate(qber, code_rate=0.84):
-    """Frame-error rate of the declared fixed-rate code under the SAME
-    statistical tier model fast_ec_simulate uses (placeholder tiers - not
-    density evolution; see that function's honesty note):
-
-        q < 0.8 × capacity  ->  FER 0.005
-        q <       capacity  ->  FER 0.10   (degraded band)
-        q ≥       capacity  ->  FER 0.90   (the fixed code effectively fails)
-
-    Single source of the tiers so the rate waterfall can never claim EC
-    performance the block-level model doesn't deliver: the projected operating point sits in the 0.10 band, so a
-    flat 0.005 would overstate it by ~10%.
+def default_decoder_beta():
+    """Reconciliation efficiency of the implemented code family for the
+    DECODING-SUCCESS threshold: the code corrects a block when its
+    syndrome budget (1 - R) covers beta_dec x h2(q). Tuned LDPC
+    reconciliation reaches efficiencies of roughly 1.05-1.12 near the
+    design point (Elkouss et al. 2009; Martinez-Mateo et al. 2013);
+    1.10 is the midpoint. Distinct from the 1.15 LEAKAGE envelope
+    charged in the rate waterfall, which is deliberately conservative:
+    charging more leakage than a real code sends is safe, while
+    overstating beta here would understate the code's reach.
     """
-    capacity_qber = estimate_capacity_qber(code_rate)
-    if qber < capacity_qber * 0.8:
-        return 0.005
-    if qber < capacity_qber:
-        return 0.10
-    return 0.90
+    try:
+        try:
+            from config import POST_PROC
+        except ImportError:
+            from ..config import POST_PROC
+        return POST_PROC.get('ec_decoder_beta', 1.10)
+    except Exception:
+        return 1.10
+
+
+def tier_frame_error_rate(qber, code_rate=0.84, block_size=50000,
+                          beta_dec=None):
+    """Frame-error rate of the declared fixed-rate code from the
+    finite-blocklength normal approximation (Polyanskiy, Poor & Verdu,
+    IEEE Trans. IT 2010), applied to syndrome-based reconciliation
+    (source coding with side information): a block decodes when its
+    effective syndrome budget (1-R)/beta_dec covers the realized
+    conditional entropy, so the frame-error probability is the outage
+
+        FER = Q( (n((1-R)/beta_dec - h2(q)) + 0.5 log2 n) / sqrt(n V) ),
+        V   = q(1-q) log2^2((1-q)/q)
+
+    with n the block length and V the conditional-entropy variance
+    (the Slepian-Wolf dispersion for a BSC-correlated source). This
+    replaces the hardcoded 0.5/10/90% tiers this function previously
+    asserted. The function name is kept: it remains the SINGLE source
+    of FER for fast_ec_simulate, both rate waterfalls, bbm92_distill,
+    and the BP validator, so rate budgets can never disagree with the
+    block-level EC model.
+
+    SENSITIVITY (stated because it is decisive at 2% QBER): with
+    beta_dec = 1.10 the effective design QBER of the rate-0.84 code is
+    h2_inv(0.16/1.10) ~ 2.07% and FER at 2% is 0.12; at beta_dec =
+    1.15 the design point drops below 2% and the same block fails with
+    probability 0.73. The default 1.10 is the literature midpoint; the
+    conclusion for the PROJECTED (2% QBER) operating point moves with
+    this second decimal, and the config knob ec_decoder_beta exists so
+    that sensitivity is one edit away from being reproduced.
+
+    Still idealized relative to the repo's toy weight-3 BP decoder
+    (exp2d), which performs worse; the normal approximation is the
+    standard finite-blocklength benchmark for a competently
+    implemented code, not a measurement of this repo's reference
+    decoder.
+    """
+    if beta_dec is None:
+        beta_dec = default_decoder_beta()
+    if qber <= 0:
+        return 0.0
+    if qber >= 0.5:
+        return 1.0
+    n = block_size
+    h = binary_entropy(qber)
+    leak_eff = (1.0 - code_rate) / beta_dec
+    v = qber * (1 - qber) * (np.log2((1 - qber) / qber)) ** 2
+    if v <= 0:
+        return 0.0 if leak_eff >= h else 1.0
+    z = (n * (leak_eff - h) + 0.5 * np.log2(n)) / np.sqrt(n * v)
+    from math import erfc, sqrt
+    fer = 0.5 * erfc(z / sqrt(2))
+    return float(min(1.0, max(0.0, fer)))
 
 
 def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
@@ -321,7 +374,7 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     """Compute the complete rate waterfall from raw to final secure rate.
 
     frame_error_rate=None (default) derives the FER from the declared
-    code's tier model (tier_frame_error_rate) at this qber, keeping the
+    code's finite-blocklength model (tier_frame_error_rate), keeping the
     waterfall consistent with the block-level EC model at every QBER.
 
     assume_rate_adapted=True computes the HYPOTHETICAL rate-adapted-family
@@ -359,7 +412,8 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     else:
         syndrome_fraction = max(h_q * beta, 1.0 - code_rate)  # reconciliation leakage
         if frame_error_rate is None:
-            frame_error_rate = tier_frame_error_rate(qber, code_rate)
+            frame_error_rate = tier_frame_error_rate(qber, code_rate,
+                                                     block_size=block_size)
     if tagged_fraction is None:
         tagged_fraction = default_tagged_fraction()
     pa_compression_fraction = tagged_fraction
@@ -402,7 +456,7 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
 
         r = sifting_keep * (1 - h2(e_ph) - leak_EC - margin)
 
-    then the shared tier-FER and duty post-factors. e_ph = e_bit, the
+    then the shared FER-model and duty post-factors. e_ph = e_bit, the
     standard symmetric-channel assumption (exp13 prints the caveat about
     m1's noise model not being purely depolarizing).
 
@@ -418,7 +472,7 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
     never subtracts an Eve bound at all; each arm gets its own standard
     analysis, not a hybrid.
 
-    leak_EC, the FER tiers, the security margin, and the duty cycle are
+    leak_EC, the FER model, the security margin, and the duty cycle are
     charged IDENTICALLY to compute_rate_waterfall (same declared LDPC,
     same code rate), so the delta between the two waterfalls isolates the
     framing itself: (i) sifting, (ii) the net PA delta h2(e_bit) - D_tag.
@@ -445,7 +499,8 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
     else:
         syndrome_fraction = max(h_q * beta, 1.0 - code_rate)
         if frame_error_rate is None:
-            frame_error_rate = tier_frame_error_rate(qber, code_rate)
+            frame_error_rate = tier_frame_error_rate(qber, code_rate,
+                                                     block_size=block_size)
 
     eve_bound_fraction = h_q  # e_ph = e_bit
     secure_fraction_per_block = max(0, 1 - eve_bound_fraction
@@ -518,7 +573,7 @@ def bbm92_distill(key_bits_alice, key_bits_bob, e_x_observed, n_test,
                   q_tol=0.02, code_rate=0.84, block_size=50000,
                   eps_sec=1e-9, eps_cor=1e-15, rng=None):
     """Distill a BBM92 run's sifted Z key: abort check, blockwise EC
-    (same fixed declared LDPC + tier FER model as fast_ec_simulate), then
+    (same fixed declared LDPC + FER model as fast_ec_simulate), then
     Toeplitz PA sized by the TLGR fixed-length finite-key bound (Eq. 2):
 
         ell = n * (1 - h2(q_tol + mu)) - leak_EC - log2(2/(eps_sec^2*eps_cor))
@@ -595,7 +650,8 @@ def bbm92_distill(key_bits_alice, key_bits_bob, e_x_observed, n_test,
         leak_total += syndrome_bits
 
         success = rng.random() < (
-            1.0 - tier_frame_error_rate(e_z_block, code_rate))
+            1.0 - tier_frame_error_rate(e_z_block, code_rate,
+                                        block_size=block_n))
         if not success:
             continue
         ok += 1
@@ -819,24 +875,23 @@ def randomness_battery(bits, alpha=0.01, serial_m=8,
 
 def validate_bp_against_statistical(qber_values=None, block_size=1000,
                                     n_blocks=3, rng=None):
-    """Cross-check the fast statistical EC tier model against a real BP
+    """Cross-check the fast statistical EC FER model against a real BP
     decoder on a toy random LDPC.
 
-    SCOPE: this is a decoder SPOT CHECK, not a
-    capacity claim, and it is reported honestly rather than asserted as a
-    pass. The code here is a crude column-weight-3 random LDPC at rate
-    0.84 - a 3-regular high-rate code has a LOW BSC threshold, far below a
-    5G-NR-grade capacity-approaching code. Measured behavior (10
-    blocks/point, n=1000, fresh random H per block): FER 0.1-0.6 across
-    the 0.5-1% band (0.10 at the 0.85% operating point itself) and 1.0
-    at 2% - everywhere ABOVE the tier model's assumed FER (0.005 in
-    the design band; 0.10 at 2%). So the toy decoder is a conservative FLOOR: it shows the
-    error patterns are BP-decodable at the operating point most of the
-    time even with a code this crude, but it does NOT certify the tiers -
-    that needs a real capacity-approaching code. The gap is the toy code
-    underperforming the idealized code the tiers assume, NOT the tier
-    model being wrong. Reported alongside the standing placeholder
-    caveat in fast_ec_simulate.
+    SCOPE: this is a decoder SPOT CHECK, not a capacity claim, and it
+    is reported honestly rather than asserted as a pass. The code here
+    is a crude column-weight-3 random LDPC at rate 0.84 - a 3-regular
+    high-rate code has a LOW BSC threshold, far below a 5G-NR-grade
+    capacity-approaching code. Measured behavior (10 blocks/point,
+    n=1000, fresh random H per block): FER 0.1-0.6 across the 0.5-1%
+    band and 1.0 at 2% - above the finite-blocklength model's
+    prediction at the same block length. The toy decoder is therefore
+    a conservative FLOOR: it shows the error patterns are BP-decodable
+    at the operating point most of the time even with a code this
+    crude, but it does not certify the model, which describes a
+    competently implemented code at efficiency ec_decoder_beta; the
+    gap is the toy code underperforming that code, not the model being
+    wrong.
 
     Uses a SMALL block (default 1000) decoupled from the rate-model's
     50k-bit blocks: BP on the full block in Python is O(iters·edges) and
@@ -887,12 +942,13 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000,
                 bp_successes += 1
 
         bp_fer = 1.0 - bp_successes / n_blocks_per_qber
-        # Reference = the DETERMINISTIC tier FER the pipeline assumes,
-        # via the SAME shared tier definition, never an inline copy.
-        # A noisy stochastic estimate here
-        # could read 0.00 at a QBER whose tier FER is 0.10; the meaningful
-        # cross-check is measured BP FER against the tier's assumed value.
-        stat_fer = tier_frame_error_rate(qber, code_rate)
+        # Reference = the DETERMINISTIC finite-blocklength FER the
+        # pipeline assumes, via the SAME shared definition, never an
+        # inline copy - and evaluated at the BP run's OWN block length:
+        # the model is blocklength-dependent, so quoting the 50k-block
+        # value against 1k-block decodes would misstate its prediction.
+        stat_fer = tier_frame_error_rate(qber, code_rate,
+                                         block_size=block_size)
 
         validation_table.append({
             "qber": qber,

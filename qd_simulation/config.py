@@ -54,6 +54,15 @@ POST_PROC = {
     "block_size_sweep": [10000, 25000, 50000, 100000],
     "ldpc_max_iterations": 50,      # BP decoder iterations
     "ldpc_code_rate": 0.84,         # Optimized for QBER ~0.02
+    # Decoding-success efficiency for the finite-blocklength FER model
+    # (m2.tier_frame_error_rate): the code corrects while (1-R) covers
+    # ec_decoder_beta x h2(q). Literature midpoint for tuned LDPC
+    # reconciliation (Elkouss 2009, Martinez-Mateo 2013: ~1.05-1.12).
+    # Distinct from the conservative 1.15 leakage envelope. The
+    # projected 2%-QBER point is sensitive to this value (see the
+    # m2 docstring); the knob exists so that sensitivity is
+    # reproducible.
+    "ec_decoder_beta": 1.10,
     "security_margin_bits": 128,    # Privacy amplification margin
     "qber_sweep": np.linspace(0.01, 0.06, 11),
     "num_blocks_per_point": 100,    # Statistical sample size
@@ -210,14 +219,16 @@ def _derive_operating_point():
         "secret_rate_bps": wf["final_secure_rate"],
         "tagged_fraction": wf["tagged_fraction"],
         "waterfall": wf,
-        # Honesty caveat: the reconciliation stage behind this
-        # rate is the statistical placeholder m2.fast_ec_simulate (its FER
-        # tiers are asserted, not derived); the repo's real BP decoder
-        # currently fails frames at low QBER in exp2d. Rates are
-        # simulation-grade pending EC validation.
-        "ec_model_caveat": "EC modeled by statistical placeholder "
-                           "(m2.fast_ec_simulate); BP-decoder validation "
-                           "pending - see exp2d",
+        # Honesty caveat: the reconciliation FER behind this rate is
+        # the finite-blocklength normal approximation at efficiency
+        # ec_decoder_beta (m2.tier_frame_error_rate) - an idealized
+        # benchmark of a competently implemented code, not a measured
+        # decoder curve; the repo's toy BP decoder underperforms it
+        # (exp2d). Rates are simulation-grade.
+        "ec_model_caveat": "EC FER from the finite-blocklength normal "
+                           "approximation at efficiency ec_decoder_beta "
+                           "(m2.tier_frame_error_rate), not a measured "
+                           "decoder curve - see exp2d",
     }
 
 
@@ -228,10 +239,10 @@ def _derive_projected_operating_point():
     coincidence rate 1 MHz at QBER 2% - the assumption formerly smuggled
     into exps 2/3/6/8 as a hardcoded 675000 bps literal. (That legacy
     literal additionally baked in the superseded pre-GLLP waterfall; run
-    through the corrected waterfall, the same 1 MHz / 2% assumption yields
-    ≈0.73 Mbps - ≈0.81 Mbps before charging the EC tier model's 10% FER,
-    which applies because 2% QBER sits in the declared rate-0.84 code's
-    degraded band, 0.8×capacity ≤ q < capacity.) Sources of this
+    through the corrected waterfall, the same 1 MHz / 2% assumption
+    yields ~0.71 Mbps - ~0.81 Mbps before the finite-blocklength FER
+    charge of ~12%, which applies because 2% QBER sits just below the
+    declared rate-0.84 code's effective design point.) Sources of this
     brightness class are plausible for state-of-the-art entangled-pair
     hardware but are hypothetical here: nothing in m1 produces this rate
     at the config above. Every result computed at this point MUST carry
@@ -248,14 +259,14 @@ def _derive_projected_operating_point():
         "tagged_fraction": wf["tagged_fraction"],
         "waterfall": wf,
         # Same honesty caveat as OPERATING_POINT - and it bites harder
-        # here: at 2% QBER the declared rate-0.84 code sits in the tier
-        # model's DEGRADED band, so this point is charged FER 0.10
-        #.
-        "ec_model_caveat": "EC modeled by statistical placeholder "
-                           "(m2.fast_ec_simulate tier model; FER 0.10 at "
-                           "this QBER - the declared rate-0.84 code is in "
-                           "its degraded band at 2%); BP-decoder "
-                           "validation pending - see exp2d",
+        # here: 2% QBER sits just below the declared code's effective
+        # design point (h2_inv((1-R)/beta_dec) ~ 2.07%), where the
+        # finite-blocklength FER is 0.12 and SENSITIVE to
+        # ec_decoder_beta (see the m2 docstring: 0.73 at 1.15).
+        "ec_model_caveat": "EC FER from the finite-blocklength normal "
+                           "approximation (~0.12 at 2% QBER, sensitive "
+                           "to ec_decoder_beta near this point); not a "
+                           "measured decoder curve - see exp2d",
     }
 
 

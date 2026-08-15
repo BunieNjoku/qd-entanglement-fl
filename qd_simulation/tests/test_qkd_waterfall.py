@@ -91,7 +91,13 @@ def test_monotonicity_and_ratio_floor():
     for qq in qs:
         r = qkd_wf(RAW, qq, 0.82)['final_secure_rate']
         if prev is not None:
-            assert r < prev, (qq, r, prev)  # strictly decreasing in QBER
+            # strictly decreasing while positive; the finite-blocklength
+            # FER saturates at 1 above the code's effective design
+            # point, so the rate is exactly 0 from there on
+            if prev > 0:
+                assert r < prev, (qq, r, prev)
+            else:
+                assert r == 0, (qq, r)
         prev = r
         s = src_wf(RAW, qq)['final_secure_rate']
         if r > 0:
