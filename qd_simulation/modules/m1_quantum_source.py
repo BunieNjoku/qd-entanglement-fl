@@ -281,6 +281,90 @@ def compute_coincidence_rate(
         return source_rep_rate_hz * source_brightness * link_eff ** 2
 
 
+# NOISE-MODEL SENSITIVITY AND FINITE-STATISTICS CHSH
+#
+# The Werner state is the tractable default noise model, but it is not
+# physically accurate for QDs (system_description flags depolarizing or
+# amplitude damping as closer for F > 0.95). One-sided depolarizing on
+# half of |phi+> IS the Werner family - D_p(rho_B) = (1-p)rho + p I/2
+# applied to one qubit of a maximally entangled state gives exactly
+# werner_state(1-p) in this file's Bell-weight parametrization - so
+# the informative alternative is
+# amplitude damping, which is non-unital and breaks the e_x = e_z
+# symmetry the Werner model enjoys.
+
+
+def amplitude_damping_state(gamma):
+    """|phi+> with a one-sided amplitude-damping channel (Kraus
+    operators K0 = diag(1, sqrt(1-g)), K1 = |0><1| sqrt(g)) on the
+    fiber photon."""
+    phi_plus = np.array([1, 0, 0, 1]) / np.sqrt(2)
+    rho_in = np.outer(phi_plus, phi_plus.conj())
+    k0 = np.array([[1, 0], [0, np.sqrt(1 - gamma)]])
+    k1 = np.array([[0, np.sqrt(gamma)], [0, 0]])
+    rho = np.zeros((4, 4))
+    for k in (k0, k1):
+        op = np.kron(np.eye(2), k)
+        rho = rho + op @ rho_in @ op.conj().T
+    return rho
+
+
+def amplitude_damping_gamma_for_fidelity(fidelity):
+    """Damping parameter giving <phi+|rho|phi+> = fidelity. From the
+    Kraus form, F(g) = ((1 + sqrt(1-g))/2)^2, invertible for
+    F >= 1/4: g = 1 - (2 sqrt(F) - 1)^2."""
+    if not 0.25 <= fidelity <= 1.0:
+        raise ValueError("fidelity must be in [0.25, 1]")
+    s = 2 * np.sqrt(fidelity) - 1
+    return float(1 - s ** 2)
+
+
+def qber_in_basis(rho, angle):
+    """P(outcomes differ) with both analyzers at `angle` (0 = Z,
+    pi/4 = X), from Tr(rho Pi)."""
+    p_diff = 0.0
+    total = 0.0
+    for oa in range(2):
+        for ob in range(2):
+            p = max(0.0, float(np.real(np.trace(
+                rho @ two_photon_projector(angle, angle, oa, ob)))))
+            total += p
+            if oa != ob:
+                p_diff += p
+    return p_diff / total if total > 0 else 0.0
+
+
+def sample_chsh_s(rho, n_events, rng=None, n_repeats=10):
+    """CHSH S estimated from finitely many sampled measurement events,
+    as a hardware Bell-test duty cycle would: n_events split equally
+    over the four analyzer settings, outcomes drawn from Tr(rho Pi),
+    correlators from counts. Returns (mean, std) over n_repeats
+    independent estimates. Complements compute_chsh_s, which evaluates
+    S exactly from the density matrix and therefore cannot fail in
+    simulation."""
+    if rng is None:
+        rng = np.random.default_rng(0)
+    a_angles = [0, np.pi / 4]
+    b_angles = [np.pi / 8, 3 * np.pi / 8]
+    n_per = max(1, n_events // 4)
+    setting_probs = []
+    for a in a_angles:
+        for b in b_angles:
+            probs = np.array([max(0.0, float(np.real(np.trace(
+                rho @ two_photon_projector(a, b, oa, ob)))))
+                for oa in range(2) for ob in range(2)])
+            setting_probs.append(probs / probs.sum())
+    estimates = []
+    for _ in range(n_repeats):
+        e = []
+        for probs in setting_probs:
+            counts = rng.multinomial(n_per, probs)
+            same = counts[0] + counts[3]
+            e.append((2 * same - n_per) / n_per)
+        estimates.append(abs(e[0] - e[1]) + abs(e[2] + e[3]))
+    return float(np.mean(estimates)), float(np.std(estimates))
+
+
 # BBM92 MEASUREMENT LAYER
 #
 # Same source, fiber, and detection physics as simulate_source; the delta

@@ -202,9 +202,27 @@ def run_experiment_1(quick=False):
     fiber_loss = QUANTUM.get('fiber_loss_db_per_km_1550nm', 0.2) if use_qfc else QUANTUM['fiber_loss_db_per_km_780nm']
     wavelength_label = "1550nm (C-band via QFC)" if use_qfc else "780nm (native)"
 
-    # 1a: QBER vs Fidelity
-    print("  [1a] QBER vs Fidelity...")
+    # 1a: QBER vs fidelity, with noise-model sensitivity and a
+    # finite-statistics CHSH estimate.
+    # One-sided depolarizing on half of |phi+> is werner_state(1-p) in
+    # m1's Bell-weight parametrization - the Werner family itself - so
+    # the informative alternative model is amplitude damping (non-
+    # unital): it splits the Z- and X-basis error rates the Werner
+    # model keeps equal - the property BBM92's e_ph = e_bit shortcut
+    # rests on.
+    print("  [1a] QBER vs fidelity (Werner and amplitude-damping "
+          "noise; sampled CHSH)...")
+    from modules.m1_quantum_source import (
+        amplitude_damping_state, amplitude_damping_gamma_for_fidelity,
+        qber_in_basis, sample_chsh_s)
     qbers_sim, qbers_analytical, s_values = [], [], []
+    qbers_ad_z, qbers_ad_x = [], []
+    s_sampled_mean, s_sampled_std = [], []
+    # Bell-test sample per 60 s round at the modeled device rate: the
+    # duty-cycle fraction of raw coincidences.
+    n_bell = int(OPERATING_POINT['raw_edge_rate_hz']
+                 * POST_PROC['bell_test_duty_cycle'] * 60)
+    rng_bell = np.random.default_rng(11)
     for f in fidelities:
         result = simulate_source(fidelity=f, n_pairs=5_000_000, fiber_length_m=100,
                                  fiber_loss_db_per_km=fiber_loss,
@@ -215,6 +233,33 @@ def run_experiment_1(quick=False):
         qbers_sim.append(result.qber)
         qbers_analytical.append(compute_qber_analytical(f))
         s_values.append(result.chsh_s)
+        rho_ad = amplitude_damping_state(
+            amplitude_damping_gamma_for_fidelity(f))
+        # same additive device terms the analytic Werner curve carries
+        device_err = (1.0 / QUANTUM['pbs_extinction_ratio']
+                      + QUANTUM['analytic_qber_birefringence_allowance'])
+        qbers_ad_z.append(qber_in_basis(rho_ad, 0.0) + device_err)
+        qbers_ad_x.append(qber_in_basis(rho_ad, np.pi / 4) + device_err)
+        sm, ss = sample_chsh_s(werner_state(f), n_bell, rng=rng_bell)
+        s_sampled_mean.append(sm)
+        s_sampled_std.append(ss)
+    print(f"      amplitude damping at F={fidelities[-1]:.3f}: e_z "
+          f"{qbers_ad_z[-1]*100:.2f}% vs e_x {qbers_ad_x[-1]*100:.2f}% "
+          f"(Werner: equal at {(1-fidelities[-1])/2*100:.2f}% + "
+          f"extinction + birefringence).\n      The e_ph = e_bit "
+          f"equality is a Werner property. At matched fidelity, "
+          f"damping\n      noise puts about TWICE the Werner error in "
+          f"the key basis, with e_x about half\n      of that damped "
+          f"key-basis error: the Werner-based analytic QBER "
+          f"UNDERSTATES\n      the fixed-basis arm's key-basis error "
+          f"by up to 2x if the physical noise is\n      damping-like "
+          f"- a noise-model risk that arm carries. The BBM92 arm is\n"
+          f"      unaffected: it measures e_x directly, and e_x "
+          f"remains essentially at the\n      Werner value (within 3% "
+          f"relative at matched Bell weight).")
+    print(f"      sampled CHSH at F={fidelities[-1]:.3f}: S = "
+          f"{s_sampled_mean[-1]:.3f} +- {s_sampled_std[-1]:.3f} "
+          f"({n_bell:,} events = one 60 s round's 2% duty cycle)")
 
     # 1d: Symmetric dual-endpoint edge keying (availability/fairness witness)
     print("  [1d] Dual-endpoint (beamsplitter-multiplexed) edge keying...")
@@ -241,25 +286,31 @@ def run_experiment_1(quick=False):
           f"(0.5 = no privileged endpoint; availability: source failure halves, not kills, an edge)")
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    ax1.plot(fidelities, np.array(qbers_sim)*100, 'o-', color=C['quantum'], linewidth=2, label='Simulation')
-    ax1.plot(fidelities, np.array(qbers_analytical)*100, '--', color=C['accent'], linewidth=2, label='Analytical')
-    ax1.axhline(y=1.9, color=C['pareto'], linestyle=':', linewidth=1.5, label='Schimpf 2021 (1.9%)')
-    ax1.axhline(y=11, color=C['unmasked'], linestyle=':', linewidth=1, alpha=0.5, label='11% BB84 ref. (not a bound here)')
+    ax1.plot(fidelities, np.array(qbers_sim)*100, 'o-', color=C['quantum'], linewidth=2, label='Simulation (Werner)')
+    ax1.plot(fidelities, np.array(qbers_analytical)*100, '--', color=C['accent'], linewidth=2, label='Analytical (Werner, e_z = e_x)')
+    ax1.plot(fidelities, np.array(qbers_ad_z)*100, '-.', color=C['pareto'],
+             linewidth=1.5, label='Amplitude damping, e_z')
+    ax1.plot(fidelities, np.array(qbers_ad_x)*100, ':', color=C['dark'],
+             linewidth=1.5, label='Amplitude damping, e_x')
+    ax1.axhline(y=1.9, color='gray', linestyle=':', linewidth=1, label='Schimpf 2021 (1.9%)')
     ax1.axvline(x=0.987, color='gray', linestyle=':', alpha=0.5)
     ax1.set_xlabel('Entanglement Fidelity F')
     ax1.set_ylabel('QBER (%)')
-    ax1.set_title('QBER vs Source Fidelity')
-    ax1.legend(fontsize=7, loc='lower left')
+    ax1.set_title('QBER vs fidelity by noise model')
+    ax1.legend(fontsize=6, loc='upper right')
     ax1.grid(True, alpha=0.3)
 
-    ax2.plot(fidelities, s_values, 'o-', color=C['quantum'], linewidth=2)
+    ax2.plot(fidelities, s_values, '-', color=C['quantum'], linewidth=2,
+             label='Exact (density matrix)')
+    ax2.errorbar(fidelities, s_sampled_mean, yerr=s_sampled_std,
+                 fmt='o', color=C['pareto'], markersize=3,
+                 label=f'Sampled ({n_bell:,} events/round)')
     ax2.axhline(y=2.0, color=C['unmasked'], linestyle='--', linewidth=2, label='Classical bound (S=2)')
-    ax2.axhline(y=2*np.sqrt(2), color=C['pareto'], linestyle=':', linewidth=1.5, label=f'Quantum max (S={2*np.sqrt(2):.2f})')
-    ax2.fill_between(fidelities, 2.0, s_values, alpha=0.15, color=C['quantum'], label='Quantum advantage region')
+    ax2.axhline(y=2*np.sqrt(2), color='gray', linestyle=':', linewidth=1.5, label=f'Quantum max (S={2*np.sqrt(2):.2f})')
     ax2.set_xlabel('Entanglement Fidelity F')
     ax2.set_ylabel('CHSH S-parameter')
-    ax2.set_title('CHSH S-parameter vs fidelity')
-    ax2.legend(fontsize=8)
+    ax2.set_title('CHSH S: exact and sampled')
+    ax2.legend(fontsize=6)
     ax2.grid(True, alpha=0.3)
     fig.suptitle('Source characterization: fidelity sweep', fontsize=10, fontweight='bold')
     fig.tight_layout()
@@ -425,13 +476,12 @@ def run_experiment_2(quick=False):
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     ax1.plot(qber_sweep*100, np.array(final_rates)/1000, 'o-', color=C['quantum'],
-             linewidth=2, label='Declared rate-0.84 code (tier FER)')
+             linewidth=2,
+             label='Declared rate-0.84 code (finite-blocklength FER)')
     ax1.plot(qber_sweep*100, np.array(envelope_rates)/1000, '--', color=C['accent'],
              linewidth=1.5, label='Rate-adapted family (hypothetical envelope)')
     ax1.axvline(x=cap_q*100, color='gray', linestyle=':', linewidth=1,
                 label=f'0.84-code capacity ({cap_q*100:.1f}%)')
-    ax1.axvspan(0.8*cap_q*100, cap_q*100, alpha=0.08, color=C['unmasked'],
-                label='degraded band (tier FER 0.10)')
     ax1.set_xlabel('QBER (%)')
     ax1.set_ylabel('Final Secure Rate (kbit/s)')
     ax1.set_title(f'Secure rate vs QBER\n(at modeled-device raw rate '
@@ -482,8 +532,8 @@ def run_experiment_2(quick=False):
     save_fig(fig, 'exp2c_fixedbasis_vs_sifting')
 
     # 2d: BP decoder spot check (design band vs one degraded point)
-    print("  [2d] BP decoder spot check against the EC tier model "
-          "(toy random LDPC)...")
+    print("  [2d] BP decoder spot check against the finite-blocklength "
+          "FER model (toy random LDPC)...")
     bp_validation = validate_bp_against_statistical(
         qber_values=[0.005, 0.01, 0.02] if quick
         else [0.005, 0.0085, 0.01, 0.02],
@@ -499,17 +549,16 @@ def run_experiment_2(quick=False):
               f"{row['stat_fer']:.2f}        {agree}")
     print("    Note: this toy 3-regular rate-0.84 LDPC has a low BSC "
           "threshold. Measured:\n    FER 0.1-0.6 across the 0.5-1% band "
-          "(0.10 at the 0.85% operating point),\n    1.0 at 2% - "
-          "everywhere above the tier model's assumed FER (0.005 in\n    "
-          "the design band; 0.10 at 2%). It is a CONSERVATIVE FLOOR, not a certification "
-          "of the tiers:\n    a real capacity-approaching code (which "
-          "the tiers assume) decodes the\n    full design band; the gap "
-          "is the toy code underperforming that idealized\n    code, not "
-          "a tier-model refutation. The stat column is the deterministic"
-          "\n    tier FER; the FER tiers remain a stated placeholder "
-          "(see\n    fast_ec_simulate). EC-model uncertainty affects "
-          "ABSOLUTE rates only: the\n    exp13 framing ratio charges "
-          "identical EC to both arms, so it cancels\n    there.")
+          "and 1.0 at 2% - far above the\n    finite-blocklength model, "
+          "which is the outage probability of a competently\n    "
+          "implemented code at efficiency ec_decoder_beta (Polyanskiy "
+          "2010 normal\n    approximation), not a measurement of this "
+          "reference decoder. The toy BP\n    run is a CONSERVATIVE "
+          "FLOOR; the gap is the toy code underperforming an\n    "
+          "efficiency-1.10 code, not a refutation of the model. "
+          "EC-model uncertainty\n    affects ABSOLUTE rates only: the "
+          "exp13 framing ratio charges identical EC\n    to both arms, "
+          "so it cancels there.")
 
     # 2e: NIST SP 800-22 subset battery on the PA output. The input is the
     # PIPELINE's output, not synthetic rng bits: simulated source at the
@@ -1488,9 +1537,9 @@ def run_experiment_7(quick=False):
         rate = waterfall['final_secure_rate']
         shared_rates.append(rate)
         # HYPOTHETICAL rate-adapted envelope, plotted alongside with an
-        # explicit label: past the declared 0.84 code's capacity the solid
-        # curve collapses (tier FER 0.90) and only this labeled assumption
-        # keeps a usable rate.
+        # explicit label: past the declared 0.84 code's effective design
+        # point the solid curve collapses (finite-blocklength FER -> 1)
+        # and only this labeled assumption keeps a usable rate.
         envelope_rates.append(compute_rate_waterfall(
             raw_rate, q, code_rate=code_rate,
             security_margin=security_margin, block_size=block_size,
@@ -1534,13 +1583,12 @@ def run_experiment_7(quick=False):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
 
     ax1.plot(qbers, np.array(shared_rates) / 1000, 'o-', linewidth=2,
-             color=C['quantum'], label='Declared rate-0.84 code (tier FER)')
+             color=C['quantum'],
+             label='Declared rate-0.84 code (finite-blocklength FER)')
     ax1.plot(qbers, np.array(envelope_rates) / 1000, '--', linewidth=1.5,
              color=C['accent'], label='Rate-adapted family (hypothetical)')
     ax1.axvline(x=cap_q, color='gray', linestyle=':', linewidth=1,
                 label=f'0.84-code capacity (q={cap_q:.3f})')
-    ax1.axvspan(0.8*cap_q, cap_q, alpha=0.08, color=C['unmasked'],
-                label='degraded band (tier FER 0.10)')
     ax1_b = ax1.twinx()
     ax1_b.plot(qbers, mask_entropies, 's--', linewidth=2,
                color=C['accent'], label='Mask entropy floor (bits/bit)')
@@ -1589,8 +1637,9 @@ def run_experiment_7(quick=False):
               f"  {h:>11.4f}  {mp/1000:>14.1f}")
     print(f"  * envelope = HYPOTHETICAL rate-adapted code family (not "
           f"implemented); the declared\n    rate-0.84 code's capacity is "
-          f"QBER ≈ {cap_q:.4f} - beyond it the declared-code rate\n    "
-          f"collapses (tier FER 0.90) and max-params follows the collapse.")
+          f"QBER ~ {cap_q:.4f} - beyond its effective design point\n    "
+          f"the declared-code rate collapses (finite-blocklength FER "
+          f"-> 1) and max-params\n    follows the collapse.")
     if cutoff_qber:
         print(f"\n  Cutoff QBER (rate < 1 kbit/s): {cutoff_qber:.3f}")
     print("  Experiment 7 complete.")
@@ -2635,7 +2684,7 @@ def run_experiment_12(quick=False):
           "basis-choice or\n      mid-point measurement hardware, and "
           "reveal-based dropout recovery, which those works do\n      "
           "not analyze. QuNetQFL's measured hardware rates (32.8-240 "
-          "kbit/s) exceed our modeled\n      12.6 kbit/s; theirs is "
+          "kbit/s) exceed our modeled\n      12.7 kbit/s; theirs is "
           "hardware, ours is simulation.\n    ** 'None' here means no "
           "THIRD party: the source is trusted, but it is endpoint-owned "
           "equipment -\n      an assumption about our own hardware, not "
@@ -2814,7 +2863,7 @@ def run_experiment_13(quick=False):
           "(QuNetQFL) actually runs, it is the middle number, not 2x.")
 
     # (C) ratio across the QBER sweep - both arms under the SAME EC model
-    # at every point (fixed declared code; tier FER cancels in the ratio)
+    # at every point (fixed declared code; the shared FER model cancels in the ratio)
     sweep_q = np.linspace(0.005, 0.06, 12)
     sweep_ratios = {n: [] for n in mode_names}
     for qq in sweep_q:
@@ -2867,9 +2916,10 @@ def run_experiment_13(quick=False):
     print("    - MDI-specific hardware penalties are NOT modeled: this "
           "prices the FRAMING on\n      our modeled device, not a "
           "reproduction of QuNetQFL's stack. Their measured\n      "
-          "hardware rates (32.8-240 kbit/s) exceed our modeled 12.6 "
+          "hardware rates (32.8-240 kbit/s) exceed our modeled 12.7 "
           "kbit/s.")
-    print("    - The EC tier model is a stated placeholder (exp2d); both "
+    print("    - The EC FER model is a finite-blocklength benchmark, not a measured "
+          "decoder curve (exp2d); both "
           "arms charge identical\n      EC, so EC-model uncertainty "
           "cancels in the ratio and affects absolute rates\n      only.")
     print("    - NOT a security comparison: QKD framing tolerates an "
@@ -3220,7 +3270,7 @@ def run_experiment_14(quick=False):
 
     # (D) surcharge convergence: executing ratio vs run length, against
     # the deterministic finite-key model. FER is omitted from BOTH model
-    # arms (identical tier charge, cancels in the ratio); the executing
+    # arms (identical FER-model charge, cancels in the ratio); the executing
     # points carry it.
     p_coinc = float(np.mean([r[0].n_coincidences for r in a_runs])
                     / n_pairs_a)
