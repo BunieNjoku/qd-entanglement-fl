@@ -107,8 +107,7 @@ qd_simulation/
 │   ├── m1_quantum_source.py   # Bell-pair source + detection
 │   ├── m2_post_processing.py  # Reconciliation + privacy amplification
 │   ├── m3_mesh_topology.py    # Delaunay mesh + aggregation tree
-│   ├── m4_federated_learning.py # Two-mask Bonawitz + dropout recovery
-│   └── m5_cost_model.py       # CAPEX/OPEX (illustrative)
+│   └── m4_federated_learning.py # Two-mask Bonawitz + dropout recovery
 └── results/
 ```
 

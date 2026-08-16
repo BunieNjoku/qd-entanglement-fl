@@ -43,7 +43,7 @@ import matplotlib.patches as mpatches
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(__file__))
-from config import (QUANTUM, POST_PROC, MESH, FL, COST, VIZ, RESULTS_DIR,
+from config import (QUANTUM, POST_PROC, MESH, FL, VIZ, RESULTS_DIR,
                     BITS_PER_PARAM, OPERATING_POINT, PROJECTED_OPERATING_POINT,
                     CLASSICAL_LINK_BPS, QKD_FRAMING, BBM92)
 
@@ -62,11 +62,6 @@ from modules.m3_mesh_topology import (
     generate_campus_mesh, build_aggregation_tree,
     compute_aggregation_latency, compute_max_mesh_size,
     analyze_mesh,
-)
-from modules.m5_cost_model import (
-    compute_capex, compute_opex_annual, compute_cost_per_round,
-    compute_energy_per_round, compute_classical_baseline_costs,
-    full_cost_analysis,
 )
 
 # Publication-quality plot defaults (IEEE 10pt, Times New Roman)
@@ -1653,148 +1648,6 @@ def run_experiment_7(quick=False):
 
 
 # EXPERIMENT 7b (DEMOTED): Cost breakdown (illustrative only)
-def run_experiment_7_cost(quick=False):
-    print("\n" + "="*70)
-    print("APPENDIX 7b: Cost breakdown (illustrative; prices not sourced)")
-    print("="*70)
-
-    n_nodes = 6  # 2 triangles
-    n_triangles = 3  # Approximate from Delaunay
-    training_round_s = 60
-    rounds_per_year = int(365 * 24 * 3600 / training_round_s * 0.5)
-    quantum_accuracy = 0.94  # From Experiment 4
-
-    # Quantum system cost
-    quantum_cost_round, quantum_annual = compute_cost_per_round(
-        n_triangles, n_nodes, rounds_per_year
-    )
-    quantum_energy = compute_energy_per_round(n_triangles, n_nodes, training_round_s)
-
-    # Classical baselines
-    baselines = compute_classical_baseline_costs(n_nodes, rounds_per_year)
-
-    print(f"  Quantum annual cost: €{quantum_annual:,.0f}")
-    print(f"  Quantum cost/round:  €{quantum_cost_round:.4f}")
-    for name, bl in baselines.items():
-        print(f"  {name:>12} annual: €{bl['annual']:,.0f}  |  "
-              f"accuracy impact: {bl['accuracy_impact']:.2f}")
-
-    # Pareto plot
-    fig, ax = plt.subplots(figsize=VIZ['figsize'])
-
-    methods = {
-        "Quantum (this system)": (quantum_annual, quantum_accuracy, C['quantum'], 'o', 80),
-        "PQC+Bonawitz": (baselines['pqc']['annual'], quantum_accuracy, C['prng'], 's', 60),
-        "HSM cluster": (baselines['hsm']['annual'], quantum_accuracy, '#9B59B6', 'D', 60),
-        "HE (CKKS)": (baselines['he']['annual'], quantum_accuracy, '#E67E22', '^', 60),
-        "DP ε=1": (max(baselines['dp_eps1']['annual'], 5000), quantum_accuracy - 0.15, C['dp'], 'v', 50),
-        "DP ε=5": (max(baselines['dp_eps5']['annual'], 5000), quantum_accuracy - 0.05, '#66BB6A', 'v', 50),
-        "DP ε=10": (max(baselines['dp_eps10']['annual'], 5000), quantum_accuracy - 0.02, '#A5D6A7', 'v', 50),
-    }
-
-    for name, (cost, acc, color, marker, size) in methods.items():
-        ax.scatter(cost, acc, c=color, marker=marker, s=size, zorder=5,
-                   label=name, edgecolors='white', linewidth=1.5)
-
-    # Security level annotations
-    ax.annotate('Information-theoretic\nsecurity', xy=(quantum_annual, quantum_accuracy),
-                xytext=(quantum_annual*3, quantum_accuracy-0.02),
-                fontsize=8, color=C['quantum'],
-                arrowprops=dict(arrowstyle='->', color=C['quantum'], lw=1.5))
-
-    ax.set_xlabel('Annual Cost per Deployment (€)', fontsize=7)
-    ax.set_ylabel('Model Accuracy at Convergence', fontsize=7)
-    ax.set_xscale('log')
-    ax.set_title('Cost vs accuracy by approach', fontsize=10,
-                 fontweight='bold')
-    ax.legend(loc='lower right', fontsize=7)
-    ax.grid(True, alpha=0.3, which='both')
-    ax.set_ylim(0.75, 1.0)
-    fig.tight_layout()
-    save_fig(fig, 'exp7_pareto_frontier')
-
-    # CAPEX breakdown
-    print("\n  CAPEX Breakdown (Option B: 1 QD per triangle membership):")
-    capex = compute_capex(n_triangles, n_nodes)
-    print(f"    Hardware: {capex['n_qds']} QDs, {n_nodes} cryostats "
-          f"({capex['n_shared_nodes']} dual-QD), {capex['n_spads']} SPADs, {n_nodes} FPGAs")
-    for component in ['qds', 'cryostats', 'switches', 'spads', 'fpga', 'optics', 'fiber']:
-        print(f"    {component:>10}: €{capex[component]:,.0f}")
-    print(f"    {'TOTAL':>10}: €{capex['total']:,.0f}")
-    print(f"    {'per node':>10}: €{capex['per_node']:,.0f}")
-
-    # CAPEX/OPEX pie charts
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 4.0))
-
-    # CAPEX donut
-    labels = ['QD Chips', 'Cryostats', 'SPADs', 'Switches', 'FPGAs', 'Optics', 'Fiber']
-    values = [capex['qds'], capex['cryostats'], capex['spads'],
-              capex['switches'], capex['fpga'], capex['optics'], capex['fiber']]
-    colors_pie = [C['quantum'], C['dark'], C['pareto'], '#555555',
-                  C['accent'], C['prng'], C['dp']]
-
-    # Sort by value descending so largest slices are together
-    sorted_data = sorted(zip(values, labels, colors_pie), reverse=True)
-    values = [d[0] for d in sorted_data]
-    labels = [d[1] for d in sorted_data]
-    colors_pie = [d[2] for d in sorted_data]
-
-    total_capex = sum(values)
-
-    # Build percentage labels for autopct
-    def make_label(pct):
-        return f'{pct:.1f}%' if pct >= 3 else ''
-
-    wedges1, texts1, autotexts1 = ax1.pie(
-        values, colors=colors_pie, startangle=90, autopct=make_label,
-        pctdistance=0.78, wedgeprops=dict(width=0.55, edgecolor='white', linewidth=1.2))
-    for t in autotexts1:
-        t.set_fontsize(6)
-        t.set_color('white')
-        t.set_fontweight('bold')
-
-    # Legend below the chart instead of leader lines
-    legend_labels = [f'{lab} - €{val/1000:.0f}K' for lab, val in zip(labels, values)]
-    ax1.legend(wedges1, legend_labels, loc='upper center',
-               bbox_to_anchor=(0.5, -0.02), fontsize=6.5, ncol=2,
-               frameon=False, columnspacing=1.0, handletextpad=0.5)
-    ax1.set_title(f'CAPEX breakdown (total EUR '
-                  f'{capex["total"]/1000:.0f}K)',
-                  fontsize=9, fontweight='bold', pad=8)
-
-    # OPEX donut
-    opex = compute_opex_annual(n_triangles, n_nodes)
-    labels2 = ['Maintenance', 'Electricity']
-    values2 = [opex['maintenance'], opex['electricity']]
-    colors_opex = [C['quantum'], C['accent']]
-
-    total_opex = sum(values2)
-
-    wedges2, texts2, autotexts2 = ax2.pie(
-        values2, colors=colors_opex, startangle=90, autopct='%1.1f%%',
-        pctdistance=0.75, wedgeprops=dict(width=0.55, edgecolor='white', linewidth=1.2))
-    for t in autotexts2:
-        t.set_fontsize(7)
-        t.set_color('white')
-        t.set_fontweight('bold')
-
-    legend_labels2 = [f'{lab} - €{val:,.0f}/yr' for lab, val in zip(labels2, values2)]
-    ax2.legend(wedges2, legend_labels2, loc='upper center',
-               bbox_to_anchor=(0.5, -0.02), fontsize=6.5, ncol=1,
-               frameon=False, handletextpad=0.5)
-    ax2.set_title(f'Annual OPEX (EUR {opex["total"]:,.0f}/yr, '
-                  f'{opex["power_w"]/1000:.1f} kW)',
-                  fontsize=9, fontweight='bold', pad=8)
-
-    fig.suptitle('Cost structure', fontsize=10, fontweight='bold')
-    fig.tight_layout(rect=[0, 0.08, 1, 0.94])
-    save_fig(fig, 'exp7b_cost_breakdown')
-
-    print("  Experiment 7 complete.")
-    return {"quantum_annual": quantum_annual, "baselines": {k: v['annual'] for k, v in baselines.items()}}
-
-
-# EXPERIMENT 8: MULTI-TRIANGLE FL SCALING
 def run_experiment_8(quick=False):
     print("\n" + "="*70)
     print("EXPERIMENT 8: Multi-Triangle Federated Learning Scaling")

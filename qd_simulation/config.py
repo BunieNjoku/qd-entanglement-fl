@@ -303,40 +303,6 @@ FL = {
     "cifar_local_epochs": 1,
 }
 
-# MODULE 5: COST MODEL PARAMETERS
-COST = {
-    # CAPEX (EUR, near-term pricing)
-    # Option B co-located: 1 QD per triangle membership per node.
-    # Edge nodes (1 triangle): 1 QD, 1 switch, 7 SPADs.
-    # Shared nodes (2 triangles): 2 QDs, 2 switches, 12-14 SPADs, 1 dual-QD cryostat.
-    # Total QDs = 3 × n_triangles (each triangle claims 1 QD at each vertex).
-    # Total cryostats = n_nodes (shared nodes: larger cryostat housing 2 QD chips).
-    "qd_source": 55000,             # QD chip + mount (without cryostat)
-    "cryostat": 25000,              # 4K cryostat enclosure (single or dual QD)
-    "cryostat_dual_premium": 8000,  # Extra cost for dual-QD cryostat vs single
-    "optical_switch": 3500,          # EO Pockels cell or MEMS (780nm, ns switching)
-    "spad_module": 10000,
-    "fpga_board": 12000,
-    "dac_optics_per_node": 5000,
-    "fiber_per_link": 1500,
-    # Volume pricing multiplier
-    "volume_discount": 0.6,         # 40% discount at scale
-    # OPEX
-    "electricity_eur_per_kwh": 0.15,
-    "pue": 1.5,
-    "cryostat_power_w": 400,        # Per cryostat (dominates; dual-QD adds ~10W laser)
-    "spad_power_w": 5,
-    "fpga_power_w": 50,
-    "annual_maintenance_per_node": 17500,  # Per-node (cryostat service, calibration)
-    "equipment_lifetime_years": 5,
-    # Comparison baselines
-    "pqc_vpn_capex_per_site": 30000,
-    "pqc_vpn_annual_license": 5000,
-    "hsm_capex_per_site": 100000,
-    "he_compute_overhead_factor": 100,
-    "dp_cost_per_site": 0,
-}
-
 # VISUALIZATION
 VIZ = {
     # IEEE single-column = 3.5in, double-column = 7.16in
