@@ -152,8 +152,9 @@ privacy proof), `prng`, `dp`, `unmasked`.
 - **Gold & Chitambar (arXiv:2505.10385)** - entanglement-derived correlated
   randomness replacing the MPC dealer (multiplication triples, with a Referee);
   we target FL aggregation with no Referee.
-- **SecAgg+ (Bell et al., CCS 2020)** - hierarchical secure aggregation; our
-  two-level triangle mesh is a small-n instance of that design space.
+- **SecAgg+ (Bell et al., CCS 2020)** - communication-efficient secure
+  aggregation over sparse k-regular graphs; related to but distinct from our
+  two-level tree over triangles.
 - **Classical information-theoretic secure aggregation** (Zhao & Sun, IEEE
   Trans. IT 2022; recent constructions arXiv:2606.07277, 2607.20890) - IT
   masking with no quantum hardware, given dealer- or setup-provisioned
