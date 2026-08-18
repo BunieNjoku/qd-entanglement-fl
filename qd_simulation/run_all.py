@@ -2,16 +2,21 @@
 """
 entangled-key two-mask FL - full simulation runner.
 
-Threat model (entangled-key, not QKD):
-  - Cooperating clients trust each other and trust the QD source at the
-    co-located node. The fiber is noisy but not actively adversarial.
-  - Pairwise Bell-pair measurement produces correlated bit pairs.
-  - LDPC reconciliation makes the two endpoints' strings bit-exact.
-  - Toeplitz PA compresses the strings to remove residual classical
-    correlation introduced by the reconciliation syndrome and by
-    physical-layer side channels.
-  - The resulting per-round single-use shared bits drive modular OTP
-    masking in two-mask Bonawitz secure aggregation.
+Protocol framings (same physical layer, two post-processings):
+  - BBM92 with efficient 90/10 sifting (system default): X-basis
+    parameter estimation and TLGR fixed-length finite-key privacy
+    amplification. Tolerates an active fiber adversary; source trust
+    is discharged by the basis-independent-source argument.
+  - Trusted-conduit mode (fixed basis): source-model secret-key
+    agreement under a trusted co-located QD source and a noisy but
+    passive fiber. Higher rate (1.32x at the operating point), blind
+    to an in-fiber intercept-resend adversary (exp14).
+  Both: pairwise Bell-pair measurement produces correlated bit pairs;
+  LDPC reconciliation makes the endpoints' strings bit-exact; Toeplitz
+  PA removes residual correlation from the syndrome and physical-layer
+  side channels; the resulting single-use shared bits drive modular
+  OTP masking in two-mask Bonawitz secure aggregation, one fresh draw
+  per round from a pooled per-edge buffer.
 
 Composition of privacy:
   (i)   Source verification: CHSH S > 2 verifies entangled state under
@@ -930,7 +935,7 @@ def run_experiment_4(quick=False):
             if mode == "entangled" and result.quantum_bits_consumed:
                 total_bits = sum(result.quantum_bits_consumed)
                 print(f"      Quantum key bits consumed: {total_bits:,} "
-                      f"({total_bits/8/1024:.1f} KB)")
+                      f"({total_bits/8/1000:.1f} kB)")
 
     # Compute mean ± std across repeats
     results_summary = {}
@@ -1210,13 +1215,13 @@ def run_experiment_5(quick=False):
     ax1.grid(True, alpha=0.3)
 
     # Plot 2 (HEADLINE): the cost of recovery
-    rb_means = [stats[dr]["rec_bytes"][0] / 1024 for dr in drs]
-    rb_hws = [stats[dr]["rec_bytes"][2] / 1024 for dr in drs]
+    rb_means = [stats[dr]["rec_bytes"][0] / 1000 for dr in drs]
+    rb_hws = [stats[dr]["rec_bytes"][2] / 1000 for dr in drs]
     tf_means = [stats[dr]["tfail_pct"][0] for dr in drs]
     tf_hws = [stats[dr]["tfail_pct"][2] for dr in drs]
     ax2.bar(np.arange(len(drs)) - 0.18, rb_means, 0.36, yerr=rb_hws,
             capsize=3, color=C['pareto'],
-            label='recovery bytes (reveals) KB/client/round')
+            label='recovery bytes (reveals) kB/client/round')
     ax2b = ax2.twinx()
     ax2b.bar(np.arange(len(drs)) + 0.18, tf_means, 0.36, yerr=tf_hws,
              capsize=3, color=C['unmasked'],
@@ -1224,7 +1229,7 @@ def run_experiment_5(quick=False):
     ax2.set_xticks(np.arange(len(drs)))
     ax2.set_xticklabels([f'{int(dr*100)}%' for dr in drs])
     ax2.set_xlabel('Per-round dropout rate')
-    ax2.set_ylabel('Recovery bytes (KB/client/round)', color=C['pareto'])
+    ax2.set_ylabel('Recovery bytes (kB/client/round)', color=C['pareto'])
     # headroom above the tallest error whisker on both y-axes
     ax2.set_ylim(0, max(r + h for r, h in zip(rb_means, rb_hws)) * 1.15)
     ax2b.set_ylim(0, max(t + h for t, h in zip(tf_means, tf_hws)) * 1.15)
@@ -1243,14 +1248,14 @@ def run_experiment_5(quick=False):
 
     print(f"\n  Summary ({num_seeds} seeds, mean ± std [95% CI half-width]):")
     print(f"  {'Dropout':>8}  {'Final acc':>22}  {'Recovery %':>12}  "
-          f"{'Reveal KB/cl·rd':>16}  {'Wire ms':>8}  {'T-fail %':>9}  "
+          f"{'Reveal kB/cl-rd':>16}  {'Wire ms':>8}  {'T-fail %':>9}  "
           f"{'χ² fail %':>10}")
     for dr in drs:
         s = stats[dr]
         print(f"  {int(dr*100):>7}%  "
               f"{s['acc'][0]:.4f} ± {s['acc'][1]:.4f} [{s['acc'][2]:.4f}]  "
               f"{s['recovery_pct'][0]:>11.1f}%  "
-              f"{s['rec_bytes'][0]/1024:>15.1f}  "
+              f"{s['rec_bytes'][0]/1000:>15.1f}  "
               f"{s['rec_wire_ms'][0]:>8.3f}  "
               f"{s['tfail_pct'][0]:>8.2f}%  "
               f"{s['chi_pct'][0]:>9.1f}%")

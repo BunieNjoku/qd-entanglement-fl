@@ -79,7 +79,8 @@ python run_all.py --exp 1 2 3 # Specific experiments
   Binds the trusted-conduit mode only; the BBM92 default discharges it
   (basis-independent-source argument, Koashi-Preskill 2003).
 - **C - FPGA latency:** Published LDPC benchmarks × 2× safety margin.
-- **D - Fiber QBER:** Parametric sweep over 1.5-4.0%.
+- **D - Fiber QBER:** Parametric sweeps over 1-6% (exp2) and 0.5-6%
+  (exp7); 1.5-4.0% is the shaded expected-operating band in exp2a.
 
 ## Output
 
@@ -117,7 +118,9 @@ qd_simulation/
 │   ├── m1_quantum_source.py   # Bell-pair source + detection
 │   ├── m2_post_processing.py  # Reconciliation + privacy amplification
 │   ├── m3_mesh_topology.py    # Delaunay mesh + aggregation tree
-│   └── m4_federated_learning.py # Two-mask Bonawitz + dropout recovery
+│   ├── m4_federated_learning.py # Two-mask Bonawitz + dropout recovery
+│   ├── m6_hndl.py             # HNDL transcript-replay arms (exp9)
+│   └── m7_baselines.py        # Classical baseline arms (exp12)
 └── results/
 ```
 
