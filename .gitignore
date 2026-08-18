@@ -34,12 +34,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Simulation outputs (regenerated on `python run_all.py`)
-qd_simulation/results/**/*.png
-qd_simulation/results/**/*.pdf
-qd_simulation/results/summary*.json
-qd_simulation/results/data/
-qd_simulation/results/*.log
+# Simulation outputs and results documents (outputs are regenerated
+# by `python run_all.py`; the documents are paper working material)
+qd_simulation/results/
 
 # Internal working documents (never publish)
 HANDOFF.md

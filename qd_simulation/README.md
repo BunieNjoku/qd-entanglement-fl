@@ -1,24 +1,32 @@
 # Entanglement-Based Shared Randomness for Federated Learning
 
-Simulation package for an entanglement-based randomness extraction (source-model key distillation)
-system feeding two-level Bonawitz secure aggregation in federated learning
-over a campus-scale fiber mesh.
+Simulation package for an entanglement-keyed secure-aggregation system:
+quantum-dot Bell pairs over a campus-scale fiber mesh provision the
+pairwise one-time masks of two-level Bonawitz secure aggregation in
+federated learning.
 
 ## Framing
 
-This is **not** a QKD system. The protocol assumes:
+The simulation executes the same physical layer under two protocol
+framings, and the publication framing makes BBM92 the default:
 
-- **Trusted endpoints.** Cooperating clients trust each other and their local
-  measurement apparatus.
-- **Trusted source.** The QD source is co-located at a known node; the CHSH
-  inequality is used to verify the entangled state, not to bound an external
-  eavesdropper's information.
-- **Noisy channel.** The fiber is untrusted but not actively adversarial. QBER
-  arises from birefringence, multi-photon emission, dark counts.
+- BBM92 arm (system default): efficient asymmetric sifting (90/10
+  basis split, Lo-Chau-Ardehali), X-basis parameter estimation, TLGR
+  fixed-length finite-key privacy amplification. Tolerates an active
+  fiber adversary; source trust is discharged by the
+  basis-independent-source argument. This is entanglement-based QKD.
+- Trusted-conduit mode (fixed basis): source-model secret-key
+  agreement (Maurer 1993; Ahlswede-Csiszar 1993), not QKD - trusted
+  co-located source (CHSH verifies the state, it does not bound an
+  eavesdropper), passive noisy fiber, fixed-basis measurement. Worth a
+  measured 1.32x rate over the BBM92 framing at the operating point;
+  blind to an in-fiber intercept-resend adversary (exp14), so it is an
+  optimization for physically secured fiber, not the default.
 
-Under this model the protocol extracts **per-round shared random bits** from
-pairwise Bell pairs between cluster members. Each round consumes fresh bits.
-This is source-model secret-key agreement (Maurer 1993; Ahlswede-Csiszár 1993), not QKD.
+Both framings assume **trusted endpoints** (clients trust each other
+and their local apparatus) and extract **per-round shared random bits**
+from pairwise Bell pairs; each round consumes fresh bits drawn from a
+pooled key buffer filled by batched distillation.
 
 ## Core construction
 
@@ -61,13 +69,15 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 10 | Availability under source failure | Kill one node's source: edges continue at ~half rate from far endpoints (availability/fairness, not security) |
 | 11 | **Gradient inversion (real construction)** | Tabular DLG/iDLG: unmasked leaks (100% attr-infer), modular mask blocks (theorem), plaintext aggregate partially leaks (motivates DP-on-top) |
 | 12 | **SOTA comparison** | Five executing arms: Bonawitz-DH, Flamingo-PRF, and a classical IT-dealer (online + courier provisioning). Every OTP arm pays O(d) recovery; the arms differ in what must be trusted: DH/PRF hardness, a dealer, or one's own source |
-| 13 | **QKD-framing rate cost** | Same physics, two post-processings: source-model vs Shor-Preskill QKD framing. Ratio 2.2×/1.3×/1.1× by sifting protocol - prices the trusted-source assumption; not a security ranking |
-| 14 | **Executing BBM92 arm** | The QKD framing executed on sampled bits (basis choice, sifting, TLGR finite-key PA): the same key-basis intercept-resend tap is invisible to the fixed-basis protocol (flat QBER, Eve predicts 99.9% of accepted key at full tap) and aborts BBM92 near the analytic threshold f* = 0.023. Finite-key surcharge priced honestly (executing ratio 4.1x at 8M-pair runs vs 1.32x asymptotic; fixed-length TLGR charge at the a-priori q_tol) |
+| 13 | **QKD-framing rate cost** | Same physics, two post-processings: source-model vs Shor-Preskill QKD framing. Ratio 2.16x/1.32x/1.08x by sifting protocol - prices the trusted-source assumption; not a security ranking |
+| 14 | **Executing BBM92 arm** | The QKD framing executed on sampled bits (basis choice, sifting, TLGR finite-key PA): the same key-basis intercept-resend tap is invisible to the fixed-basis protocol (flat QBER, Eve predicts 99.9% of accepted key at full tap) and aborts BBM92 near the analytic threshold f* = 0.023. Finite-key penalty priced honestly (executing ratio 4.1x at 8M-pair runs vs 1.32x asymptotic; fixed-length TLGR charge at the a-priori q_tol) |
 
 ## Assumptions
 
 - **A - Bufferless FPGA RTL:** Treated as design target; not simulated.
 - **B - Trusted source:** QD is at owned node, not adversary-controlled.
+  Binds the trusted-conduit mode only; the BBM92 default discharges it
+  (basis-independent-source argument, Koashi-Preskill 2003).
 - **C - FPGA latency:** Published LDPC benchmarks × 2× safety margin.
 - **D - Fiber QBER:** Parametric sweep over 1.5-4.0%.
 
@@ -113,17 +123,24 @@ qd_simulation/
 
 ## Terminology (v2 - established concepts only)
 
-The quantum layer is
-**secret-key agreement in the source model** (Maurer 1993; Ahlswede & Csiszár
-1993): sifting-free, fixed-basis BBM92-class entanglement key generation, LDPC
-**information reconciliation**, and Toeplitz **privacy amplification** - the
-Toeplitz step alone is "randomness extraction" under the Leftover Hash Lemma
-(Renner & König 2005). The CHSH check is an **entanglement witness** (Horodecki
-1996; Terhal 2000) used as source QA, not device independence. Masks are
-**one-time pads** over Z_2^32 in the Bonawitz two-mask construction (CCS 2017),
-consumed per round. PA additionally removes a **GLLP tagged fraction**
-(multi-pair emissions; Gottesman-Lo-Lütkenhaus-Preskill 2004), which is what
-supports the **harvest-now-decrypt-later** immunity claim.
+The quantum layer runs one of two framings over the same physics. The
+default is **BBM92** (Bennett-Brassard-Mermin 1992) with efficient
+asymmetric sifting (Lo-Chau-Ardehali 2005), X-basis parameter
+estimation under squashing (Beaudry-Moroder-Lutkenhaus 2008), and
+TLGR fixed-length finite-key privacy amplification (Tomamichel-Lim-
+Gisin-Renner 2012); its PA charge is what supports the
+**harvest-now-decrypt-later** immunity claim in that mode. The
+trusted-conduit mode is **secret-key agreement in the source model**
+(Maurer 1993; Ahlswede & Csiszar 1993): sifting-free fixed-basis
+measurement whose PA removes a **GLLP tagged fraction** (multi-pair
+emissions; Gottesman-Lo-Lutkenhaus-Preskill 2004) instead. Both use
+LDPC **information reconciliation** and Toeplitz **privacy
+amplification** - the Toeplitz step alone is "randomness extraction"
+under the Leftover Hash Lemma (Renner & Konig 2005). The CHSH check is
+an **entanglement witness** (Horodecki 1996; Terhal 2000) used as
+source QA in the conduit mode, not device independence. Masks are
+**one-time pads** over Z_2^32 in the Bonawitz two-mask construction
+(CCS 2017), consumed per round.
 
 Mode names: `entangled`, `gaussian-legacy` (comparison only - carries **no**
 privacy proof), `prng`, `dp`, `unmasked`.
@@ -139,12 +156,14 @@ privacy proof), `prng`, `dp`, `unmasked`.
 - **QuNetQFL (arXiv:2501.12709)** - QKD-derived one-time-pad masks for FL,
   experimentally validated on a real quantum network: fully connected pairwise
   MDI-QKD among clients, classical aggregation-only server holding no key
-  material, measured 32.8-240 kbit/s pairwise key rates (above our modeled
-  12.6 kbit/s - theirs is hardware, ours simulation), supporting ~1.4K
+  material, measured 32.8-240 kbit/s pairwise key rates (above our
+  BBM92-framed 9.6 kbit/s, conduit mode 12.7 - theirs is hardware, ours
+  simulation), supporting ~1.4K
   maskable parameters over 160-200 rounds. Same assumption class as ours (ITS
   keys, HNDL-immune key layer). Our differentiators are narrower and measured
-  (exp13): a higher key rate from the same physics (2.2× vs symmetric-basis
-  sifting, 1.3× vs the efficient 90/10 protocol they run, 1.1× in the
+  (exp13): the trusted-conduit mode's higher key rate from the same physics
+  (2.2x vs symmetric-basis sifting, 1.3x vs the efficient 90/10 protocol
+  they run, 1.1x in the
   asymptotic-sifting limit - bought by the trusted-source assumption, i.e. a
   weaker tolerated channel adversary), no basis-choice or mid-point
   measurement hardware, and an analyzed dropout-recovery story, which they do

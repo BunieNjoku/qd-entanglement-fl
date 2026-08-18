@@ -116,8 +116,122 @@ def set_output_suffix(suffix):
     _OUTPUT_SUFFIX = suffix
 
 
+def _expand_axis_margins(fig, frac=0.10):
+    """Guarantee every axis bound sits beyond the outermost drawn data.
+
+    Applied to every figure at save time so no panel can ship with
+    markers, whiskers, or curve ends touching the frame. Limits are
+    only ever expanded, so explicit generous limits set by individual
+    experiments survive. Skipped: image axes (heatmaps), colorbars,
+    and non-linear/log scales (symlog axes carry hand-set limits).
+    Bar charts keep a zero baseline on the value axis by convention.
+    """
+    from matplotlib.patches import Rectangle
+    for ax in fig.axes:
+        if ax.get_label() == '<colorbar>' or ax.images:
+            continue
+        d = ax.dataLim
+        for which in ('x', 'y'):
+            if which == 'x':
+                scale, (lo, hi) = ax.get_xscale(), ax.get_xlim()
+                dmin, dmax = d.x0, d.x1
+            else:
+                scale, (lo, hi) = ax.get_yscale(), ax.get_ylim()
+                dmin, dmax = d.y0, d.y1
+            if not (np.isfinite(dmin) and np.isfinite(dmax)) \
+                    or dmin >= dmax or lo > hi:
+                continue
+            if scale == 'linear':
+                pad = frac * (dmax - dmin)
+                new_lo, new_hi = dmin - pad, dmax + pad
+            elif scale == 'log':
+                if dmin <= 0:
+                    continue
+                f = 10 ** (frac * (np.log10(dmax) - np.log10(dmin)))
+                new_lo, new_hi = dmin / f, dmax * f
+            else:
+                continue
+            has_bars = sum(isinstance(p, Rectangle)
+                           for p in ax.patches) >= 2
+            if which == 'y' and has_bars and lo == 0 and dmin >= 0:
+                new_lo = 0
+            lo2, hi2 = min(lo, new_lo), max(hi, new_hi)
+            if (lo2, hi2) != (lo, hi):
+                (ax.set_xlim if which == 'x' else ax.set_ylim)(lo2, hi2)
+
+
+def _extend_ticks_to_bound_data(fig):
+    """Guarantee the outermost drawn tick bounds the data on every axis.
+
+    _expand_axis_margins pads limits past the data, but the padded end
+    can fall between ticks: a marker or whisker then sits beyond the
+    last labeled value and cannot be read against the axis. This pass
+    extends the offending limit outward to the next tick-grid point
+    (next decade on log axes) and pins the tick set so the new range
+    cannot re-bin it. Limits only grow, so headroom reserved for
+    annotations survives. Skipped: image axes, colorbars, categorical
+    axes (fixed ticks), and scales other than linear/log.
+    """
+    from matplotlib.ticker import FixedLocator
+    for ax in fig.axes:
+        if ax.get_label() == '<colorbar>' or ax.images:
+            continue
+        d = ax.dataLim
+        for which in ('x', 'y'):
+            axis = ax.xaxis if which == 'x' else ax.yaxis
+            if isinstance(axis.get_major_locator(), FixedLocator):
+                continue
+            if which == 'x':
+                scale, (lo, hi) = ax.get_xscale(), ax.get_xlim()
+                dmin, dmax = d.x0, d.x1
+            else:
+                scale, (lo, hi) = ax.get_yscale(), ax.get_ylim()
+                dmin, dmax = d.y0, d.y1
+            if not (np.isfinite(dmin) and np.isfinite(dmax)) \
+                    or dmin >= dmax or lo >= hi:
+                continue
+            set_lim = ax.set_xlim if which == 'x' else ax.set_ylim
+            if scale == 'log':
+                if dmin <= 0 or lo <= 0:
+                    continue
+                shown = [t for t in axis.get_majorticklocs()
+                         if lo * (1 - 1e-9) <= t <= hi * (1 + 1e-9)]
+                new_lo, new_hi = lo, hi
+                if not any(t <= dmin * (1 + 1e-9) for t in shown):
+                    new_lo = 10.0 ** np.floor(np.log10(dmin) + 1e-9)
+                if not any(t >= dmax * (1 - 1e-9) for t in shown):
+                    new_hi = 10.0 ** np.ceil(np.log10(dmax) - 1e-9)
+                if (new_lo, new_hi) != (lo, hi):
+                    set_lim(min(lo, new_lo), max(hi, new_hi))
+                continue
+            if scale != 'linear':
+                continue
+            ticks = np.sort(np.asarray(axis.get_majorticklocs(), float))
+            if ticks.size < 2:
+                continue
+            step = np.min(np.diff(ticks))
+            if not np.isfinite(step) or step <= 0:
+                continue
+            eps = 1e-9 * (hi - lo)
+            shown = ticks[(ticks >= lo - eps) & (ticks <= hi + eps)]
+            if shown.size == 0:
+                continue
+            new_ticks = list(shown)
+            while new_ticks[0] > dmin + eps:
+                new_ticks.insert(0, new_ticks[0] - step)
+            while new_ticks[-1] < dmax - eps:
+                new_ticks.append(new_ticks[-1] + step)
+            new_lo = min(lo, new_ticks[0])
+            new_hi = max(hi, new_ticks[-1])
+            if (new_lo, new_hi) != (lo, hi):
+                set_lim(new_lo, new_hi)
+                axis.set_ticks(new_ticks)
+
+
 def save_fig(fig, name):
     """Save figure as both PNG (preview) and PDF (LaTeX inclusion)."""
+    _expand_axis_margins(fig)
+    _extend_ticks_to_bound_data(fig)
     tier = 'main' if name in MAIN_FIGURES and not _OUTPUT_SUFFIX \
         else 'peripheral'
     out_dir = os.path.join(RESULTS_DIR, tier)
@@ -129,6 +243,43 @@ def save_fig(fig, name):
                     facecolor='white', pad_inches=0.03)
     plt.close(fig)
     print(f"    Saved: {tier}/{name}.png/pdf")
+
+
+def export_summary_csv(summary, suffix=""):
+    """Write the summary content as per-experiment CSV tables.
+
+    Long format, one row per scalar: key is the dotted path into the
+    experiment's dict, index is the position for array entries (blank
+    for scalars). Parallel arrays such as qbers and rates share
+    indices, so any plotted series can be rebuilt with a pivot. Files
+    land in results/data/, regenerated alongside summary.json and kept
+    out of version control like the rest of the outputs.
+    """
+    import csv
+    out_dir = os.path.join(RESULTS_DIR, 'data')
+    os.makedirs(out_dir, exist_ok=True)
+
+    def rows(prefix, obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                yield from rows(f"{prefix}.{k}" if prefix else str(k), v)
+        elif isinstance(obj, (list, tuple, np.ndarray)):
+            for i, v in enumerate(obj):
+                if isinstance(v, (dict, list, tuple, np.ndarray)):
+                    yield from rows(f"{prefix}[{i}]", v)
+                else:
+                    yield (prefix, i, v)
+        else:
+            yield (prefix, "", obj)
+
+    for exp in sorted(summary):
+        path = os.path.join(out_dir, f"{exp}{suffix}.csv")
+        with open(path, 'w', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['key', 'index', 'value'])
+            for row in rows("", summary[exp]):
+                w.writerow(row)
+    print(f"CSV tables: {out_dir}/ ({len(summary)} experiments)")
 
 
 def print_comm_summary(fl_result, label=""):
@@ -308,7 +459,7 @@ def run_experiment_1(quick=False):
     ax2.legend(fontsize=6)
     ax2.grid(True, alpha=0.3)
     fig.suptitle('Source characterization: fidelity sweep', fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp1a_fidelity_sweep')
 
     # 1b: Coincidence Rate vs Fiber Length
@@ -377,6 +528,7 @@ def run_experiment_1(quick=False):
 
     ax.axhline(y=1e6, color='gray', linestyle=':', alpha=0.5,
                label='1 MHz-class (hypothetical projection)')
+    ax.set_ylim(top=3e6)
     ax.set_xlabel('Source-to-Fiber Coupling Efficiency')
     ax.set_ylabel('Coincidence Rate (Hz)')
     ax.set_title('Coincidence rate vs coupling efficiency')
@@ -446,7 +598,7 @@ def run_experiment_2(quick=False):
                      f"{w['final_secure_rate']/1000:.1f} kbit/s", fontsize=8)
         ax.grid(True, alpha=0.2, axis='y')
     fig.suptitle('Shared-bit rate waterfall', fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp2a_rate_waterfall')
 
     print(f"    modeled device : {op['raw_edge_rate_hz']:>11,.0f} Hz raw -> "
@@ -484,7 +636,10 @@ def run_experiment_2(quick=False):
     ax1.axvspan(1.5, 4.0, alpha=0.1, color=C['quantum'], label='Expected range (Assumption D)')
     ax1.axvline(x=op['qber']*100, color=C['dark'], linestyle='--', linewidth=1,
                 label=f"operating point ({op['qber']*100:.2f}%)")
-    ax1.legend(fontsize=7, loc='center right')
+    # lower-right quadrant is empty past the rate collapse; a centered
+    # legend this wide would occlude the cliff segment
+    ax1.legend(fontsize=6.5, loc='lower right',
+               bbox_to_anchor=(0.98, 0.10))
     ax1.grid(True, alpha=0.3)
 
     ax2.plot(qber_sweep*100, ec_overheads, 'o-', color=C['accent'], linewidth=2)
@@ -495,7 +650,7 @@ def run_experiment_2(quick=False):
 
     fig.suptitle('Secure rate and reconciliation overhead vs QBER',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp2b_rate_vs_qber')
 
     # 2c: Rate gain of fixed-basis (no sifting) vs sifting protocol
@@ -641,7 +796,7 @@ def run_experiment_3(quick=False):
     ax1.plot(node_counts, depths, 'o-', color=C['quantum'], linewidth=2, markersize=8, label='Measured')
     # √K reference line
     sqrt_ref = [np.sqrt(nt) for nt in n_triangles_list]
-    ax1.plot(node_counts, sqrt_ref, '--', color=C['accent'], linewidth=1.5, label='√(triangles) reference')
+    ax1.plot(node_counts, sqrt_ref, '--', color=C['accent'], linewidth=1.5, label='sqrt(triangles) reference')
     ax1.set_xlabel('Number of Nodes')
     ax1.set_ylabel('Aggregation Tree Depth')
     ax1.set_title('Aggregation Depth vs Network Size')
@@ -655,7 +810,7 @@ def run_experiment_3(quick=False):
     ax2.grid(True, alpha=0.3)
 
     fig.suptitle('Delaunay mesh scaling', fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp3a_mesh_scaling')
 
     # 3b: Max nodes heatmap - modeled device vs labeled projection
@@ -691,7 +846,7 @@ def run_experiment_3(quick=False):
         fig.colorbar(im, ax=ax, label='Max nodes')
     fig.suptitle('Maximum feasible nodes vs model size and round period',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp3b_max_nodes_heatmap')
 
     print("    Max nodes (rows = model size), modeled | projected:")
@@ -747,7 +902,7 @@ def run_experiment_4(quick=False):
         "entangled": "Quantum-masked (this system)",
         "prng": "PRNG-masked (classical)",
         "unmasked": "Unmasked (insecure)",
-        "dp": "DP (ε=5)",
+        "dp": "DP (epsilon=5)",
     }
 
     # Run multiple repeats for statistical significance
@@ -868,7 +1023,7 @@ def run_experiment_4(quick=False):
     ax1.axhline(y=quant_bound, color='crimson', linestyle='--', linewidth=1.5,
                 label=f'$2^{{-20}}$ quantization bound ({quant_bound:.1e})')
     ax1.set_xlabel('Training Round')
-    ax1.set_ylabel('‖masked mean − float mean‖∞ (float64)')
+    ax1.set_ylabel('max |masked mean - float mean| (float64)')
     ax1.set_title('Masked-aggregate deviation from float mean')
     ax1.legend(fontsize=7, loc='lower right')
     ax1.grid(True, alpha=0.3, which='both')
@@ -891,7 +1046,7 @@ def run_experiment_4(quick=False):
 
     fig.suptitle('Secure-aggregation fidelity, 3-client clinical FL',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp4_training_convergence')
 
     # Summary table (validation metrics)
@@ -1044,11 +1199,12 @@ def run_experiment_5(quick=False):
     xpct = [100 * dr for dr in drs]
     ax1.errorbar(xpct, acc_means, yerr=acc_hws, fmt='o-', linewidth=2,
                  capsize=4, color=C['quantum'],
-                 label=f'final accuracy (mean ± 95% CI, {num_seeds} seeds)')
+                 label=f'final accuracy (mean +- 95% CI, {num_seeds} seeds)')
     ax1.axhline(y=target_acc, color='gray', linestyle=':', alpha=0.5,
                 label=f'{target_acc} target')
     ax1.set_xlabel('Per-round dropout rate (%)')
     ax1.set_ylabel(f'Final test accuracy ({num_rounds} rounds)')
+    ax1.set_xlim(min(xpct) - 2.5, max(xpct) + 2.5)
     ax1.set_title(f'Accuracy degradation vs dropout ({num_seeds} seeds)')
     ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
@@ -1060,7 +1216,7 @@ def run_experiment_5(quick=False):
     tf_hws = [stats[dr]["tfail_pct"][2] for dr in drs]
     ax2.bar(np.arange(len(drs)) - 0.18, rb_means, 0.36, yerr=rb_hws,
             capsize=3, color=C['pareto'],
-            label='recovery bytes (reveals) KB/client·round')
+            label='recovery bytes (reveals) KB/client/round')
     ax2b = ax2.twinx()
     ax2b.bar(np.arange(len(drs)) + 0.18, tf_means, 0.36, yerr=tf_hws,
              capsize=3, color=C['unmasked'],
@@ -1068,7 +1224,10 @@ def run_experiment_5(quick=False):
     ax2.set_xticks(np.arange(len(drs)))
     ax2.set_xticklabels([f'{int(dr*100)}%' for dr in drs])
     ax2.set_xlabel('Per-round dropout rate')
-    ax2.set_ylabel('Recovery bytes (KB/client·round)', color=C['pareto'])
+    ax2.set_ylabel('Recovery bytes (KB/client/round)', color=C['pareto'])
+    # headroom above the tallest error whisker on both y-axes
+    ax2.set_ylim(0, max(r + h for r, h in zip(rb_means, rb_hws)) * 1.15)
+    ax2b.set_ylim(0, max(t + h for t, h in zip(tf_means, tf_hws)) * 1.15)
     ax2b.set_ylabel('Threshold failures (% of triangle-rounds)',
                     color=C['unmasked'])
     ax2.set_title('Reveal-based recovery cost')
@@ -1079,7 +1238,7 @@ def run_experiment_5(quick=False):
 
     fig.suptitle('Dropout recovery: accuracy and cost',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp5_dropout_recovery')
 
     print(f"\n  Summary ({num_seeds} seeds, mean ± std [95% CI half-width]):")
@@ -1335,7 +1494,7 @@ def run_experiment_11(quick=False):
             color=cols)
     ax1.axhline(y=prior_mse, color='gray', linestyle=':',
                 label=f'prior (reconstruct-as-mean) = {prior_mse:.2f}')
-    ax1.set_ylabel('Per-feature reconstruction MSE (↓ = more leak)')
+    ax1.set_ylabel('Per-feature reconstruction MSE (lower = more leak)')
     ax1.set_title('Reconstruction error by target')
     ax1.legend(fontsize=7)
     ax1.grid(True, alpha=0.3, axis='y')
@@ -1352,7 +1511,7 @@ def run_experiment_11(quick=False):
 
     fig.suptitle('Gradient inversion on the implemented construction',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp11_gradient_inversion')
 
     print("  Experiment 11 complete.")
@@ -1489,8 +1648,8 @@ def run_experiment_6(quick=False):
 # EXPERIMENT 7: QBER -> PRIVACY-BUDGET CURVE
 def run_experiment_7(quick=False):
     """Map physical QBER to the key-rate / capacity envelope: shared-bit
-    rate, the LHL mask-entropy floor, and the maximum maskable model size
-    at a fixed round budget.
+    rate, the LHL min-entropy floor per output bit, and the maximum
+    maskable model size at a fixed round budget.
 
     LHL accounting matches the m2 waterfall (source model, no eavesdropper
     term): available min-entropy per reconciled input bit is
@@ -1522,6 +1681,8 @@ def run_experiment_7(quick=False):
     #   mask_entropy_per_bit: LHL floor on output uniformity
     #   max_model_params @ 60s round (per-edge accounting - see below)
     shared_rates, envelope_rates, mask_entropies, max_params = [], [], [], []
+    bbm92_rates, bbm92_max_params = [], []
+    keep_eff = QKD_FRAMING['sifting_modes']['efficient-90/10']
     cap_q = estimate_capacity_qber(code_rate)
     for q in qbers:
         waterfall = compute_rate_waterfall(
@@ -1531,6 +1692,17 @@ def run_experiment_7(quick=False):
         )
         rate = waterfall['final_secure_rate']
         shared_rates.append(rate)
+        # BBM92-framed rate at the same physics: efficient-90/10 sifting
+        # with the h2(q) eavesdropper charge, asymptotic accounting (no
+        # TLGR deviation term - exp14 panel d carries the finite-key
+        # penalty on top of this).
+        bbm92_rate = compute_rate_waterfall_qkd(
+            raw_rate, q, keep_eff, code_rate=code_rate,
+            security_margin=security_margin, block_size=block_size,
+            bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+        )['final_secure_rate']
+        bbm92_rates.append(bbm92_rate)
+        bbm92_max_params.append(bbm92_rate * 60 / BITS_PER_PARAM)
         # HYPOTHETICAL rate-adapted envelope, plotted alongside with an
         # explicit label: past the declared 0.84 code's effective design
         # point the solid curve collapses (finite-blocklength FER -> 1)
@@ -1575,38 +1747,91 @@ def run_experiment_7(quick=False):
             cutoff_qber = q
             break
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    # Taller than figsize_wide: the panel-1 legend moves below the axes
+    # so it cannot occlude the min-entropy curve or the zero-rate row.
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 4.3))
 
-    ax1.plot(qbers, np.array(shared_rates) / 1000, 'o-', linewidth=2,
+    # A log axis cannot show 0. Past the code capacity the declared rate
+    # collapses to (numerically) zero; those points are drawn as 'v'
+    # markers ON a display floor rather than letting the curve run off
+    # the bottom of the box.
+    rate_floor_kbps = 1e-4          # 0.1 bit/s display floor
+    sr = np.array(shared_rates) / 1000
+    sr_line = np.where(sr >= rate_floor_kbps, sr, np.nan)
+    sr_clip = qbers[sr < rate_floor_kbps]
+    br = np.array(bbm92_rates) / 1000
+    br_line = np.where(br >= rate_floor_kbps, br, np.nan)
+    ax1.plot(qbers, br_line, 's-', linewidth=2, markersize=4,
+             color=C['pareto'],
+             label='BBM92-framed (keep 0.82), rate-0.84 code')
+    ax1.plot(qbers, sr_line, 'o-', linewidth=1.6,
              color=C['quantum'],
-             label='Declared rate-0.84 code (finite-blocklength FER)')
+             label='trusted-conduit mode, same code')
+    if len(sr_clip):
+        ax1.plot(sr_clip, np.full(len(sr_clip), rate_floor_kbps), 'v',
+                 color=C['quantum'], markersize=5,
+                 label='rate < 0.1 bit/s (effectively zero)')
     ax1.plot(qbers, np.array(envelope_rates) / 1000, '--', linewidth=1.5,
              color=C['accent'], label='Rate-adapted family (hypothetical)')
+    ax1.axvline(x=OPERATING_POINT['qber'], color=C['dark'], linestyle='--',
+                linewidth=1,
+                label=f"operating point (QBER "
+                      f"{OPERATING_POINT['qber']*100:.2f}%)")
     ax1.axvline(x=cap_q, color='gray', linestyle=':', linewidth=1,
                 label=f'0.84-code capacity (q={cap_q:.3f})')
     ax1_b = ax1.twinx()
     ax1_b.plot(qbers, mask_entropies, 's--', linewidth=2,
-               color=C['accent'], label='Mask entropy floor (bits/bit)')
+               color=C['accent'], label='Min-entropy per output bit (LHL)')
+    _hspan = max(mask_entropies) - min(mask_entropies)
+    ax1_b.set_ylim(min(mask_entropies) - 0.10 * _hspan,
+                   max(mask_entropies) + 0.10 * _hspan)
     ax1.set_xlabel('QBER')
     ax1.set_ylabel('Shared bit rate (kbit/s)', color=C['quantum'])
-    ax1_b.set_ylabel('Mask entropy floor (per output bit)', color=C['accent'])
+    ax1_b.set_ylabel('Min-entropy per output bit', color=C['accent'])
     ax1.set_yscale('log')
+    ax1.set_xlim(qbers[0] - 0.003, qbers[-1] + 0.003)
+    ax1.set_ylim(rate_floor_kbps * 0.4, max(sr) * 4)
     if cutoff_qber is not None:
         ax1.axvline(x=cutoff_qber, color='gray', linestyle=':',
                     label=f'1 kbit/s cutoff (QBER={cutoff_qber:.3f})')
-    ax1.set_title('Shared rate and mask entropy vs QBER')
+    ax1.set_title('Shared rate and min-entropy vs QBER')
     ax1.grid(True, alpha=0.3)
     # Combined legend for both y-axes, drawn on the twin so it sits on top.
     _h1, _l1 = ax1.get_legend_handles_labels()
     _h2, _l2 = ax1_b.get_legend_handles_labels()
-    ax1_b.legend(_h1 + _h2, _l1 + _l2, loc='lower left', fontsize=6.5)
+    ax1_b.legend(_h1 + _h2, _l1 + _l2, loc='upper center',
+                 bbox_to_anchor=(0.5, -0.22), ncol=2, fontsize=6,
+                 frameon=False)
 
-    ax2.plot(qbers, np.array(max_params) / 1000, 'o-', linewidth=2,
-             color=C['pareto'])
+    mp = np.array(max_params) / 1000
+    bp = np.array(bbm92_max_params) / 1000
+    mp_floor = 1e-3                 # 1-parameter display floor (K params)
+    mp_line = np.where(mp >= mp_floor, mp, np.nan)
+    bp_line = np.where(bp >= mp_floor, bp, np.nan)
+    mp_clip = qbers[mp < mp_floor]
+    ax2.plot(qbers, bp_line, 's-', linewidth=2, markersize=4,
+             color=C['pareto'], label='BBM92-framed (keep 0.82)')
+    ax2.plot(qbers, mp_line, 'o-', linewidth=1.6, color=C['quantum'],
+             label='trusted-conduit mode')
+    if len(mp_clip):
+        ax2.plot(mp_clip, np.full(len(mp_clip), mp_floor), 'v',
+                 color=C['quantum'], markersize=5)
+        ax2.text(float(np.mean(mp_clip)), mp_floor * 2.2,
+                 'below 1 param (rate collapse)', fontsize=6,
+                 color=C['quantum'], ha='center')
+    # anchored above the zero-marker row and its annotation, clear of
+    # the reference lines
+    ax2.legend(fontsize=6, loc='lower right', bbox_to_anchor=(0.98, 0.19))
+    ax2.axvline(x=OPERATING_POINT['qber'], color=C['dark'], linestyle='--',
+                linewidth=1)
     ax2.axvline(x=cap_q, color='gray', linestyle=':', linewidth=1)
-    ax2.text(cap_q, ax2.get_ylim()[0] if ax2.get_ylim()[0] > 0 else 1,
-             ' 0.84-code capacity', fontsize=6, color='gray', rotation=90,
-             va='bottom')
+    ax2.set_yscale('log')
+    ax2.set_xlim(qbers[0] - 0.003, qbers[-1] + 0.003)
+    ax2.set_ylim(mp_floor * 0.4, 4000)
+    ax2.text(cap_q, mp_floor, ' 0.84-code capacity', fontsize=6,
+             color='gray', rotation=90, va='bottom')
+    ax2.text(OPERATING_POINT['qber'], mp_floor, ' operating point',
+             fontsize=6, color=C['dark'], rotation=90, va='bottom')
     for ref, lbl in [(29, '29K (ClinicalMLP)'),
                       (150, '150K params'),
                       (1000, '1M params')]:
@@ -1614,18 +1839,17 @@ def run_experiment_7(quick=False):
         ax2.text(qbers[0], ref, lbl, fontsize=7, color='gray', va='bottom')
     ax2.set_xlabel('QBER')
     ax2.set_ylabel('Max model size at 60s round (K params)')
-    ax2.set_yscale('log')
     ax2.set_title('Max maskable model size vs QBER (rate-driven)')
     ax2.grid(True, alpha=0.3, which='both')
 
-    fig.suptitle('QBER, key rate, and mask entropy',
+    fig.suptitle('QBER, key rate, and min-entropy',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=3.0, rect=(0, 0.18, 1, 1))
     save_fig(fig, 'exp7_qber_key_rate_envelope')
 
     print("\n  QBER -> Shared rate -> Max model size (60s rounds):")
     print(f"  {'QBER':>8}  {'Declared rate':>15}  {'Envelope*':>12}  "
-          f"{'Mask H/bit':>11}  {'Max K params':>14}")
+          f"{'Hmin/bit':>11}  {'Max K params':>14}")
     for q, r, e, h, mp in zip(qbers, shared_rates, envelope_rates,
                               mask_entropies, max_params):
         print(f"  {q:>8.4f}  {r/1000:>10.2f} kbit/s  {e/1000:>7.2f} kb/s"
@@ -1641,8 +1865,10 @@ def run_experiment_7(quick=False):
     return {
         "qbers": qbers.tolist(),
         "shared_rates_bps": shared_rates,
+        "bbm92_framed_rates_bps": bbm92_rates,
         "mask_entropy_per_bit": mask_entropies,
         "max_params_at_60s": max_params,
+        "bbm92_max_params_at_60s": bbm92_max_params,
         "cutoff_qber": float(cutoff_qber) if cutoff_qber else None,
     }
 
@@ -1760,7 +1986,7 @@ def run_experiment_8(quick=False):
 
     fig.suptitle('Multi-triangle FL convergence',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp8a_multitri_convergence')
 
     # PLOT 2: Scaling summary bar chart
@@ -1789,7 +2015,7 @@ def run_experiment_8(quick=False):
     # Final accuracy
     axes[0].bar(x, final_accs, width=bar_width, color=bar_colors, edgecolor='white', linewidth=0.8)
     axes[0].set_xticks(x)
-    axes[0].set_xticklabels(xlabels, fontsize=7)
+    axes[0].set_xticklabels(xlabels, fontsize=6, rotation=20)
     axes[0].set_ylabel('Final Accuracy')
     axes[0].set_title('Accuracy')
     axes[0].set_ylim(0.8, 1.05)
@@ -1799,7 +2025,7 @@ def run_experiment_8(quick=False):
     # Rounds to target
     axes[1].bar(x, rounds_to_tgt, width=bar_width, color=bar_colors, edgecolor='white', linewidth=0.8)
     axes[1].set_xticks(x)
-    axes[1].set_xticklabels(xlabels, fontsize=7)
+    axes[1].set_xticklabels(xlabels, fontsize=6, rotation=20)
     axes[1].set_ylabel('Rounds')
     axes[1].set_title('Rounds to Target')
     max_rounds = max(rounds_to_tgt)
@@ -1809,7 +2035,7 @@ def run_experiment_8(quick=False):
     # Tree depth
     axes[2].bar(x, tree_depths, width=bar_width, color=bar_colors, edgecolor='white', linewidth=0.8)
     axes[2].set_xticks(x)
-    axes[2].set_xticklabels(xlabels, fontsize=7)
+    axes[2].set_xticklabels(xlabels, fontsize=6, rotation=20)
     axes[2].set_ylabel('Depth')
     axes[2].set_title('Agg. Tree Depth')
     max_depth = max(tree_depths) if max(tree_depths) > 0 else 1
@@ -1819,7 +2045,7 @@ def run_experiment_8(quick=False):
     # Wall clock time
     axes[3].bar(x, wall_clocks, width=bar_width, color=bar_colors, edgecolor='white', linewidth=0.8)
     axes[3].set_xticks(x)
-    axes[3].set_xticklabels(xlabels, fontsize=7)
+    axes[3].set_xticklabels(xlabels, fontsize=6, rotation=20)
     axes[3].set_ylabel('Seconds')
     axes[3].set_title('Wall Clock')
     max_wc = max(wall_clocks)
@@ -1828,7 +2054,7 @@ def run_experiment_8(quick=False):
 
     fig.suptitle('Multi-triangle scaling metrics',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.tight_layout(rect=[0, 0, 1, 0.92], w_pad=2.0)
     save_fig(fig, 'exp8b_multitri_scaling_bars')
 
     # PLOT 3: Aggregation overhead at both operating points
@@ -1859,7 +2085,7 @@ def run_experiment_8(quick=False):
         # 3 clients = one triangle = depth 0: zero tree overhead, which a
         # log axis cannot plot; keep the x range so the point's absence is
         # explicit and the legend has a data-free band
-        ax.set_xlim(2.4, 12.6)
+        ax.set_xlim(1.0, 12.8)
         ax.text(0.02, 0.03, '3 clients: depth 0,\n'
                 'zero tree overhead\n(not plottable, log axis)',
                 transform=ax.transAxes, fontsize=5.5, color='gray',
@@ -1873,7 +2099,7 @@ def run_experiment_8(quick=False):
                     color='gray', ha='right')
     fig.suptitle('Hierarchical aggregation overhead',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp8c_aggregation_overhead')
 
     # Summary
@@ -2056,7 +2282,7 @@ def run_experiment_9(quick=False):
     fracs = [100 * atk_c["recovered_fraction"],
              100 * atk_d["recovered_fraction"],
              100 * atk_e["recovered_fraction"]]
-    ax1.bar(arms, fracs, color=[C['unmasked'], C['dp'], C['quantum']])
+    ax1.bar(arms, fracs, color=[C['unmasked'], C['accent'], C['quantum']])
     ax1.set_ylabel('Gradients recovered retroactively (%)')
     ax1.set_ylim(0, 114)  # headroom for the bar labels
     for i, v in enumerate(fracs):
@@ -2069,8 +2295,8 @@ def run_experiment_9(quick=False):
     pe = [r["residual_monobit_p"] for r in atk_e["records"]]
     ax2.scatter(np.zeros(len(pc)) + 0.0, pc, color=C['unmasked'],
                 alpha=0.7, label='classical: residual = the gradient')
-    ax2.scatter(np.zeros(len(pd_)) + 1.0, pd_, color=C['dp'],
-                alpha=0.7, label='IT dealer (online): residual = the gradient')
+    ax2.scatter(np.zeros(len(pd_)) + 1.0, pd_, color=C['accent'],
+                alpha=0.85, label='IT dealer (online): residual = the gradient')
     ax2.scatter(np.zeros(len(pe)) + 2.0, pe, color=C['quantum'],
                 alpha=0.7, label='entangled: residual stays uniform')
     ax2.axhline(y=0.01, color='gray', linestyle=':', linewidth=1,
@@ -2085,7 +2311,7 @@ def run_experiment_9(quick=False):
 
     fig.suptitle('HNDL transcript attack: retroactive recovery',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp9_hndl_transcript')
 
     print("  Experiment 9 complete.")
@@ -2218,7 +2444,7 @@ def run_experiment_10(quick=False):
     kw_fixed_series = [kw_before if rd <= kill_round else np.nan
                        for rd in rounds_x]
     ax1.plot(rounds_x, kw_sym_series, 'o-', color=C['quantum'],
-             label='symmetric switching (implemented): ×2 slower, continues')
+             label='symmetric switching (implemented): 2x slower, continues')
     ax1.plot(rounds_x, kw_fixed_series, 's-', color=C['unmasked'],
              label='fixed source per edge: stalls (no key supply)')
     ax1.axvline(x=kill_round + 0.5, color='gray', linestyle=':',
@@ -2242,7 +2468,7 @@ def run_experiment_10(quick=False):
 
     fig.suptitle('Availability under single-source failure',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp10_availability')
 
     print("  Experiment 10 complete.")
@@ -2565,14 +2791,21 @@ def run_experiment_12(quick=False):
              color='gray', rotation=90, va='bottom')
     ax1.set_xlabel('Vector dimension d (params)')
     ax1.set_ylabel('Dropout-recovery bytes (1 drop, 3 survivors)')
+    # log axes need multiplicative margins of half a decade or so to
+    # read as real gaps; linear-style 1.4x factors leave the endpoint
+    # markers crowding the frame corners
+    ax1.set_xlim(min(ds) * 0.5, max(ds) * 2.2)
+    ax1.set_ylim(4, max(scaling[d][0] for d in ds) * 4)
     ax1.set_title('Recovery bytes vs model dimension')
-    ax1.legend(fontsize=7)
+    # upper left is the empty corner above the O(1) floor and left of
+    # the O(d) diagonal; auto-placement grazed the diagonal.
+    ax1.legend(fontsize=7, loc='upper left')
     ax1.grid(True, alpha=0.3, which='both')
 
     names = ARMS
     labels = ["this system", "Bonawitz", "Flamingo",
               "dealer\n(online)", "dealer\n(courier)"]
-    cols = [C['quantum'], C['unmasked'], C['dp'], C['accent'], C['pareto']]
+    cols = [C['quantum'], C['unmasked'], C['dp'], C['accent'], C['dark']]
     vals = [costs1[n].recovery_bytes for n in names]
     ax2.bar(labels, vals, color=cols)
     ax2.set_ylabel('Recovery bytes / dropout (ClinicalMLP)')
@@ -2601,7 +2834,7 @@ def run_experiment_12(quick=False):
 
     fig.suptitle('Dropout-recovery cost and trust assumptions, five arms',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp12_sota_comparison')
 
     print("\n  Experiment 12 complete.")
@@ -2788,18 +3021,25 @@ def run_experiment_13(quick=False):
     ax1.bar(xs - 0.2, [src[k]/1000 for _, k in stages], 0.4,
             color=C['quantum'], label='source-model')
     ax1.bar(xs + 0.2, [qkd['efficient-90/10'][k]/1000 for _, k in stages],
-            0.4, color=C['accent'], label='QKD-framed (keep 0.82)')
+            0.4, color=C['pareto'], label='QKD-framed (keep 0.82)')
     ax1.set_xticks(xs)
     ax1.set_xticklabels(stage_labels, fontsize=7)
     ax1.set_ylabel('Rate (kbit/s)')
+    ax1.set_ylim(0, max(src[k] for _, k in stages) / 1000 * 1.12)
     ax1.set_title(f'Stage rates (QBER {q*100:.2f}%)',
                   fontsize=8)
     ax1.legend(fontsize=6)
     ax1.grid(True, alpha=0.3, axis='y')
 
+    # One color per sifting variant, shared by the ax2 bars and the ax3
+    # sweep curves; the efficient-90/10 variant is the protocol the
+    # exp14 BBM92 arm runs, so it carries the same teal.
+    mode_colors = {'symmetric': C['unmasked'],
+                   'efficient-90/10': C['pareto'],
+                   'efficient-asymptotic': C['dp']}
     bar_labels = [short[n] for n in mode_names]
     ax2.bar(bar_labels, [ratios[n] for n in mode_names],
-            color=[C['unmasked'], C['accent'], C['pareto']])
+            color=[mode_colors[n] for n in mode_names])
     ax2.axhline(y=floor_ratio, color='gray', linestyle=':',
                 label=f'asymptotic-sifting floor {floor_ratio:.2f}x')
     ax2.axhline(y=1.0, color='gray', linewidth=0.8)
@@ -2817,10 +3057,14 @@ def run_experiment_13(quick=False):
               'efficient-asymptotic': ':'}
     for n in mode_names:
         ax3.plot(sweep_q, sweep_ratios[n], styles[n], linewidth=2,
+                 color=mode_colors[n],
                  label=f'{n} (keep '
                        f"{QKD_FRAMING['sifting_modes'][n]:.2f})")
     ax3.axvline(x=q, color=C['dark'], linestyle='--', linewidth=1,
                 label=f'operating point ({q*100:.2f}%)')
+    # Margins, not fixed limits: past code capacity the QKD-framed rate
+    # is zero and the ratio is undefined, so the drawn data ends early.
+    ax3.margins(x=0.06, y=0.06)
     ax3.set_xlabel('QBER')
     ax3.set_ylabel('rate ratio')
     ax3.set_title('Ratio vs QBER', fontsize=8)
@@ -2832,7 +3076,7 @@ def run_experiment_13(quick=False):
                  '(comparison-only; not a security ranking - the QKD '
                  'framing tolerates the stronger adversary)',
                  fontsize=9, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp13_qkd_framing')
 
     print("\n  Experiment 13 complete.")
@@ -2885,7 +3129,7 @@ def run_experiment_14(quick=False):
 
     (A) The executing chain at the operating point, 10 seeds, against
         the exp13 asymptotic model - the delta is the finite-key
-        surcharge mu at realistic run sizes.
+        finite-key penalty at realistic run sizes.
     (B) The basis-split tradeoff at finite run size (peripheral figure
         exp14b): the asymptotically optimal 90/10 split starves the
         test set; the finite-key optimum sits at a less asymmetric
@@ -3109,7 +3353,7 @@ def run_experiment_14(quick=False):
           f"e_x), so taps near f* escape or trip by seed. Larger\n"
           f"    accumulated test sets sharpen the threshold; the abort "
           f"rule itself is per-run.")
-    print(f"    fixed-basis arm: error rate flat at every tap fraction - "
+    print(f"    fixed-basis arm: error rate flat at every intercepted fraction - "
           f"the attack is invisible;\n    at f=1 Eve predicts "
           f"{c_res['fixed-basis']['acc_mean'][-1]*100:.1f}% of the "
           f"'secure' key. The source-model protocol\n    EXCLUDES this "
@@ -3121,7 +3365,7 @@ def run_experiment_14(quick=False):
     print("    Detection here is for THIS attack; general security is "
           "the h2(e_ph) PA charge, not this sweep.")
 
-    # (D) surcharge convergence: executing ratio vs run length, against
+    # (D) finite-key penalty convergence: executing ratio vs run length, against
     # the deterministic finite-key model. FER is omitted from BOTH model
     # arms (identical FER-model charge, cancels in the ratio); the executing
     # points carry it.
@@ -3180,8 +3424,8 @@ def run_experiment_14(quick=False):
     model_pairs = np.geomspace(pairs_sweep[0] / 2,
                                pairs_sweep[-1] * 8, 40)
     model_curve = [ratio_model(npp) for npp in model_pairs]
-    print(f"\n  (D) Surcharge convergence ({len(seeds_d)} seeds per "
-          f"point):")
+    print(f"\n  (D) Finite-key penalty convergence ({len(seeds_d)} seeds "
+          f"per point):")
     for st in d_stats:
         if st["median"] is None:
             print(f"      {st['pairs']/1e6:>5.0f}M pairs: no certified "
@@ -3217,14 +3461,15 @@ def run_experiment_14(quick=False):
                  label='BBM92: test-set e_x')
     ax1.axhline(q_tol*100, color=C['unmasked'], linestyle='--',
                 linewidth=1, label=f'abort threshold q_tol = {q_tol}')
-    ax1.set_xlabel('tapped fraction f')
+    ax1.set_xlabel('intercepted fraction f')
     ax1.set_ylabel('observed error rate (%)')
-    ax1.set_title('Observed error vs tap fraction', fontsize=8)
+    ax1.set_xlim(-0.04, 1.04)
+    ax1.set_title('Observed error vs intercepted fraction', fontsize=8)
     ax1.legend(fontsize=6)
     ax1.grid(True, alpha=0.3)
 
     acc_fixed = np.array(c_res['fixed-basis']['acc_mean'])
-    ax2.plot(fs, acc_fixed, 'o-', color=C['unmasked'], markersize=3,
+    ax2.plot(fs, acc_fixed, 'o-', color=C['quantum'], markersize=3,
              label='fixed-basis (key always accepted)')
     acc_b = [(f, a) for f, a in zip(fs, c_res['bbm92']['acc_accepted'])
              if not np.isnan(a)]
@@ -3233,8 +3478,9 @@ def run_experiment_14(quick=False):
                  color=C['pareto'], markersize=3,
                  label='BBM92 (accepted keys only)')
     ax2.axhline(0.5, color='gray', linewidth=0.8, linestyle=':')
-    ax2.set_xlabel('tapped fraction f')
+    ax2.set_xlabel('intercepted fraction f')
     ax2.set_ylabel('Eve accuracy on accepted key')
+    ax2.set_xlim(-0.04, 1.04)
     ax2.set_ylim(0.45, 1.02)
     ax2.set_title('Eve accuracy on accepted keys', fontsize=8)
     ax2.legend(fontsize=6)
@@ -3247,11 +3493,15 @@ def run_experiment_14(quick=False):
              label='fixed-basis (never aborts)')
     ax3.axvline(f_star, color=C['unmasked'], linestyle='--', linewidth=1,
                 label=f'analytic f* = {f_star:.3f}')
-    ax3.set_xlabel('tapped fraction f')
+    ax3.set_xlabel('intercepted fraction f')
     ax3.set_ylabel('abort probability')
-    ax3.set_xscale('symlog', linthresh=0.05)
+    # A log axis cannot reach f = 0; symlog splices a short linear
+    # segment near zero so the f = 0 point is drawn. Keep that segment
+    # narrow so zero sits at the left edge, not mid-axis.
+    ax3.set_xscale('symlog', linthresh=0.01, linscale=0.25)
+    ax3.set_xlim(-0.002, 1.3)
     ax3.set_ylim(-0.05, 1.05)
-    ax3.set_title('Abort probability vs tap fraction', fontsize=8)
+    ax3.set_title('Abort probability vs intercepted fraction', fontsize=8)
     ax3.legend(fontsize=6)
     ax3.grid(True, alpha=0.3)
 
@@ -3280,15 +3530,20 @@ def run_experiment_14(quick=False):
                 label=f'asymptotic ratio {model_ratio:.2f}x')
     ax4.set_xscale('log')
     ax4.set_yscale('log')
+    # bottom below the asymptote line, top above the widest seed range
+    # and the finite-key model curve
+    _tops = [v for v in model_curve if np.isfinite(v)]
+    _tops += [st["max"] for st in d_pts]
+    ax4.set_ylim(0.9, max(_tops) * 1.6)
     ax4.set_xlabel('emitted pairs per run (millions)')
     ax4.set_ylabel('fixed-basis / BBM92 secure-bit ratio')
-    ax4.set_title('Finite-key surcharge vs run length', fontsize=8)
+    ax4.set_title('Finite-key penalty vs run length', fontsize=8)
     ax4.legend(fontsize=6)
     ax4.grid(True, alpha=0.3)
 
     fig.suptitle('Fixed-basis vs BBM92 arms under intercept-resend',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout()
+    fig.tight_layout(w_pad=2.5, h_pad=2.5)
     save_fig(fig, 'exp14_bbm92_executing')
 
     # Peripheral figure: basis-split tradeoff
@@ -3350,10 +3605,20 @@ def main():
                         help='Experiment numbers to run (default: all 1-14)')
     parser.add_argument('--quick', action='store_true',
                         help='Quick mode with reduced parameter sweeps')
+    parser.add_argument('--export-csv', action='store_true',
+                        help='Rewrite results/data CSV tables from the '
+                             'existing summary and exit')
     args = parser.parse_args()
 
     if args.quick:
         set_output_suffix("_quick")
+
+    if args.export_csv:
+        summary_path = os.path.join(RESULTS_DIR,
+                                    f"summary{_OUTPUT_SUFFIX}.json")
+        with open(summary_path) as f:
+            export_summary_csv(json.load(f), _OUTPUT_SUFFIX)
+        return
 
     print("Entanglement-derived one-time masks for federated learning")
     print("over campus fiber meshes - source-model key distillation")
@@ -3433,6 +3698,7 @@ def main():
         with open(summary_path, 'w') as f:
             json.dump(sanitize(merged), f, indent=2, default=convert)
         print(f"\nSummary saved to: {summary_path}")
+        export_summary_csv(sanitize(merged), _OUTPUT_SUFFIX)
     except Exception:
         pass
 
