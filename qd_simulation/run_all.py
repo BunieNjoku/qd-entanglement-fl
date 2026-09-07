@@ -113,8 +113,9 @@ _OUTPUT_SUFFIX = ""
 # and the provenance/SOTA tables are manuscript material outside this
 # repo. Everything else is peripheral.
 MAIN_FIGURES = {
+    'exp5_dropout_recovery',
     'paper_qber_envelope',
-    'paper_tap_visibility',
+    'paper_security',
     'paper_finite_key',
     'paper_window_cliff',
 }
@@ -3657,14 +3658,11 @@ def run_experiment_14(quick=False):
 # PAPER FIGURE PASS (--paper)
 #
 # Builds the paper-tier figures from the full-mode summary.json (source
-# of record); no new simulation runs. Figure test, applied uniformly:
-# a result is a PLOT only if its claim lives in a shape a sentence or
-# table row cannot carry losslessly - an extremum or threshold whose
-# location is the result, curves diverging/crossing over a continuum,
-# or a distribution whose spread is the result. Discrete cross-arm
-# values go to tables; single numbers, categorical outcomes, and
-# formula-driven monotone relations go to prose. The pass prints the
-# table/prose numbers so the manuscript quotes one source.
+# of record); no new simulation runs. Figure rule: plots carry
+# COMPARISONS - system vs baselines, protocol vs protocol, execution
+# vs model, hardware today vs roadmap. Standalone budgets, calibration
+# checks, and single scalars are prose/table material; the pass prints
+# those numbers so the manuscript quotes one source.
 
 def make_paper_figures(summary):
     print("\n" + "="*70)
@@ -3706,41 +3704,61 @@ def make_paper_figures(summary):
     fig.tight_layout()
     save_fig(fig, 'paper_qber_envelope')
 
-    # Figure: key-basis intercept-resend tap - the fixed-basis arm's
-    # flat error (attack invisible) against BBM92's rising test error
-    # and abort transition. The divergence and crossing are the
-    # security argument.
-    print("  [B] Figure: intercept-resend tap visibility...")
+    # Figure: security comparison - retroactive adversary across the
+    # four provisioning arms, and live adversary across the two
+    # protocol framings on the same tap.
+    print("  [B] Figure: security comparison (HNDL arms + live tap)...")
+    e9 = summary['exp9']
     e14 = summary['exp14']['intercept_resend']
-    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    arm_keys = ['classical', 'it_dealer_online', 'it_dealer_courier',
+                'entangled']
+    arm_labels = ['classical\n(DH/PRF)', 'dealer\n(online)',
+                  'dealer\n(courier)', 'entangled\n(distilled)']
+    fracs = [100 * e9[k]['recovered_fraction'] for k in arm_keys]
+    bars = ax1.bar(arm_labels, fracs,
+                   color=[C['unmasked'], C['accent'], C['prng'],
+                          C['quantum']], edgecolor='white')
+    for b, fr in zip(bars, fracs):
+        ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 1.5,
+                 f'{fr:.0f}%', ha='center', fontsize=7)
+    ax1.set_ylabel('Payloads retro-recovered (%)')
+    ax1.set_ylim(0, 112)
+    ax1.set_title('HNDL transcript attack by provisioning arm',
+                  fontsize=8)
+    ax1.grid(True, alpha=0.2, axis='y')
+
     f_sw = np.array(e14['f_sweep'])
-    ax.plot(f_sw * 100, np.array(e14['fixed_qber']) * 100, 'o-',
-            color=C['dark'], linewidth=1.6, markersize=4,
-            label='fixed-basis QBER (attack invisible)')
-    ax.plot(f_sw * 100, np.array(e14['bbm92_e_x']) * 100, 's-',
-            color=C['quantum'], linewidth=1.6, markersize=4,
-            label='BBM92 test-set error e_x')
-    ax.axhline(y=BBM92['q_tol'] * 100, color=C['unmasked'],
-               linestyle='--', linewidth=1.2,
-               label=f"abort threshold q_tol ({BBM92['q_tol']*100:.0f}%)")
-    ax.axvline(x=e14['analytic_f_star'] * 100, color='gray',
-               linestyle=':', linewidth=1,
-               label=f"analytic f* ({e14['analytic_f_star']*100:.1f}%)")
-    axb = ax.twinx()
-    axb.plot(f_sw * 100, e14['bbm92_abort_prob'], '^--',
-             color=C['pareto'], linewidth=1.2, markersize=4)
-    axb.set_ylabel('BBM92 abort probability', color=C['pareto'],
-                   fontsize=8)
-    axb.set_ylim(-0.05, 1.05)
-    ax.set_xlabel('Intercepted fraction of fiber photons (%)')
-    ax.set_ylabel('Error rate (%)')
-    ax.set_xscale('symlog', linthresh=1.0)
-    ax.set_xlim(0, 110)
-    ax.set_title('Key-basis intercept-resend tap', fontsize=9)
-    ax.legend(fontsize=6, loc='upper left')
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    save_fig(fig, 'paper_tap_visibility')
+    ax2.plot(f_sw * 100, np.array(e14['fixed_qber']) * 100, 'o-',
+             color=C['dark'], linewidth=1.6, markersize=4,
+             label='fixed-basis QBER (attack invisible)')
+    ax2.plot(f_sw * 100, np.array(e14['bbm92_e_x']) * 100, 's-',
+             color=C['quantum'], linewidth=1.6, markersize=4,
+             label='BBM92 test-set error e_x')
+    ax2.axhline(y=BBM92['q_tol'] * 100, color=C['unmasked'],
+                linestyle='--', linewidth=1.2,
+                label=f"abort threshold q_tol ({BBM92['q_tol']*100:.0f}%)")
+    ax2.axvline(x=e14['analytic_f_star'] * 100, color='gray',
+                linestyle=':', linewidth=1,
+                label=f"analytic f* ({e14['analytic_f_star']*100:.1f}%)")
+    ax2b = ax2.twinx()
+    ax2b.plot(f_sw * 100, e14['bbm92_abort_prob'], '^--',
+              color=C['pareto'], linewidth=1.2, markersize=4)
+    ax2b.set_ylabel('BBM92 abort probability', color=C['pareto'],
+                    fontsize=8)
+    ax2b.set_ylim(-0.05, 1.05)
+    ax2.set_xlabel('Intercepted fraction of fiber photons (%)')
+    ax2.set_ylabel('Error rate (%)')
+    ax2.set_xscale('symlog', linthresh=1.0)
+    ax2.set_xlim(0, 110)
+    ax2.set_title('Key-basis intercept-resend tap by protocol',
+                  fontsize=8)
+    ax2.legend(fontsize=6, loc='upper left')
+    ax2.grid(True, alpha=0.3)
+    fig.suptitle('Security comparison: retroactive and live adversaries',
+                 fontsize=10, fontweight='bold')
+    fig.tight_layout(w_pad=2.8)
+    save_fig(fig, 'paper_security')
 
     # Figure: finite-key effects - (i) certification cliff and
     # convergence of the executing runs onto the deterministic

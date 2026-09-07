@@ -117,20 +117,20 @@ Results in `results/`, tiered for the publication figure budget
 (IEEE Network: six figures/tables total):
 
 - `main/` - the paper tier (ICC target), built by
-  `python run_all.py --paper` from the full-mode summary. Uniform
-  figure test: a result is plotted only if its claim lives in a shape
-  a sentence or table row cannot carry losslessly (extremum or
-  threshold whose location is the result, curves diverging over a
-  continuum). Four figures pass: paper_qber_envelope (supply collapses
-  at code capacity, min-entropy floor flat), paper_tap_visibility
-  (flat fixed-basis error vs BBM92 abort transition under the same
-  tap), paper_finite_key (certification cliff onto the deterministic
-  model + interior basis-split optimum), paper_window_cliff (rate
-  rise-and-collapse, two calibrations). The pass also prints the
-  table/prose numbers (key-supply budget, HNDL fractions, dropout
-  recovery costs, levers, framing ratios); those, the architecture
-  figure, and the provenance and cost/trust tables are manuscript
-  material outside this repo
+  `python run_all.py --paper` from the full-mode summary. Figure rule:
+  plots carry COMPARISONS (system vs baselines, protocol vs protocol,
+  execution vs model, hardware today vs roadmap); standalone budgets
+  and single scalars are prose/table material, printed by the pass so
+  the manuscript quotes one source. Five result figures:
+  exp5_dropout_recovery (recovery mechanisms vs baselines over a
+  dropout sweep), paper_qber_envelope (two framings' supply vs the
+  flat entropy floor), paper_security (four provisioning arms under
+  the recorder; two protocols under the same live tap),
+  paper_finite_key (executing runs vs the deterministic model;
+  executing basis split vs the ideal limit), paper_window_cliff
+  (receiver window choices vs the time-resolved operating point). The
+  architecture figure and the provenance and cost/trust tables are
+  manuscript material outside this repo
 - `peripheral/` - validation, sensitivity, scaling, and comparison
   figures kept for the technical-report version and reviewers (exp1,
   2a-b, 3a, 4, 6, 7, 8a-b, 9, 10, 11, 12, 13, 14, exp14b basis split,
