@@ -3735,12 +3735,12 @@ def make_paper_figures(summary):
     print("="*70)
     op = OPERATING_POINT
 
-    # Figure: QBER prices key SUPPLY, not mask entropy - and what that
-    # supply buys in FL currency. Panel (a): both framings' supply
-    # collapse at the declared code's capacity while the per-bit
-    # min-entropy floor stays flat; the operating point sits 0.47
-    # points under the BBM92 abort threshold. Panel (b): the same
-    # envelope converted to maskable model size at 60 s rounds.
+    # Figure: secret-key supply and mask min-entropy vs QBER, with the
+    # supply converted to maskable model size. Panel (a): both
+    # framings' rates fall to zero at the declared code's capacity
+    # while the per-bit min-entropy varies little; the operating point
+    # sits 0.47 points under the BBM92 abort threshold. Panel (b): the
+    # same envelope as maskable model size at 60 s rounds.
     print("  [A] Figure: QBER envelope (supply, entropy floor, model "
           "size)...")
     e7 = summary['exp7']
@@ -3769,7 +3769,7 @@ def make_paper_figures(summary):
     axb.set_ylim(0.985, 1.0005)
     ax.set_xlabel('QBER (%)')
     ax.set_ylabel('Secret rate (kbit/s)')
-    ax.set_title('Supply collapses; entropy floor holds', fontsize=9)
+    ax.set_title('Secret rate and mask min-entropy', fontsize=9)
     ax.legend(fontsize=5.5, loc='lower left')
     ax.grid(True, alpha=0.3)
 
@@ -3785,11 +3785,11 @@ def make_paper_figures(summary):
                 linewidth=1.2)
     axp.set_xlabel('QBER (%)')
     axp.set_ylabel('Max maskable model (K params, 60 s round)')
-    axp.set_title('The envelope in FL currency\n(150K and 1M models '
+    axp.set_title('Max maskable model size\n(150K and 1M models '
                   'off scale)', fontsize=8)
     axp.legend(fontsize=6)
     axp.grid(True, alpha=0.3)
-    fig.suptitle('QBER prices supply, not mask entropy', fontsize=10,
+    fig.suptitle('Key supply and mask entropy vs QBER', fontsize=10,
                  fontweight='bold')
     fig.tight_layout(w_pad=2.8)
     save_fig(fig, 'paper_qber_envelope')
@@ -3938,7 +3938,8 @@ def make_paper_figures(summary):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     win_ps = np.array(e15['windows_ps'])
     for (label, res), ls, col in zip(e15['calibrations'].items(),
-                                     ('-', '--'), (C['pareto'], C['dark'])):
+                                     ('-', '--'),
+                                     (C['quantum'], C['unmasked'])):
         ax1.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
                  linewidth=1.8, label=label.split(' (')[0])
         pen = 100 * (1 - res['opt_secret_bps'] / op['secret_rate_bps'])
@@ -3951,7 +3952,7 @@ def make_paper_figures(summary):
                      xytext=(res['opt_window_ps'] + 60,
                              res['opt_secret_bps'] / 1e3 + 0.08),
                      fontsize=6, color=col)
-    ax1.axhline(y=op['secret_rate_bps'] / 1e3, color=C['quantum'],
+    ax1.axhline(y=op['secret_rate_bps'] / 1e3, color='black',
                 linestyle=':', linewidth=1.2,
                 label='time-resolved operating point (3.54 kbit/s)')
     ax1.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
@@ -3960,7 +3961,7 @@ def make_paper_figures(summary):
     ax1.set_ylabel('Secret rate (kbit/s)')
     ax1.set_ylim(0, 4.0)
     ax1.set_title('Window cliff (phase-blind receiver)', fontsize=9)
-    ax1.legend(fontsize=6)
+    ax1.legend(fontsize=6, loc='center right')
     ax1.grid(True, alpha=0.3)
 
     c_now = QUANTUM['coupling_efficiency']

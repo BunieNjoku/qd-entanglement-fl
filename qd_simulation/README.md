@@ -86,7 +86,7 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 4 | FL training correctness | Modular masking does not degrade convergence vs unmasked baseline |
 | 5 | **Dropout recovery** | entangled-key two-mask aggregation tolerates client dropout at per-round freshness; recovery bytes drawn against the Bonawitz and Flamingo seed-reveal models on the same dropout events (O(d) vs O(1)) |
 | 6 | Throughput | Round-rate ceiling under shared-bit-rate constraints |
-| 7 | **QBER -> key-rate / capacity envelope** | QBER prices key SUPPLY (rate, max maskable model size); the PA mask-entropy floor stays flat |
+| 7 | **QBER -> key-rate / capacity envelope** | QBER sets the key supply (rate, max maskable model size) while the PA mask entropy per bit stays near 1 across the sweep |
 | 8 | Multi-triangle FL | Two-level hierarchical Bonawitz at 3/6/9/12 client scales |
 | 9 | **HNDL transcript attack** | Record everything, break all computational secrets later: classical arm 100% retro-recovered, IT-dealer online provisioning 100% - IT masking with recorded provisioning still falls - IT-dealer courier provisioning 0%, entangled arm 0%: immunity tracks provisioning |
 | 10 | Availability under source failure | Kill one node's source: edges continue at ~half rate from far endpoints (availability/fairness, not security) |
