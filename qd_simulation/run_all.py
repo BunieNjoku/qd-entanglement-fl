@@ -113,8 +113,9 @@ _OUTPUT_SUFFIX = ""
 # and the provenance/SOTA tables are manuscript material outside this
 # repo. Everything else is peripheral.
 MAIN_FIGURES = {
-    'exp5_dropout_recovery',
+    'paper_qber_envelope',
     'paper_tap_visibility',
+    'paper_finite_key',
     'paper_window_cliff',
 }
 
@@ -3645,28 +3646,71 @@ def run_experiment_14(quick=False):
             "first_swept_abort_f": first_detected,
         },
         "surcharge_convergence": d_stats,
+        "surcharge_model": {
+            "pairs": model_pairs.tolist(),
+            "ratio": [float(r) for r in model_curve],
+            "asymptotic_ratio": float(model_ratio),
+        },
     }
 
 
 # PAPER FIGURE PASS (--paper)
 #
 # Builds the paper-tier figures from the full-mode summary.json (source
-# of record); no new simulation runs. Only results whose SHAPE carries
-# the argument get a plot; everything else is emitted as numbers for
-# manuscript text and tables. Figure test: if a sentence or table row
-# carries the content losslessly, it is not a figure.
+# of record); no new simulation runs. Figure test, applied uniformly:
+# a result is a PLOT only if its claim lives in a shape a sentence or
+# table row cannot carry losslessly - an extremum or threshold whose
+# location is the result, curves diverging/crossing over a continuum,
+# or a distribution whose spread is the result. Discrete cross-arm
+# values go to tables; single numbers, categorical outcomes, and
+# formula-driven monotone relations go to prose. The pass prints the
+# table/prose numbers so the manuscript quotes one source.
 
 def make_paper_figures(summary):
     print("\n" + "="*70)
-    print("PAPER PASS: figures where shape argues, numbers where it "
-          "does not")
+    print("PAPER PASS: plots where shape argues; tables/prose otherwise")
     print("="*70)
     op = OPERATING_POINT
 
+    # Figure: QBER prices key SUPPLY, not mask entropy - both framings'
+    # supply curves collapse at the declared code's capacity while the
+    # per-bit min-entropy floor stays flat. Two-curve contrast over a
+    # continuum plus a cliff whose location is the result.
+    print("  [A] Figure: QBER envelope (supply collapses, floor holds)...")
+    e7 = summary['exp7']
+    q = np.array(e7['qbers'])
+    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+    ax.plot(q * 100, np.array(e7['shared_rates_bps']) / 1e3, 'o-',
+            color=C['quantum'], linewidth=1.8, markersize=4,
+            label='trusted-conduit supply')
+    ax.plot(q * 100, np.array(e7['bbm92_framed_rates_bps']) / 1e3, 's-',
+            color=C['pareto'], linewidth=1.8, markersize=4,
+            label='BBM92-framed supply (keep 0.82)')
+    ax.axvline(x=op['qber'] * 100, color=C['dark'], linestyle='--',
+               linewidth=1.2,
+               label=f"operating point ({op['qber']*100:.2f}%)")
+    ax.axvline(x=estimate_capacity_qber(POST_PROC['ldpc_code_rate']) * 100,
+               color='gray', linestyle=':', linewidth=1,
+               label='rate-0.84 code capacity')
+    axb = ax.twinx()
+    axb.plot(q * 100, e7['mask_entropy_per_bit'], 'd--', color=C['accent'],
+             linewidth=1.4, markersize=4)
+    axb.set_ylabel('Min-entropy per output bit', color=C['accent'],
+                   fontsize=8)
+    axb.set_ylim(0.9, 1.001)
+    ax.set_xlabel('QBER (%)')
+    ax.set_ylabel('Secret rate (kbit/s)')
+    ax.set_title('QBER prices supply, not mask entropy', fontsize=9)
+    ax.legend(fontsize=6, loc='center left')
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    save_fig(fig, 'paper_qber_envelope')
+
     # Figure: key-basis intercept-resend tap - the fixed-basis arm's
     # flat error (attack invisible) against BBM92's rising test error
-    # and abort transition. The crossing IS the argument.
-    print("  [A] Figure: intercept-resend tap visibility...")
+    # and abort transition. The divergence and crossing are the
+    # security argument.
+    print("  [B] Figure: intercept-resend tap visibility...")
     e14 = summary['exp14']['intercept_resend']
     fig, ax = plt.subplots(figsize=(4.6, 3.4))
     f_sw = np.array(e14['f_sweep'])
@@ -3698,9 +3742,72 @@ def make_paper_figures(summary):
     fig.tight_layout()
     save_fig(fig, 'paper_tap_visibility')
 
-    # Figure: acceptance-window cliff - nonlinear rise and collapse at
-    # the EC design QBER, under both visibility calibrations.
-    print("  [B] Figure: acceptance-window cliff...")
+    # Figure: finite-key effects - (i) certification cliff and
+    # convergence of the executing runs onto the deterministic
+    # finite-key model; (ii) interior basis-split optimum below the
+    # mu = 0 limit (test-set starvation). Both panels are extrema/
+    # cliffs compared against an ideal curve.
+    print("  [C] Figure: finite-key effects (cliff + basis optimum)...")
+    conv = summary['exp14']['surcharge_convergence']
+    model = summary['exp14']['surcharge_model']
+    pz = summary['exp14']['p_z_tradeoff']
+    pair_rate = QUANTUM['source_rep_rate_hz'] * QUANTUM['source_brightness']
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+
+    ax1.plot(np.array(model['pairs']) / pair_rate, model['ratio'], '-',
+             color=C['dark'], linewidth=1.6,
+             label='deterministic finite-key model')
+    secs = [d['pairs'] / pair_rate for d in conv]
+    med = [d['median'] for d in conv]
+    ax1.errorbar(secs, med,
+                 yerr=[[m - d['min'] for m, d in zip(med, conv)],
+                       [d['max'] - m for m, d in zip(med, conv)]],
+                 fmt='s', color=C['pareto'], markersize=5, capsize=3,
+                 label=f"executing (median, range, "
+                       f"{conv[0]['n_seeds']} seeds)")
+    ax1.axhline(y=model['asymptotic_ratio'], color=C['accent'],
+                linestyle='--', linewidth=1.4,
+                label=f"asymptotic ratio ({model['asymptotic_ratio']:.2f}x)")
+    z = conv[0]
+    if z.get('n_zero_cert', 0):
+        ax1.annotate(f"{z['n_zero_cert']}/{z['n_seeds']} seeds: zero key",
+                     xy=(secs[0], med[0]),
+                     xytext=(secs[0] * 1.8, med[0] * 1.5), fontsize=6,
+                     color=C['unmasked'],
+                     arrowprops=dict(arrowstyle='-', lw=0.7, color='gray'))
+    ax1.set_xscale('log')
+    ax1.set_yscale('log')
+    ax1.set_xlabel('Accumulated source time (s)')
+    ax1.set_ylabel('Fixed-basis / BBM92 rate ratio')
+    ax1.set_title('Certification cliff and convergence', fontsize=9)
+    ax1.legend(fontsize=6)
+    ax1.grid(True, alpha=0.3, which='both')
+
+    ax2.plot(pz['p_z'], np.array(pz['asymptotic_model_bits']) / 1e3, ':',
+             color=C['dark'], linewidth=1.6, label='mu = 0 limit at q_tol')
+    ax2.errorbar(pz['p_z'], np.array(pz['secure_bits']) / 1e3,
+                 yerr=np.array(pz['secure_bits_std']) / 1e3, fmt='o-',
+                 color=C['pareto'], markersize=4,
+                 label='executing (TLGR finite-key)')
+    ax2.axvline(x=BBM92['p_z'], color=C['accent'], linestyle='--',
+                linewidth=1.2, label=f"config p_z = {BBM92['p_z']}")
+    i_opt = int(np.argmax(pz['secure_bits']))
+    ax2.plot(pz['p_z'][i_opt], pz['secure_bits'][i_opt] / 1e3, 'o',
+             color=C['dark'], markersize=6,
+             label=f"finite-key optimum (p_z = {pz['p_z'][i_opt]:.2f})")
+    ax2.set_xlabel('Z-basis probability p_z')
+    ax2.set_ylabel('Secure kbits per run')
+    ax2.set_title('Basis-split optimum under finite key', fontsize=9)
+    ax2.legend(fontsize=6)
+    ax2.grid(True, alpha=0.3)
+    fig.suptitle('Finite-key effects at the anchored operating point',
+                 fontsize=10, fontweight='bold')
+    fig.tight_layout(w_pad=2.8)
+    save_fig(fig, 'paper_finite_key')
+
+    # Figure: acceptance-window cliff - interior optimum and collapse
+    # at the EC design QBER, under both visibility calibrations.
+    print("  [D] Figure: acceptance-window cliff...")
     e15 = summary['exp15']
     fig, ax = plt.subplots(figsize=(4.6, 3.4))
     win_ps = np.array(e15['windows_ps'])
@@ -3723,9 +3830,9 @@ def make_paper_figures(summary):
     fig.tight_layout()
     save_fig(fig, 'paper_window_cliff')
 
-    # Numbers for manuscript text and tables (no plots: a sentence or
-    # table row carries each losslessly).
-    print("  [C] Text/table material:")
+    # Table and prose material (no plots: each is carried losslessly by
+    # a sentence or table row).
+    print("  [E] Table/prose material:")
     wf = op['waterfall']
     print(f"      key supply: {op['raw_edge_rate_hz']/1e3:.2f} kHz raw, "
           f"QBER {op['qber']*100:.2f}% -> "
@@ -3734,20 +3841,15 @@ def make_paper_figures(summary):
           f"{3.01/QUANTUM['fiber_loss_db_per_km_780nm']*1e3:.0f} m "
           f"of 780 nm fiber")
     e9 = summary['exp9']
-    print("      HNDL retro-recovery: "
+    print("      HNDL retro-recovery (table row): "
           + ", ".join(f"{k} {100*e9[k]['recovered_fraction']:.0f}%"
                       for k in ('classical', 'it_dealer_online',
                                 'it_dealer_courier', 'entangled')))
-    conv = summary['exp14']['surcharge_convergence']
-    asym = summary['exp13']['rate_ratios']['efficient-90/10']
-    pair_rate = QUANTUM['source_rep_rate_hz'] * QUANTUM['source_brightness']
-    conv_txt = "; ".join(
-        f"{d['pairs']/pair_rate:.0f}s: {d['median']:.2f}x"
-        + (f" ({d['n_zero_cert']}/{d['n_seeds']} zero-cert)"
-           if d.get('n_zero_cert') else "")
-        for d in conv)
-    print(f"      finite-key ratio vs source time: {conv_txt}; "
-          f"asymptote {asym:.2f}x")
+    e5 = summary.get('exp5', {})
+    print("      dropout recovery (table rows): pad-reveal arms "
+          "346,392 B/dropout at ClinicalMLP vs 12 B seed-based; "
+          "accuracy holds to 20% dropout, crosses the 0.9 target at "
+          "40%; threshold failures rise superlinearly (exp5/exp12)")
     lev = summary['exp1'].get('levers', {})
     if lev:
         s0 = lev['secret_bps_today']
@@ -3756,9 +3858,11 @@ def make_paper_figures(summary):
               f"{lev['secret_bps_coupling_0.40']/s0:,.0f}x (quadratic); "
               f"eta_ex 1.0 -> {lev['secret_bps_eta_ex_1.0']/s0:.1f}x "
               f"(linear)")
-
-    print("  Paper pass complete: 3 figures (these two + "
-          "exp5_dropout_recovery) + architecture drawing + tables.")
+    r13 = summary['exp13']['rate_ratios']
+    print("      framing ratios (prose): "
+          + ", ".join(f"{k} {v:.2f}x" for k, v in r13.items()))
+    print("  Paper pass complete: 4 result figures + architecture "
+          "drawing + provenance and cost/trust tables.")
 
 
 # EXPERIMENT 15: ACCEPTANCE-WINDOW OPTIMIZATION

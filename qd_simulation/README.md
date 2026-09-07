@@ -116,17 +116,21 @@ python run_all.py --exp 1 2 3 # Specific experiments
 Results in `results/`, tiered for the publication figure budget
 (IEEE Network: six figures/tables total):
 
-- `main/` - the paper tier (ICC target): only results whose shape
-  carries the argument get a plot. exp5 (five recovery mechanisms
-  diverging over a dropout sweep) plus two figures built by
-  `python run_all.py --paper` from the full-mode summary:
-  paper_tap_visibility (flat fixed-basis error vs BBM92 abort
-  transition under the same tap) and paper_window_cliff (rate
-  rise-and-collapse at the EC design QBER, two calibrations). The
-  pass also prints the manuscript text/table numbers (key-supply
-  budget, HNDL fractions, finite-key convergence, hardware levers);
-  those and the architecture figure and provenance/SOTA tables are
-  manuscript material outside this repo
+- `main/` - the paper tier (ICC target), built by
+  `python run_all.py --paper` from the full-mode summary. Uniform
+  figure test: a result is plotted only if its claim lives in a shape
+  a sentence or table row cannot carry losslessly (extremum or
+  threshold whose location is the result, curves diverging over a
+  continuum). Four figures pass: paper_qber_envelope (supply collapses
+  at code capacity, min-entropy floor flat), paper_tap_visibility
+  (flat fixed-basis error vs BBM92 abort transition under the same
+  tap), paper_finite_key (certification cliff onto the deterministic
+  model + interior basis-split optimum), paper_window_cliff (rate
+  rise-and-collapse, two calibrations). The pass also prints the
+  table/prose numbers (key-supply budget, HNDL fractions, dropout
+  recovery costs, levers, framing ratios); those, the architecture
+  figure, and the provenance and cost/trust tables are manuscript
+  material outside this repo
 - `peripheral/` - validation, sensitivity, scaling, and comparison
   figures kept for the technical-report version and reviewers (exp1,
   2a-b, 3a, 4, 6, 7, 8a-b, 9, 10, 11, 12, 13, 14, exp14b basis split,
