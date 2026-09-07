@@ -266,6 +266,106 @@ def compute_qber_analytical(fidelity, pbs_extinction=1000, bire_contribution=0.0
     return (1 - fidelity) / 2 + 1 / pbs_extinction + bire_contribution
 
 
+def partial_transpose_b(rho):
+    """Partial transpose over the second qubit of a 4x4 two-qubit state."""
+    return rho.reshape(2, 2, 2, 2).transpose(0, 3, 2, 1).reshape(4, 4)
+
+
+def negativity_2n(rho):
+    """Twice the entanglement negativity, 2N = 2 * |sum of negative
+    eigenvalues of the partial transpose| (Vidal & Werner 2002). Ranges
+    0 (separable) to 1 (maximally entangled) for two qubits; this is the
+    "2n" quantity the source papers report."""
+    ev = np.linalg.eigvalsh(partial_transpose_b(rho))
+    return 2.0 * float(np.sum(np.abs(ev[ev < 0])))
+
+
+def werner_weight_for_negativity(two_n):
+    """Invert the Werner-family negativity 2N = (3w - 1)/2 for the Bell
+    weight w (partial-transpose eigenvalue (1 - 3w)/4; pinned against
+    negativity_2n in tests/test_anchored_source.py)."""
+    return (2.0 * two_n + 1.0) / 3.0
+
+
+# ENTANGLEMENT VS EMISSION DELAY (FSS PRECESSION)
+#
+# In the XX-X cascade the two-photon state after an X-state dwell time
+# tau is (|HH> + exp(i*Omega*tau)|VV>)/sqrt(2) with Omega = FSS/hbar:
+# maximally entangled at every exact tau, with a tau-dependent phase
+# (Winik et al., PRB 95, 235435; Hopfmann et al., PRB 103, 075413 -
+# both fit full 36-basis tomography with this model and essentially no
+# free parameters). Finite two-photon timing resolution mixes phases
+# within the detected-delay bin, and an acceptance window integrates
+# over a phase spread; both reduce the polarization coherence and hence
+# the negativity. tau is exponentially distributed with mean T1.
+
+HBAR_EV_S = 6.582119569e-16  # reduced Planck constant, eV*s (CODATA)
+
+
+def fss_precession_omega(fss_uev):
+    """Precession angular frequency Omega = FSS/hbar in rad/s."""
+    return fss_uev * 1e-6 / HBAR_EV_S
+
+
+def detected_delay_mode(t1_s, sigma_s, n_grid=4001):
+    """Detected-delay density mode: argmax of the exponential emission
+    density convolved with the Gaussian two-photon timing jitter."""
+    from scipy.special import erf
+    t = np.linspace(-4 * sigma_s, 4 * sigma_s + 3 * t1_s, n_grid)
+    # exGaussian density (up to normalization)
+    z = (sigma_s / t1_s - (t - 0.0) / sigma_s) / np.sqrt(2)
+    dens = np.exp(-t / t1_s + sigma_s ** 2 / (2 * t1_s ** 2)) \
+        * (1 - erf(z)) / 2
+    return float(t[np.argmax(dens)])
+
+
+def delay_window_coherence(t_lo_s, t_hi_s, t1_s, sigma_s, omega_rad_s,
+                           n_grid=20001):
+    """Polarization coherence and captured fraction for an acceptance
+    window [t_lo, t_hi] on the DETECTED XX-X delay.
+
+    With a(tau) the probability that a cascade emitted at true dwell
+    time tau lands in the window after Gaussian jitter of std sigma,
+
+        c        = E[a(tau) e^(i Omega tau)] / E[a(tau)],
+        captured = E[a(tau)],       tau ~ Exp(T1).
+
+    |c| is the coherence surviving the window when the deterministic
+    phase is compensated to the window centroid (standard eigenbasis
+    alignment, cf. the polarization-projection calibration in the
+    source papers). The windowed negativity is 2n = v0 * |c| with v0 a
+    delay-independent visibility calibrated to a measured anchor
+    (calibrate_visibility).
+
+    Returns (c complex, captured fraction in [0, 1]).
+    """
+    from scipy.special import erf
+
+    def phi(x):
+        return 0.5 * (1.0 + erf(x / np.sqrt(2.0)))
+
+    taus = np.linspace(0.0, 10.0 * t1_s, n_grid)
+    p = np.exp(-taus / t1_s)
+    p /= np.trapezoid(p, taus)
+    a = phi((t_hi_s - taus) / sigma_s) - phi((t_lo_s - taus) / sigma_s)
+    captured = float(np.trapezoid(p * a, taus))
+    if captured <= 0.0:
+        return 0.0 + 0.0j, 0.0
+    c = np.trapezoid(p * a * np.exp(1j * omega_rad_s * taus), taus) / captured
+    return complex(c), captured
+
+
+def calibrate_visibility(two_n_measured, t_lo_s, t_hi_s, t1_s, sigma_s,
+                         omega_rad_s):
+    """Delay-independent visibility v0 such that the window model
+    reproduces a measured negativity anchor: v0 = 2n_meas / |c(window)|."""
+    c, _ = delay_window_coherence(t_lo_s, t_hi_s, t1_s, sigma_s, omega_rad_s)
+    mag = abs(c)
+    if mag <= 0.0:
+        raise ValueError("anchor window captures no coincidences")
+    return two_n_measured / mag
+
+
 def compute_coincidence_rate(
     source_rep_rate_hz, source_brightness, coupling_efficiency,
     fiber_length_m, fiber_loss_db_per_km, detector_efficiency,
