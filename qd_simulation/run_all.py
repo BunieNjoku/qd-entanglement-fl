@@ -414,7 +414,7 @@ def run_experiment_1(quick=False):
     print("  [1d] Dual-endpoint (beamsplitter-multiplexed) edge keying...")
     from modules.m1_quantum_source import simulate_symmetric_edge
     _sym = simulate_symmetric_edge(
-        switch_split=0.5, duration_s=0.2,
+        switch_split=0.5, duration_s=2.0,
         fidelity=QUANTUM['fidelity'], source_rep_rate_hz=QUANTUM['source_rep_rate_hz'],
         source_brightness=QUANTUM['source_brightness'],
         fiber_length_m=QUANTUM['fiber_length_m'],
@@ -802,18 +802,17 @@ def run_experiment_3(quick=False):
                 heatmap[i, j] = max_n
         heatmaps.append(heatmap)
 
-    print("    Max nodes (rows = model size), modeled | projected:")
-    header = "  ".join(f"{rp:>9}s" for rp in round_periods)
+    print("    Max nodes (rows = model size, columns = round period):")
+    header = "  ".join(f"{rp:>6}s" for rp in round_periods)
     print(f"      {'':>6}  {header}")
     for i, ms in enumerate(model_sizes):
-        row = "  ".join(f"{int(heatmaps[0][i, j]):>4}|{int(heatmaps[1][i, j]):<5}"
+        row = "  ".join(f"{int(heatmaps[0][i, j]):>7}"
                         for j in range(len(round_periods)))
         print(f"      {int(ms/1000):>5}K  {row}")
 
     print("  Experiment 3 complete.")
     return {"depths": depths,
-            "heatmap_modeled": heatmaps[0].tolist(),
-            "heatmap_projected": heatmaps[1].tolist()}
+            "heatmap_anchored": heatmaps[0].tolist()}
 
 
 # EXPERIMENT 4: FL TRAINING CORRECTNESS
@@ -2339,7 +2338,10 @@ def run_experiment_10(quick=False):
 
     # (a) Source-level empirical check: an edge with one endpoint's
     # source dead continues from the far endpoint at ~half rate.
-    dur = 0.01 if quick else 0.05
+    # Durations sized for the anchored per-pair coincidence probability
+    # (~7.8e-5 at 100 m): 0.5 s / 2 s give ~3k / ~12k coincidences, so
+    # the half-rate assertion window is many sigma wide.
+    dur = 0.5 if quick else 2.0
     kw = dict(fidelity=QUANTUM['fidelity'], fiber_length_m=100)
     edge_full = simulate_symmetric_edge(
         duration_s=dur, rng=np.random.default_rng(42), **kw)
