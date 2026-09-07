@@ -117,14 +117,14 @@ Results in `results/`, tiered for the publication figure budget
 (IEEE Network: six figures/tables total):
 
 - `main/` - the paper tier (ICC target): exp5 (dropout accuracy and
-  five-arm recovery cost) plus four composite figures built by
+  five-arm recovery cost) plus three composite figures built by
   `python run_all.py --paper` from the full-mode summary:
-  paper_fig2_key_supply (waterfall + rate vs edge length),
-  paper_fig3_security (HNDL arms + intercept-resend visibility),
-  paper_fig4_finite_key (surcharge convergence vs source time),
-  paper_fig6_limits_levers (window cliff + hardware levers). The
-  architecture figure and the provenance/SOTA tables are manuscript
-  material outside this repo
+  paper_security (HNDL arms + intercept-resend visibility),
+  paper_finite_key (surcharge convergence vs source time),
+  paper_limits_levers (window cliff + hardware levers). The
+  architecture figure, the per-edge key-supply numbers (waterfall and
+  distance scaling read as text/table), and the provenance/SOTA
+  tables are manuscript material outside this repo
 - `peripheral/` - validation, sensitivity, scaling, and comparison
   figures kept for the technical-report version and reviewers (exp1,
   2a-b, 3a, 4, 6, 7, 8a-b, 9, 10, 11, 12, 13, 14, exp14b basis split,

@@ -114,10 +114,9 @@ _OUTPUT_SUFFIX = ""
 # repo. Everything else is peripheral.
 MAIN_FIGURES = {
     'exp5_dropout_recovery',
-    'paper_fig2_key_supply',
-    'paper_fig3_security',
-    'paper_fig4_finite_key',
-    'paper_fig6_limits_levers',
+    'paper_security',
+    'paper_finite_key',
+    'paper_limits_levers',
 }
 
 
@@ -3684,49 +3683,8 @@ def make_paper_figures(summary):
     c_now = QUANTUM['coupling_efficiency']
     eta_now = QUANTUM['source_brightness']
 
-    # F2: anchored key supply - waterfall + secret rate vs edge length
-    print("  [F2] Key supply: waterfall + rate vs edge length...")
-    wf = compute_rate_waterfall(
-        op['raw_edge_rate_hz'], op['qber'],
-        code_rate=POST_PROC['ldpc_code_rate'],
-        security_margin=POST_PROC['security_margin_bits'],
-        block_size=POST_PROC['block_size'],
-        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
-        tagged_fraction=op['tagged_fraction'])
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    stages = ['Raw', 'Sift', 'EC', 'PA', 'Verif', 'Final']
-    vals = [wf['raw_coincidence_rate'], wf['after_sifting'], wf['after_ec'],
-            wf['after_pa'], wf['after_verification'], wf['final_secure_rate']]
-    ax1.bar(stages, [v / 1e3 for v in vals],
-            color=[C['dark']] + [C['quantum']] * 4 + [C['pareto']],
-            edgecolor='white', linewidth=1.5)
-    ax1.set_ylabel('Rate (kbit/s)')
-    ax1.set_title(f"Distillation waterfall, QBER {op['qber']*100:.2f}%\n"
-                  f"{op['raw_edge_rate_hz']/1e3:.2f} kHz raw -> "
-                  f"{wf['final_secure_rate']/1e3:.2f} kbit/s", fontsize=8)
-    ax1.grid(True, alpha=0.2, axis='y')
-
-    lengths = np.linspace(100, 5000, 60)
-    ax2.semilogy(lengths / 1e3,
-                 [_secret_rate_at(c_now, eta_now, fl) / 1e3
-                  for fl in lengths],
-                 '-', color=C['quantum'], linewidth=2)
-    ax2.plot(QUANTUM['fiber_length_m'] / 1e3,
-             op['secret_rate_bps'] / 1e3, 'o', color=C['dark'],
-             markersize=6,
-             label=f"operating point ({QUANTUM['fiber_length_m']} m)")
-    ax2.set_xlabel('Edge length (km)')
-    ax2.set_ylabel('Secret rate (kbit/s)')
-    ax2.set_title('Secret rate vs edge length (780 nm)', fontsize=9)
-    ax2.legend(fontsize=7)
-    ax2.grid(True, alpha=0.3, which='both')
-    fig.suptitle('Anchored per-edge key supply', fontsize=10,
-                 fontweight='bold')
-    fig.tight_layout(w_pad=2.5)
-    save_fig(fig, 'paper_fig2_key_supply')
-
     # F3: security - HNDL retro-recovery + live tap visibility
-    print("  [F3] Security: HNDL arms + intercept-resend visibility...")
+    print("  [A] Security: HNDL arms + intercept-resend visibility...")
     e9 = summary['exp9']
     e14 = summary['exp14']['intercept_resend']
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
@@ -3776,10 +3734,10 @@ def make_paper_figures(summary):
     fig.suptitle('Security evaluation: retroactive and live adversaries',
                  fontsize=10, fontweight='bold')
     fig.tight_layout(w_pad=2.8)
-    save_fig(fig, 'paper_fig3_security')
+    save_fig(fig, 'paper_security')
 
     # F4: finite-key convergence in seconds of source time
-    print("  [F4] Finite-key penalty vs accumulated source time...")
+    print("  [B] Finite-key penalty vs accumulated source time...")
     conv = summary['exp14']['surcharge_convergence']
     asym = summary['exp13']['rate_ratios']['efficient-90/10']
     pair_rate = QUANTUM['source_rep_rate_hz'] * QUANTUM['source_brightness']
@@ -3808,10 +3766,10 @@ def make_paper_figures(summary):
     ax.legend(fontsize=6)
     ax.grid(True, alpha=0.3, which='both')
     fig.tight_layout()
-    save_fig(fig, 'paper_fig4_finite_key')
+    save_fig(fig, 'paper_finite_key')
 
     # F6: rate limits and levers
-    print("  [F6] Limits and levers: window cliff + hardware levers...")
+    print("  [C] Limits and levers: window cliff + hardware levers...")
     e15 = summary['exp15']
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     win_ps = np.array(e15['windows_ps'])
@@ -3857,10 +3815,12 @@ def make_paper_figures(summary):
     fig.suptitle('Rate limits and improvement levers', fontsize=10,
                  fontweight='bold')
     fig.tight_layout(w_pad=2.5)
-    save_fig(fig, 'paper_fig6_limits_levers')
+    save_fig(fig, 'paper_limits_levers')
 
-    print("  Paper figures complete (F5 = exp5_dropout_recovery as-is; "
-          "F1 architecture and tables are manuscript material).")
+    print("  Paper figures complete (exp5_dropout_recovery joins them "
+          "as-is; the architecture figure, the key-supply numbers, and "
+          "the provenance/SOTA tables are manuscript text/table "
+          "material).")
 
 
 # EXPERIMENT 15: ACCEPTANCE-WINDOW OPTIMIZATION
