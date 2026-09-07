@@ -127,8 +127,9 @@ Results in `results/`, tiered for the publication figure budget
   flat entropy floor), paper_security (four provisioning arms under
   the recorder; two protocols under the same live tap),
   paper_finite_key (executing runs vs the deterministic model;
-  executing basis split vs the ideal limit), paper_window_cliff
-  (receiver window choices vs the time-resolved operating point). The
+  executing basis split vs the ideal limit), paper_limits_levers
+  (receiver window choices vs the time-resolved operating point;
+  today's hardware vs the group's published device roadmap). The
   architecture figure and the provenance and cost/trust tables are
   manuscript material outside this repo
 - `peripheral/` - validation, sensitivity, scaling, and comparison

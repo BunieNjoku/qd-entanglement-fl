@@ -117,7 +117,7 @@ MAIN_FIGURES = {
     'paper_qber_envelope',
     'paper_security',
     'paper_finite_key',
-    'paper_window_cliff',
+    'paper_limits_levers',
 }
 
 
@@ -3664,6 +3664,25 @@ def run_experiment_14(quick=False):
 # checks, and single scalars are prose/table material; the pass prints
 # those numbers so the manuscript quotes one source.
 
+def _paper_secret_rate(coupling, eta_ex, fiber_length_m):
+    """Distilled secret rate at a hardware point, QBER held at the
+    operating value (these axes do not move entanglement quality)."""
+    raw = compute_coincidence_rate(
+        QUANTUM['source_rep_rate_hz'], eta_ex, coupling, fiber_length_m,
+        QUANTUM['fiber_loss_db_per_km_780nm'], QUANTUM['detector_efficiency'],
+        colocated=QUANTUM.get('colocated', True),
+        local_optics_efficiency=QUANTUM['local_optics_efficiency'])
+    wf = compute_rate_waterfall(
+        raw, OPERATING_POINT['qber'],
+        code_rate=POST_PROC['ldpc_code_rate'],
+        security_margin=POST_PROC['security_margin_bits'],
+        block_size=POST_PROC['block_size'],
+        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+        tagged_fraction=(QUANTUM['multi_photon_prob']
+                         / QUANTUM['source_brightness']))
+    return wf['final_secure_rate']
+
+
 def make_paper_figures(summary):
     print("\n" + "="*70)
     print("PAPER PASS: plots where shape argues; tables/prose otherwise")
@@ -3823,30 +3842,62 @@ def make_paper_figures(summary):
     fig.tight_layout(w_pad=2.8)
     save_fig(fig, 'paper_finite_key')
 
-    # Figure: acceptance-window cliff - interior optimum and collapse
-    # at the EC design QBER, under both visibility calibrations.
-    print("  [D] Figure: acceptance-window cliff...")
+    # Figure: rate limits and levers - (a) the acceptance-window cliff
+    # (two visibility calibrations vs the time-resolved operating
+    # point: what caps the rate at today's hardware); (b) the hardware
+    # levers (today's device vs the group's published roadmap: what
+    # raises it).
+    print("  [D] Figure: rate limits and levers...")
     e15 = summary['exp15']
-    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     win_ps = np.array(e15['windows_ps'])
     for (label, res), ls, col in zip(e15['calibrations'].items(),
                                      ('-', '--'), (C['pareto'], C['dark'])):
-        ax.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
-                linewidth=1.8, label=label.split(' (')[0])
-        ax.plot(res['opt_window_ps'], res['opt_secret_bps'] / 1e3, 'o',
-                color=col, markersize=5)
-    ax.axhline(y=op['secret_rate_bps'] / 1e3, color=C['quantum'],
-               linestyle=':', linewidth=1.2,
-               label='time-resolved operating point')
-    ax.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
-               label='T1')
-    ax.set_xlabel('Acceptance window (ps)')
-    ax.set_ylabel('Secret rate (kbit/s)')
-    ax.set_title('Window cliff (phase-blind receiver)', fontsize=9)
-    ax.legend(fontsize=6)
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    save_fig(fig, 'paper_window_cliff')
+        ax1.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
+                 linewidth=1.8, label=label.split(' (')[0])
+        ax1.plot(res['opt_window_ps'], res['opt_secret_bps'] / 1e3, 'o',
+                 color=col, markersize=5)
+    ax1.axhline(y=op['secret_rate_bps'] / 1e3, color=C['quantum'],
+                linestyle=':', linewidth=1.2,
+                label='time-resolved operating point')
+    ax1.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
+                label='T1')
+    ax1.set_xlabel('Acceptance window (ps)')
+    ax1.set_ylabel('Secret rate (kbit/s)')
+    ax1.set_title('Window cliff (phase-blind receiver)', fontsize=9)
+    ax1.legend(fontsize=6)
+    ax1.grid(True, alpha=0.3)
+
+    c_now = QUANTUM['coupling_efficiency']
+    eta_now = QUANTUM['source_brightness']
+    fl_m = QUANTUM['fiber_length_m']
+    cs = np.logspace(np.log10(0.004), np.log10(0.45), 40)
+    ax2.loglog(cs, [_paper_secret_rate(c, eta_now, fl_m) / 1e3
+                    for c in cs],
+               '-', color=C['quantum'], linewidth=2,
+               label='coupling lever (quadratic)')
+    for cval, mlabel, col in (
+            (c_now, f'today ({c_now:.4f})', C['dark']),
+            (0.21, 'microlens theory (Langer 2025)', C['accent']),
+            (0.40, 'CBG simulated (Dhurjati 2026)', C['pareto'])):
+        ax2.plot(cval, _paper_secret_rate(cval, eta_now, fl_m) / 1e3, 'o',
+                 color=col, markersize=6, zorder=5, label=mlabel)
+    s_eta1 = _paper_secret_rate(c_now, 1.0, fl_m)
+    ax2.plot(c_now, s_eta1 / 1e3, '^', color=C['unmasked'], markersize=7,
+             zorder=5,
+             label='charge stabilization at today\'s optics '
+                   f'({s_eta1/op["secret_rate_bps"]:.0f}x, linear)')
+    ax2.set_ylim(0.2, 2e4)
+    ax2.set_xlabel('Per-arm coupling efficiency')
+    ax2.set_ylabel('Secret rate (kbit/s)')
+    ax2.set_title(f'Hardware levers vs roadmap, {fl_m} m edge',
+                  fontsize=9)
+    ax2.legend(fontsize=6, loc='lower right')
+    ax2.grid(True, alpha=0.3, which='both')
+    fig.suptitle('Rate limits and improvement levers', fontsize=10,
+                 fontweight='bold')
+    fig.tight_layout(w_pad=2.5)
+    save_fig(fig, 'paper_limits_levers')
 
     # Table and prose material (no plots: each is carried losslessly by
     # a sentence or table row).
