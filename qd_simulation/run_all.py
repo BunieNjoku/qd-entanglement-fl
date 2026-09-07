@@ -3922,7 +3922,7 @@ def make_paper_figures(summary):
                    f"{pz['secure_bits'][i_opt]/1e3:.0f} kbit)")
     ax2.set_ylim(bottom=0)
     ax2.set_xlabel('Z-basis probability p_z')
-    ax2.set_ylabel('Secure kbits per 20 s run')
+    ax2.set_ylabel('Secure kbits per 40 s run')
     ax2.set_title('Basis-split optimum under finite key', fontsize=9)
     ax2.legend(fontsize=6)
     ax2.grid(True, alpha=0.3)
