@@ -114,6 +114,13 @@ class TranscriptRound:
     # None in the other arms (the courier arm's pads never touch a
     # recorded channel).
     dealer_pad_bits: Dict[Tuple[int, int], np.ndarray] = None
+    # Dealer arms only (online AND courier): the provisioning party's OWN
+    # archive of every pad it generated. NOT part of the transcript - the
+    # recorder never sees it; it is consumed only by the second adversary
+    # (retroactive_attack with provisioner_compromise=True), which models
+    # compromise or subpoena of the dealer itself. None in the classical
+    # and entangled arms: no third party holds their key material.
+    provisioner_pad_bits: Dict[Tuple[int, int], np.ndarray] = None
     # --- ground truth for scoring (NOT in the transcript) ---
     truth_quant: Dict[int, np.ndarray] = field(default_factory=dict)
 
@@ -226,12 +233,18 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
         # computational encryption) - the recorder keeps the ciphertexts.
         dealer_pad_bits=(dict(pair_bits) if arm == "it_dealer_online"
                          else None),
+        # Whatever the delivery channel, the DEALER generated these pads
+        # and can retain them: its archive exists in both dealer arms.
+        provisioner_pad_bits=(dict(pair_bits)
+                              if arm in ("it_dealer_online",
+                                         "it_dealer_courier") else None),
         truth_quant=quant,
     )
     return tr, agg
 
 
-def retroactive_attack(transcript: List[TranscriptRound], arm):
+def retroactive_attack(transcript: List[TranscriptRound], arm,
+                       provisioner_compromise=False):
     """Replay the recorded transcript with god-mode over computational
     secrets; attempt to unmask every recorded payload.
 
@@ -243,6 +256,14 @@ def retroactive_attack(transcript: List[TranscriptRound], arm):
     arm additionally: recorded pad ciphertexts opened. The courier-
     dealer and entangled arms grant nothing further - there is nothing
     further in their transcripts.
+
+    provisioner_compromise=True adds the second adversary: the recorder
+    ALSO obtains the provisioning party's own key archive (dealer
+    compromise or subpoena). This hands over provisioner_pad_bits where
+    a provisioning third party exists (both dealer arms) and nothing
+    where none does (classical: keys negotiated pairwise; entangled:
+    keys distilled pairwise) - so the same adversary runs against every
+    arm and the difference in outcome is the arm's trust structure.
 
     Returns per-payload records and summary fractions.
     """
@@ -275,6 +296,12 @@ def retroactive_attack(transcript: List[TranscriptRound], arm):
                     # every pairwise pad is in the transcript.
                     mask = derive_modular_mask(
                         n_params, tr.dealer_pad_bits[(lo, hi)])
+                elif (provisioner_compromise
+                      and tr.provisioner_pad_bits is not None
+                      and (lo, hi) in tr.provisioner_pad_bits):
+                    # Second adversary: the dealer's own archive.
+                    mask = derive_modular_mask(
+                        n_params, tr.provisioner_pad_bits[(lo, hi)])
                 elif (lo, hi) in tr.revealed_pair_bits:
                     mask = derive_modular_mask(
                         n_params, tr.revealed_pair_bits[(lo, hi)])

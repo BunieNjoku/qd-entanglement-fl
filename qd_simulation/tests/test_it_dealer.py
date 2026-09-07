@@ -111,6 +111,36 @@ def test_hndl_three_way():
                               "entangled")["recovered_fraction"] == 0.0
 
 
+def test_provisioner_compromise():
+    """The second adversary (recorder + dealer archive) opens BOTH
+    dealer arms - courier included - and still nothing in the
+    entangled arm, which has no provisioning third party."""
+    rng = np.random.default_rng(23)
+    n = 3
+    cluster = list(range(n))
+    grads = {c: torch.tensor(rng.normal(0, 0.1, D), dtype=torch.float32)
+             for c in cluster}
+    self_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME)) for c in cluster}
+    tr = {"it_dealer_courier": [], "entangled": []}
+    for rd, drops in enumerate([set(), {2}]):
+        for arm in tr:
+            t, _ = run_transcript_round(rd, grads, cluster, drops, arm,
+                                        pairwise_pool=_pool(rng, n_pairs=3),
+                                        self_seeds=self_seeds)
+            tr[arm].append(t)
+    # recorder alone: courier survives
+    assert retroactive_attack(
+        tr["it_dealer_courier"],
+        "it_dealer_courier")["recovered_fraction"] == 0.0
+    # recorder + dealer archive: courier falls, entangled does not
+    assert retroactive_attack(
+        tr["it_dealer_courier"], "it_dealer_courier",
+        provisioner_compromise=True)["recovered_fraction"] == 1.0
+    assert retroactive_attack(
+        tr["entangled"], "entangled",
+        provisioner_compromise=True)["recovered_fraction"] == 0.0
+
+
 def test_determinism():
     """Design test 6: a fixed-seed five-arm run is identical across
     repeats - aggregates and byte counts (wall-clock fields excluded:

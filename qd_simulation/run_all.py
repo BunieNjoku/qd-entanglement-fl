@@ -2272,6 +2272,18 @@ def run_experiment_9(quick=False):
     atk_d = retroactive_attack(tr_dlr, "it_dealer_online")
     atk_k = retroactive_attack(tr_cou, "it_dealer_courier")
     atk_e = retroactive_attack(tr_ent, "entangled")
+    # Second adversary: the same recorder ALSO obtains the provisioning
+    # party's own key archive (dealer compromise/subpoena). Run against
+    # every arm; only arms with a provisioning third party have an
+    # archive to hand over.
+    atk2_c = retroactive_attack(tr_cls, "classical",
+                                provisioner_compromise=True)
+    atk2_d = retroactive_attack(tr_dlr, "it_dealer_online",
+                                provisioner_compromise=True)
+    atk2_k = retroactive_attack(tr_cou, "it_dealer_courier",
+                                provisioner_compromise=True)
+    atk2_e = retroactive_attack(tr_ent, "entangled",
+                                provisioner_compromise=True)
 
     print("\n  Retroactive god-mode attack on the recorded transcripts")
     print("  (adversary recomputes every COMPUTATIONAL secret: channel "
@@ -2297,6 +2309,24 @@ def run_experiment_9(quick=False):
         "courier-dealer arm leaked a payload - nothing was on the wire"
     assert atk_e["recovered_fraction"] == 0.0, \
         "entangled arm leaked a payload - HNDL claim violated"
+    print("\n  Second adversary: recorder + provisioning-party archive "
+          "(dealer compromise/subpoena):")
+    for label, atk in [("classical (no third party)", atk2_c),
+                       ("IT dealer (online provisioning)", atk2_d),
+                       ("IT dealer (courier provisioning)", atk2_k),
+                       ("entangled (no third party)", atk2_e)]:
+        print(f"    {label:<34} recovered "
+              f"{100*atk['recovered_fraction']:>5.1f}%")
+    print("    -> the courier arm's immunity is against the CHANNEL "
+          "recorder only: the dealer\n       generated and holds every "
+          "pad, so its compromise opens everything. The\n       "
+          "entangled arm has no third party whose compromise could "
+          "hand over the keys.")
+    assert atk2_k["recovered_fraction"] == 1.0, \
+        "courier arm should fall to its own dealer's archive"
+    assert atk2_d["recovered_fraction"] == 1.0
+    assert atk2_e["recovered_fraction"] == 0.0, \
+        "entangled arm has no provisioner archive to fall to"
     assert atk_e["min_masks_remaining"] >= 1, \
         "a delivered payload lost all pairwise masks - t>=2 argument violated"
 
@@ -2375,6 +2405,12 @@ def run_experiment_9(quick=False):
         "it_dealer_courier": {k: v for k, v in atk_k.items()
                               if k != "records"},
         "entangled": {k: v for k, v in atk_e.items() if k != "records"},
+        "provisioner_compromise": {
+            "classical": atk2_c["recovered_fraction"],
+            "it_dealer_online": atk2_d["recovered_fraction"],
+            "it_dealer_courier": atk2_k["recovered_fraction"],
+            "entangled": atk2_e["recovered_fraction"],
+        },
         "rounds": num_rounds,
         "payloads_per_arm": atk_c["n_payloads"],
     }
@@ -3734,17 +3770,27 @@ def make_paper_figures(summary):
                 'entangled']
     arm_labels = ['classical\n(DH/PRF)', 'dealer\n(online)',
                   'dealer\n(courier)', 'entangled\n(distilled)']
-    fracs = [100 * e9[k]['recovered_fraction'] for k in arm_keys]
-    bars = ax1.bar(arm_labels, fracs,
-                   color=[C['unmasked'], C['accent'], C['prng'],
-                          C['quantum']], edgecolor='white')
-    for b, fr in zip(bars, fracs):
-        ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 1.5,
-                 f'{fr:.0f}%', ha='center', fontsize=7)
+    rec = [100 * e9[k]['recovered_fraction'] for k in arm_keys]
+    prov = [100 * e9['provisioner_compromise'][k] for k in arm_keys]
+    x = np.arange(len(arm_keys))
+    w = 0.38
+    b1 = ax1.bar(x - w / 2, rec, w, color=C['unmasked'],
+                 edgecolor='white', label='channel recorder (HNDL)')
+    b2 = ax1.bar(x + w / 2, prov, w, color=C['dark'],
+                 edgecolor='white', hatch='//',
+                 label='recorder + provisioner archive')
+    for bars in (b1, b2):
+        for b in bars:
+            ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 1.5,
+                     f'{b.get_height():.0f}%', ha='center', fontsize=6)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(arm_labels, fontsize=7)
     ax1.set_ylabel('Payloads retro-recovered (%)')
-    ax1.set_ylim(0, 112)
-    ax1.set_title('HNDL transcript attack by provisioning arm',
+    ax1.set_ylim(0, 142)
+    ax1.set_yticks([0, 25, 50, 75, 100])
+    ax1.set_title('Retroactive recovery under two adversaries',
                   fontsize=8)
+    ax1.legend(fontsize=6, loc='upper right')
     ax1.grid(True, alpha=0.2, axis='y')
 
     f_sw = np.array(e14['f_sweep'])
