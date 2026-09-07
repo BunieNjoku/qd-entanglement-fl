@@ -116,15 +116,17 @@ python run_all.py --exp 1 2 3 # Specific experiments
 Results in `results/`, tiered for the publication figure budget
 (IEEE Network: six figures/tables total):
 
-- `main/` - the paper tier (ICC target): exp5 (dropout accuracy and
-  five-arm recovery cost) plus three composite figures built by
+- `main/` - the paper tier (ICC target): only results whose shape
+  carries the argument get a plot. exp5 (five recovery mechanisms
+  diverging over a dropout sweep) plus two figures built by
   `python run_all.py --paper` from the full-mode summary:
-  paper_security (HNDL arms + intercept-resend visibility),
-  paper_finite_key (surcharge convergence vs source time),
-  paper_limits_levers (window cliff + hardware levers). The
-  architecture figure, the per-edge key-supply numbers (waterfall and
-  distance scaling read as text/table), and the provenance/SOTA
-  tables are manuscript material outside this repo
+  paper_tap_visibility (flat fixed-basis error vs BBM92 abort
+  transition under the same tap) and paper_window_cliff (rate
+  rise-and-collapse at the EC design QBER, two calibrations). The
+  pass also prints the manuscript text/table numbers (key-supply
+  budget, HNDL fractions, finite-key convergence, hardware levers);
+  those and the architecture figure and provenance/SOTA tables are
+  manuscript material outside this repo
 - `peripheral/` - validation, sensitivity, scaling, and comparison
   figures kept for the technical-report version and reviewers (exp1,
   2a-b, 3a, 4, 6, 7, 8a-b, 9, 10, 11, 12, 13, 14, exp14b basis split,

@@ -114,9 +114,8 @@ _OUTPUT_SUFFIX = ""
 # repo. Everything else is peripheral.
 MAIN_FIGURES = {
     'exp5_dropout_recovery',
-    'paper_security',
-    'paper_finite_key',
-    'paper_limits_levers',
+    'paper_tap_visibility',
+    'paper_window_cliff',
 }
 
 
@@ -3651,176 +3650,115 @@ def run_experiment_14(quick=False):
 
 # PAPER FIGURE PASS (--paper)
 #
-# Builds the four composite paper figures from the full-mode
-# summary.json (source of record) plus config-derived analytics. Panel
-# content re-tiers existing experiment results; no new simulation runs.
-
-def _secret_rate_at(coupling, eta_ex, fiber_length_m, qber=None):
-    """Distilled secret rate through the m2 waterfall for an analytic
-    coincidence rate at the given hardware point (QBER defaults to the
-    operating value: these axes do not move entanglement quality)."""
-    raw = compute_coincidence_rate(
-        QUANTUM['source_rep_rate_hz'], eta_ex, coupling, fiber_length_m,
-        QUANTUM['fiber_loss_db_per_km_780nm'], QUANTUM['detector_efficiency'],
-        colocated=QUANTUM.get('colocated', True),
-        local_optics_efficiency=QUANTUM['local_optics_efficiency'])
-    wf = compute_rate_waterfall(
-        raw, OPERATING_POINT['qber'] if qber is None else qber,
-        code_rate=POST_PROC['ldpc_code_rate'],
-        security_margin=POST_PROC['security_margin_bits'],
-        block_size=POST_PROC['block_size'],
-        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
-        tagged_fraction=(QUANTUM['multi_photon_prob']
-                         / QUANTUM['source_brightness']))
-    return wf['final_secure_rate']
-
+# Builds the paper-tier figures from the full-mode summary.json (source
+# of record); no new simulation runs. Only results whose SHAPE carries
+# the argument get a plot; everything else is emitted as numbers for
+# manuscript text and tables. Figure test: if a sentence or table row
+# carries the content losslessly, it is not a figure.
 
 def make_paper_figures(summary):
     print("\n" + "="*70)
-    print("PAPER FIGURE PASS: composite figures from the full-mode summary")
+    print("PAPER PASS: figures where shape argues, numbers where it "
+          "does not")
     print("="*70)
     op = OPERATING_POINT
-    c_now = QUANTUM['coupling_efficiency']
-    eta_now = QUANTUM['source_brightness']
 
-    # F3: security - HNDL retro-recovery + live tap visibility
-    print("  [A] Security: HNDL arms + intercept-resend visibility...")
-    e9 = summary['exp9']
+    # Figure: key-basis intercept-resend tap - the fixed-basis arm's
+    # flat error (attack invisible) against BBM92's rising test error
+    # and abort transition. The crossing IS the argument.
+    print("  [A] Figure: intercept-resend tap visibility...")
     e14 = summary['exp14']['intercept_resend']
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    arm_keys = ['classical', 'it_dealer_online', 'it_dealer_courier',
-                'entangled']
-    arm_labels = ['classical\n(DH/PRF)', 'dealer\n(online)',
-                  'dealer\n(courier)', 'entangled\n(distilled)']
-    fracs = [100 * e9[k]['recovered_fraction'] for k in arm_keys]
-    bars = ax1.bar(arm_labels, fracs,
-                   color=[C['unmasked'], C['accent'], C['prng'],
-                          C['quantum']], edgecolor='white')
-    for b, f in zip(bars, fracs):
-        ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 1.5,
-                 f'{f:.0f}%', ha='center', fontsize=7)
-    ax1.set_ylabel('Payloads retro-recovered (%)')
-    ax1.set_ylim(0, 112)
-    ax1.set_title('HNDL transcript attack\n(record now, break DH/PRF/TLS '
-                  'later)', fontsize=8)
-    ax1.grid(True, alpha=0.2, axis='y')
-
+    fig, ax = plt.subplots(figsize=(4.6, 3.4))
     f_sw = np.array(e14['f_sweep'])
-    ax2.plot(f_sw * 100, np.array(e14['fixed_qber']) * 100, 'o-',
-             color=C['dark'], linewidth=1.6, markersize=4,
-             label='fixed-basis QBER (attack invisible)')
-    ax2.plot(f_sw * 100, np.array(e14['bbm92_e_x']) * 100, 's-',
-             color=C['quantum'], linewidth=1.6, markersize=4,
-             label='BBM92 test-set error e_x')
-    ax2.axhline(y=BBM92['q_tol'] * 100, color=C['unmasked'],
-                linestyle='--', linewidth=1.2,
-                label=f"abort threshold q_tol ({BBM92['q_tol']*100:.0f}%)")
-    ax2.axvline(x=e14['analytic_f_star'] * 100, color='gray',
-                linestyle=':', linewidth=1,
-                label=f"analytic f* ({e14['analytic_f_star']*100:.1f}%)")
-    ax2b = ax2.twinx()
-    ax2b.plot(f_sw * 100, e14['bbm92_abort_prob'], '^--',
-              color=C['pareto'], linewidth=1.2, markersize=4)
-    ax2b.set_ylabel('BBM92 abort probability', color=C['pareto'],
-                    fontsize=8)
-    ax2b.set_ylim(-0.05, 1.05)
-    ax2.set_xlabel('Intercepted fraction of fiber photons (%)')
-    ax2.set_ylabel('Error rate (%)')
-    ax2.set_xscale('symlog', linthresh=1.0)
-    ax2.set_xlim(0, 110)
-    ax2.set_title('Key-basis intercept-resend tap', fontsize=9)
-    ax2.legend(fontsize=6, loc='upper left')
-    ax2.grid(True, alpha=0.3)
-    fig.suptitle('Security evaluation: retroactive and live adversaries',
-                 fontsize=10, fontweight='bold')
-    fig.tight_layout(w_pad=2.8)
-    save_fig(fig, 'paper_security')
-
-    # F4: finite-key convergence in seconds of source time
-    print("  [B] Finite-key penalty vs accumulated source time...")
-    conv = summary['exp14']['surcharge_convergence']
-    asym = summary['exp13']['rate_ratios']['efficient-90/10']
-    pair_rate = QUANTUM['source_rep_rate_hz'] * QUANTUM['source_brightness']
-    secs = [d['pairs'] / pair_rate for d in conv]
-    med = [d['median'] for d in conv]
-    lo = [d['min'] for d in conv]
-    hi = [d['max'] for d in conv]
-    fig, ax = plt.subplots(figsize=VIZ['figsize_single'])
-    ax.fill_between(secs, lo, hi, color=C['quantum'], alpha=0.2,
-                    label='seed range (10 seeds)')
-    ax.plot(secs, med, 'o-', color=C['quantum'], linewidth=2,
-            label='median executing ratio')
-    ax.axhline(y=asym, color=C['pareto'], linestyle='--', linewidth=1.5,
-               label=f'asymptotic waterfall ratio ({asym:.2f}x)')
-    z = conv[0]
-    if z.get('n_zero_cert', 0):
-        ax.annotate(f"{z['n_zero_cert']}/{z['n_seeds']} seeds certify\n"
-                    f"zero key here", xy=(secs[0], med[0]),
-                    xytext=(secs[0] * 1.6, med[0] * 0.55), fontsize=6,
-                    arrowprops=dict(arrowstyle='-', lw=0.7, color='gray'))
-    ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_xlabel('Accumulated source time (s)')
-    ax.set_ylabel('Fixed-basis / BBM92 rate ratio')
-    ax.set_title('Finite-key surcharge convergence', fontsize=9)
-    ax.legend(fontsize=6)
-    ax.grid(True, alpha=0.3, which='both')
+    ax.plot(f_sw * 100, np.array(e14['fixed_qber']) * 100, 'o-',
+            color=C['dark'], linewidth=1.6, markersize=4,
+            label='fixed-basis QBER (attack invisible)')
+    ax.plot(f_sw * 100, np.array(e14['bbm92_e_x']) * 100, 's-',
+            color=C['quantum'], linewidth=1.6, markersize=4,
+            label='BBM92 test-set error e_x')
+    ax.axhline(y=BBM92['q_tol'] * 100, color=C['unmasked'],
+               linestyle='--', linewidth=1.2,
+               label=f"abort threshold q_tol ({BBM92['q_tol']*100:.0f}%)")
+    ax.axvline(x=e14['analytic_f_star'] * 100, color='gray',
+               linestyle=':', linewidth=1,
+               label=f"analytic f* ({e14['analytic_f_star']*100:.1f}%)")
+    axb = ax.twinx()
+    axb.plot(f_sw * 100, e14['bbm92_abort_prob'], '^--',
+             color=C['pareto'], linewidth=1.2, markersize=4)
+    axb.set_ylabel('BBM92 abort probability', color=C['pareto'],
+                   fontsize=8)
+    axb.set_ylim(-0.05, 1.05)
+    ax.set_xlabel('Intercepted fraction of fiber photons (%)')
+    ax.set_ylabel('Error rate (%)')
+    ax.set_xscale('symlog', linthresh=1.0)
+    ax.set_xlim(0, 110)
+    ax.set_title('Key-basis intercept-resend tap', fontsize=9)
+    ax.legend(fontsize=6, loc='upper left')
+    ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    save_fig(fig, 'paper_finite_key')
+    save_fig(fig, 'paper_tap_visibility')
 
-    # F6: rate limits and levers
-    print("  [C] Limits and levers: window cliff + hardware levers...")
+    # Figure: acceptance-window cliff - nonlinear rise and collapse at
+    # the EC design QBER, under both visibility calibrations.
+    print("  [B] Figure: acceptance-window cliff...")
     e15 = summary['exp15']
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    fig, ax = plt.subplots(figsize=(4.6, 3.4))
     win_ps = np.array(e15['windows_ps'])
     for (label, res), ls, col in zip(e15['calibrations'].items(),
                                      ('-', '--'), (C['pareto'], C['dark'])):
-        ax1.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
-                 linewidth=1.8, label=label.split(' (')[0])
-        ax1.plot(res['opt_window_ps'], res['opt_secret_bps'] / 1e3, 'o',
-                 color=col, markersize=5)
-    ax1.axhline(y=op['secret_rate_bps'] / 1e3, color=C['quantum'],
-                linestyle=':', linewidth=1.2,
-                label='time-resolved operating point')
-    ax1.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
-                label='T1')
-    ax1.set_xlabel('Acceptance window (ps)')
-    ax1.set_ylabel('Secret rate (kbit/s)')
-    ax1.set_title('Window cliff (phase-blind receiver)', fontsize=9)
-    ax1.legend(fontsize=6)
-    ax1.grid(True, alpha=0.3)
+        ax.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
+                linewidth=1.8, label=label.split(' (')[0])
+        ax.plot(res['opt_window_ps'], res['opt_secret_bps'] / 1e3, 'o',
+                color=col, markersize=5)
+    ax.axhline(y=op['secret_rate_bps'] / 1e3, color=C['quantum'],
+               linestyle=':', linewidth=1.2,
+               label='time-resolved operating point')
+    ax.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
+               label='T1')
+    ax.set_xlabel('Acceptance window (ps)')
+    ax.set_ylabel('Secret rate (kbit/s)')
+    ax.set_title('Window cliff (phase-blind receiver)', fontsize=9)
+    ax.legend(fontsize=6)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    save_fig(fig, 'paper_window_cliff')
 
-    cs = np.logspace(np.log10(0.004), np.log10(0.45), 40)
-    fl_m = QUANTUM['fiber_length_m']
-    ax2.loglog(cs, [_secret_rate_at(c, eta_now, fl_m) / 1e3 for c in cs],
-               '-', color=C['quantum'], linewidth=2,
-               label='coupling lever (quadratic)')
-    for cval, mlabel, col in (
-            (c_now, f'today ({c_now:.4f})', C['dark']),
-            (0.21, 'microlens theory', C['accent']),
-            (0.40, 'CBG simulated', C['pareto'])):
-        ax2.plot(cval, _secret_rate_at(cval, eta_now, fl_m) / 1e3, 'o',
-                 color=col, markersize=6, zorder=5, label=mlabel)
-    s_eta1 = _secret_rate_at(c_now, 1.0, fl_m)
-    ax2.plot(c_now, s_eta1 / 1e3, '^', color=C['unmasked'], markersize=7,
-             zorder=5,
-             label='charge stabilization at today\'s optics '
-                   f'({s_eta1/op["secret_rate_bps"]:.0f}x)')
-    ax2.set_ylim(0.2, 2e4)
-    ax2.set_xlabel('Per-arm coupling efficiency')
-    ax2.set_ylabel('Secret rate (kbit/s)')
-    ax2.set_title(f'Hardware levers, {fl_m} m edge', fontsize=9)
-    ax2.legend(fontsize=6, loc='lower right')
-    ax2.grid(True, alpha=0.3, which='both')
-    fig.suptitle('Rate limits and improvement levers', fontsize=10,
-                 fontweight='bold')
-    fig.tight_layout(w_pad=2.5)
-    save_fig(fig, 'paper_limits_levers')
+    # Numbers for manuscript text and tables (no plots: a sentence or
+    # table row carries each losslessly).
+    print("  [C] Text/table material:")
+    wf = op['waterfall']
+    print(f"      key supply: {op['raw_edge_rate_hz']/1e3:.2f} kHz raw, "
+          f"QBER {op['qber']*100:.2f}% -> "
+          f"{op['secret_rate_bps']/1e3:.2f} kbit/s/edge; "
+          f"rate halves every ~"
+          f"{3.01/QUANTUM['fiber_loss_db_per_km_780nm']*1e3:.0f} m "
+          f"of 780 nm fiber")
+    e9 = summary['exp9']
+    print("      HNDL retro-recovery: "
+          + ", ".join(f"{k} {100*e9[k]['recovered_fraction']:.0f}%"
+                      for k in ('classical', 'it_dealer_online',
+                                'it_dealer_courier', 'entangled')))
+    conv = summary['exp14']['surcharge_convergence']
+    asym = summary['exp13']['rate_ratios']['efficient-90/10']
+    pair_rate = QUANTUM['source_rep_rate_hz'] * QUANTUM['source_brightness']
+    conv_txt = "; ".join(
+        f"{d['pairs']/pair_rate:.0f}s: {d['median']:.2f}x"
+        + (f" ({d['n_zero_cert']}/{d['n_seeds']} zero-cert)"
+           if d.get('n_zero_cert') else "")
+        for d in conv)
+    print(f"      finite-key ratio vs source time: {conv_txt}; "
+          f"asymptote {asym:.2f}x")
+    lev = summary['exp1'].get('levers', {})
+    if lev:
+        s0 = lev['secret_bps_today']
+        print(f"      levers: coupling 0.21 -> "
+              f"{lev['secret_bps_coupling_0.21']/s0:,.0f}x, 0.40 -> "
+              f"{lev['secret_bps_coupling_0.40']/s0:,.0f}x (quadratic); "
+              f"eta_ex 1.0 -> {lev['secret_bps_eta_ex_1.0']/s0:.1f}x "
+              f"(linear)")
 
-    print("  Paper figures complete (exp5_dropout_recovery joins them "
-          "as-is; the architecture figure, the key-supply numbers, and "
-          "the provenance/SOTA tables are manuscript text/table "
-          "material).")
+    print("  Paper pass complete: 3 figures (these two + "
+          "exp5_dropout_recovery) + architecture drawing + tables.")
 
 
 # EXPERIMENT 15: ACCEPTANCE-WINDOW OPTIMIZATION
