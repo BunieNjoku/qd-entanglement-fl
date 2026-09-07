@@ -345,8 +345,6 @@ def run_experiment_1(quick=False):
 
     fidelities = QUANTUM['fidelity_sweep'] if not quick else np.linspace(0.90, 0.99, 5)
     fiber_lengths = QUANTUM['fiber_length_sweep_m'] if not quick else np.array([100, 500, 2000])
-    coupling_effs = (QUANTUM['coupling_sweep'] if not quick
-                     else QUANTUM['coupling_sweep'][::2])
 
     # Native 780 nm link, no frequency conversion (rack architecture).
     fiber_loss = QUANTUM['fiber_loss_db_per_km_780nm']
@@ -516,39 +514,98 @@ def run_experiment_1(quick=False):
     fig.tight_layout()
     save_fig(fig, 'exp1b_rate_vs_fiber')
 
-    # 1c: Coupling efficiency sensitivity
-    print("  [1c] Coupling efficiency sensitivity...")
-    fig, ax = plt.subplots(figsize=VIZ['figsize'])
-    for fl in [100, 500, 1000, 2000]:
-        rates_c = [compute_coincidence_rate(
-            QUANTUM['source_rep_rate_hz'], QUANTUM['source_brightness'],
-            ce, fl, fiber_loss, QUANTUM['detector_efficiency'],
-            colocated=QUANTUM.get('colocated', True),
-            local_optics_efficiency=QUANTUM['local_optics_efficiency'],
-        ) for ce in coupling_effs]
-        ax.loglog(coupling_effs, rates_c, 'o-', linewidth=2, label=f'{fl}m fiber')
+    # 1c: Hardware improvement levers, priced in DISTILLED secret rate.
+    # Each panel is a model extrapolation along one hardware axis; the
+    # anchor markers on it are today's device (calibrated/measured) and
+    # the group's published roadmap values. QBER is held at the
+    # operating value: neither lever moves the entanglement quality.
+    print("  [1c] Hardware levers priced in secret rate...")
 
-    # Hardware anchors on the coupling axis: the calibrated arm
-    # transmission of the rack device and the group's device-roadmap
-    # ceilings (theoretical microlens with AR coating, Langer 2025;
-    # simulated free-standing CBG, Dhurjati 2026).
-    ax.axvline(x=QUANTUM['coupling_efficiency'], color=C['dark'],
-               linestyle='--', linewidth=1,
-               label=f"calibrated ({QUANTUM['coupling_efficiency']:.4f})")
-    ax.axvline(x=0.21, color=C['accent'], linestyle=':', linewidth=1,
-               label='microlens theory (0.21)')
-    ax.axvline(x=0.40, color=C['pareto'], linestyle=':', linewidth=1,
-               label='CBG simulated (0.40)')
-    ax.set_xlabel('Per-arm coupling efficiency (dot to detector input)')
-    ax.set_ylabel('Coincidence Rate (Hz)')
-    ax.set_title('Coincidence rate vs coupling efficiency')
-    ax.legend()
-    ax.grid(True, alpha=0.3, which='both')
-    fig.tight_layout()
-    save_fig(fig, 'exp1c_coupling_sensitivity')
+    def _secret_at(coupling, eta_ex, fl_m):
+        raw = compute_coincidence_rate(
+            QUANTUM['source_rep_rate_hz'], eta_ex, coupling, fl_m,
+            fiber_loss, QUANTUM['detector_efficiency'],
+            colocated=QUANTUM.get('colocated', True),
+            local_optics_efficiency=QUANTUM['local_optics_efficiency'])
+        wf = compute_rate_waterfall(
+            raw, OPERATING_POINT['qber'],
+            code_rate=POST_PROC['ldpc_code_rate'],
+            security_margin=POST_PROC['security_margin_bits'],
+            block_size=POST_PROC['block_size'],
+            bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+            tagged_fraction=(QUANTUM['multi_photon_prob']
+                             / QUANTUM['source_brightness']))
+        return wf['final_secure_rate']
+
+    fl_m = QUANTUM['fiber_length_m']
+    eta_now = QUANTUM['source_brightness']
+    c_now = QUANTUM['coupling_efficiency']
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+
+    # Panel 1: coupling lever (rate scales with coupling SQUARED - both
+    # photons pass the collection path). Markers: calibrated device and
+    # the group's device roadmap (theoretical microlens 0.21, with AR
+    # coating 0.39, Langer 2025; simulated free-standing CBG 0.40,
+    # Dhurjati 2026, arXiv:2605.02360).
+    cs = np.logspace(np.log10(0.004), np.log10(0.45), 40)
+    ax1.loglog(cs, [_secret_at(c, eta_now, fl_m) / 1e3 for c in cs],
+               '-', color=C['quantum'], linewidth=2,
+               label='model (QBER fixed at operating value)')
+    for cval, mlabel, col in (
+            (c_now, f'calibrated device ({c_now:.4f})', C['dark']),
+            (0.21, 'microlens theory (0.21)', C['accent']),
+            (0.40, 'CBG simulated (0.40)', C['pareto'])):
+        ax1.plot(cval, _secret_at(cval, eta_now, fl_m) / 1e3, 'o',
+                 color=col, markersize=6, label=mlabel)
+    ax1.set_xlabel('Per-arm coupling efficiency')
+    ax1.set_ylabel('Secret rate (kbit/s)')
+    ax1.set_title(f'Coupling lever (quadratic), {fl_m} m edge', fontsize=9)
+    ax1.legend(fontsize=6, loc='upper left')
+    ax1.grid(True, alpha=0.3, which='both')
+
+    # Panel 2: excitation-efficiency lever (linear). Today's device is
+    # charging-limited at the sister-device measured eta_ex = 0.076
+    # (Hopfmann 2021); 1.0 is the ideal neutral-dot pi-pulse limit.
+    # Improving eta_ex at fixed optics multiplies singles AND
+    # coincidences linearly.
+    etas = np.linspace(0.05, 1.0, 40)
+    ax2.plot(etas, [_secret_at(c_now, e, fl_m) / 1e3 for e in etas],
+             '-', color=C['quantum'], linewidth=2,
+             label='model (fixed calibrated optics)')
+    ax2.plot(eta_now, _secret_at(c_now, eta_now, fl_m) / 1e3, 'o',
+             color=C['dark'], markersize=6,
+             label=f'measured eta_ex = {eta_now} (charging-limited)')
+    ax2.axvline(x=1.0, color='gray', linestyle=':', linewidth=1,
+                label='ideal neutral-dot limit')
+    ax2.set_xlabel('Excitation efficiency per pulse')
+    ax2.set_ylabel('Secret rate (kbit/s)')
+    ax2.set_title('Charge-stabilization lever (linear)', fontsize=9)
+    ax2.legend(fontsize=6, loc='upper left')
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle('Hardware improvement levers at the anchored '
+                 'operating point', fontsize=10, fontweight='bold')
+    fig.tight_layout(w_pad=2.5)
+    save_fig(fig, 'exp1c_hardware_levers')
+
+    s_now = _secret_at(c_now, eta_now, fl_m)
+    for cval, lab in ((0.21, 'microlens theory'), (0.40, 'CBG simulated')):
+        s = _secret_at(cval, eta_now, fl_m)
+        print(f"      coupling {cval:.2f} ({lab}): "
+              f"{s/1e3:,.0f} kbit/s ({s/s_now:,.0f}x today)")
+    s_eta = _secret_at(c_now, 1.0, fl_m)
+    print(f"      eta_ex 1.0 at today's optics: {s_eta/1e3:.1f} kbit/s "
+          f"({s_eta/s_now:.1f}x today)")
 
     print("  Experiment 1 complete.")
-    return {"qbers": qbers_sim, "s_values": s_values, "rates": rates}
+    return {"qbers": qbers_sim, "s_values": s_values, "rates": rates,
+            "levers": {
+                "secret_bps_today": s_now,
+                "secret_bps_coupling_0.21": _secret_at(0.21, eta_now, fl_m),
+                "secret_bps_coupling_0.40": _secret_at(0.40, eta_now, fl_m),
+                "secret_bps_eta_ex_1.0": s_eta,
+            }}
 
 
 # EXPERIMENT 2: POST-PROCESSING RATE VALIDATION

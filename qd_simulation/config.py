@@ -85,12 +85,11 @@ QUANTUM = {
     # it would save.
     "fiber_loss_db_per_km_780nm": 3.5,
     "coupling_efficiency": _ARM_TRANSMISSION,   # calibrated, ~0.0108
-    # Sweep spans the calibrated value up to the group's device roadmap:
-    # theoretical microlens fiber-coupled efficiency 0.21-0.24 (0.37-0.39
-    # with AR coating, Langer 2025); simulated free-standing CBG devices
-    # 0.27-0.40 (Dhurjati 2026, arXiv:2605.02360).
-    "coupling_sweep": np.array([0.005, _ARM_TRANSMISSION, 0.02, 0.05,
-                                0.10, 0.21, 0.30, 0.40]),
+    # The improvement-lever axis in exp1c spans this value up to the
+    # group's device roadmap: theoretical microlens fiber-coupled
+    # efficiency 0.21-0.24 (0.37-0.39 with AR coating, Langer 2025);
+    # simulated free-standing CBG devices 0.27-0.40 (Dhurjati 2026,
+    # arXiv:2605.02360).
     "detector_efficiency": _DETECTOR_EFF,
     "local_optics_efficiency": 1.0,  # absorbed into calibrated coupling
     "colocated": True,               # rack architecture (Photon 1 local)
