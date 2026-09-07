@@ -5,6 +5,27 @@ quantum-dot Bell pairs over a campus-scale fiber mesh provision the
 pairwise one-time masks of two-level Bonawitz secure aggregation in
 federated learning.
 
+## Hardware anchoring
+
+Source and detection parameters are anchored to one real deployed
+device: the rack-based GaAs quantum dot entangled photon pair source
+of the QD-CamNetz collaboration (Zena et al., arXiv:2604.02024) - 1 GHz
+clocked two-photon excitation, in-situ fiber-coupled microlens QD,
+SSPD detection (85%, 20 ps RMS), native 780 nm emission, measured
+entanglement negativity 2n = 0.960(4) averaged over six hours of
+hands-off operation. Quantities the rack paper does not report come
+from sister-device measurements by the same group with the same
+excitation protocol: per-pulse excitation efficiency 0.076(9)
+(Hopfmann et al., PRB 103, 075413) and g2_XX(0) = 8.0(6)e-4 (Langer
+et al., APL Photonics 10, 066117). The per-arm transmission is
+calibrated to the measured 697(8) kHz singles rate and cross-checks
+against the sister device's independently measured 1.1(1)% within 20%.
+The two-node fiber link, the protocol layer, and key distillation
+remain modeled: derived rates are simulation-grade, not hardware
+measurements. Config statuses (measured / derived / assumption) are
+carried in the comments of `config.py`; there is no hypothetical
+projected operating point.
+
 ## Framing
 
 The simulation executes the same physical layer under two protocol
@@ -19,7 +40,7 @@ framings, and the publication framing makes BBM92 the default:
   agreement (Maurer 1993; Ahlswede-Csiszar 1993), not QKD - trusted
   co-located source (CHSH verifies the state, it does not bound an
   eavesdropper), passive noisy fiber, fixed-basis measurement. Worth a
-  measured 1.32x rate over the BBM92 framing at the operating point;
+  measured 1.41x rate over the BBM92 framing at the operating point;
   blind to an in-fiber intercept-resend adversary (exp14), so it is an
   optimization for physically secured fiber, not the default.
 
@@ -30,7 +51,9 @@ pooled key buffer filled by batched distillation.
 
 ## Core construction
 
-- Two endpoints share Bell pair |Φ+⟩ via QD source -> QFC -> fiber.
+- Two endpoints share Bell pair |Φ+⟩ via QD source -> native 780 nm
+  fiber (no frequency conversion: at campus distances the PPLN
+  insertion loss exceeds the 780 nm fiber loss it would save).
 - Coincidence detection + LDPC reconciliation + Toeplitz privacy amplification
   yields shared bit strings.
 - **Triangles** (3-node clusters with 3 pairwise links) are the minimum
@@ -69,8 +92,9 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 10 | Availability under source failure | Kill one node's source: edges continue at ~half rate from far endpoints (availability/fairness, not security) |
 | 11 | **Gradient inversion (real construction)** | Tabular DLG/iDLG: unmasked leaks (100% attr-infer), modular mask blocks (theorem), plaintext aggregate partially leaks (motivates DP-on-top) |
 | 12 | SOTA comparison | Five executing arms: Bonawitz-DH, Flamingo-PRF, and a classical IT-dealer (online + courier provisioning). Every OTP arm pays O(d) recovery; the arms differ in what must be trusted: DH/PRF hardness, a dealer, or one's own source. Tables; the figure repeats Table 1 of the paper |
-| 13 | QKD-framing rate cost | Same physics, two post-processings: source-model vs Shor-Preskill QKD framing. Ratio 2.16x/1.32x/1.08x by sifting protocol - prices the trusted-source assumption; not a security ranking. Reported as prose; the ratio is the asymptote in exp14(d) |
-| 14 | **Executing BBM92 arm** | The QKD framing executed on sampled bits (basis choice, sifting, TLGR finite-key PA): the same key-basis intercept-resend tap is invisible to the fixed-basis protocol (flat QBER, Eve predicts 99.9% of accepted key at full tap) and aborts BBM92 near the analytic threshold f* = 0.023. Finite-key penalty priced honestly (executing ratio 4.1x at 8M-pair runs vs 1.32x asymptotic; fixed-length TLGR charge at the a-priori q_tol) |
+| 13 | QKD-framing rate cost | Same physics, two post-processings: source-model vs Shor-Preskill QKD framing. Ratio 2.32x/1.41x/1.16x by sifting protocol - prices the trusted-source assumption; not a security ranking. Reported as prose; the ratio is the asymptote in exp14(d) |
+| 14 | **Executing BBM92 arm** | The QKD framing executed on sampled bits (basis choice, sifting, TLGR finite-key PA): the same key-basis intercept-resend tap is invisible to the fixed-basis protocol (flat QBER, Eve predicts 99.9% of accepted key at full tap) and aborts BBM92 near the analytic threshold f* = 0.010. The anchored QBER (1.53%) sits close under q_tol = 0.02, so a nonzero false-abort baseline appears at small test sets. Finite-key penalty priced honestly (executing ratio 4.0x at 40 s runs vs 1.41x asymptotic; fixed-length TLGR charge at the a-priori q_tol) |
+| 15 | **Acceptance-window optimization** | Coincidence window trades captured pairs against FSS-precession decoherence for a phase-blind receiver; optimum (177-279 ps, 1.1-1.7 T1, by calibration) tracks the EC design-QBER boundary and pays 26-40% vs the time-resolved operating point |
 
 ## Assumptions
 
@@ -79,8 +103,13 @@ python run_all.py --exp 1 2 3 # Specific experiments
   Binds the trusted-conduit mode only; the BBM92 default discharges it
   (basis-independent-source argument, Koashi-Preskill 2003).
 - **C - FPGA latency:** Published LDPC benchmarks × 2× safety margin.
-- **D - Fiber QBER:** Parametric sweeps over 1-6% (exp2) and 0.5-6%
-  (exp7); 1.5-4.0% is the shaded expected-operating band in exp2a.
+- **D - Fiber QBER:** Anchored operating QBER 1.53% (Werner mapping of
+  the measured 2n = 0.960 plus extinction and birefringence
+  allowances); parametric sweeps over 1-6% (exp2) and 0.5-6% (exp7).
+- **E - Sister-device values:** Excitation efficiency and g2 are
+  measured on the same group's predecessor devices, not on the rack
+  unit itself; the derived coincidence rate scales as 1/eta_ex at the
+  fixed measured singles rate.
 
 ## Output
 
@@ -92,8 +121,8 @@ Results in `results/`, tiered for the publication figure budget
   arms), exp14 (executing BBM92 arm)
 - `peripheral/` - validation, sensitivity, scaling, and comparison
   figures kept for the technical-report version and reviewers (exp1,
-  2a-b, 3a, 4, 6, 8a-b, 10, 11, 12, 13, exp14b basis split, quick-mode
-  variants). exp2c, exp3b, and exp8c are no longer drawn: exp13
+  2a-b, 3a, 4, 6, 8a-b, 10, 11, 12, 13, exp14b basis split, exp15
+  window optimization, quick-mode variants). exp2c, exp3b, and exp8c are no longer drawn: exp13
   supersedes exp2c, and exp3b and exp8c repeated exp6's point that
   key supply binds; their numbers stay in summary.json and the run
   log
@@ -164,13 +193,13 @@ privacy proof), `prng`, `dp`, `unmasked`.
   experimentally validated on a real quantum network: fully connected pairwise
   MDI-QKD among clients, classical aggregation-only server holding no key
   material, measured 32.8-240 kbit/s pairwise key rates (above our
-  BBM92-framed 9.6 kbit/s, conduit mode 12.7 - theirs is hardware, ours
-  simulation), supporting ~1.4K
+  BBM92-framed 2.5 kbit/s, conduit mode 3.5 - theirs is hardware, ours a
+  simulation anchored to the QD-CamNetz source), supporting ~1.4K
   maskable parameters over 160-200 rounds. Same assumption class as ours (ITS
   keys, HNDL-immune key layer). Our differentiators are narrower and measured
   (exp13): the trusted-conduit mode's higher key rate from the same physics
-  (2.2x vs symmetric-basis sifting, 1.3x vs the efficient 90/10 protocol
-  they run, 1.1x in the
+  (2.3x vs symmetric-basis sifting, 1.4x vs the efficient 90/10 protocol
+  they run, 1.2x in the
   asymptotic-sifting limit - bought by the trusted-source assumption, i.e. a
   weaker tolerated channel adversary), no basis-choice or mid-point
   measurement hardware, and an analyzed dropout-recovery story, which they do

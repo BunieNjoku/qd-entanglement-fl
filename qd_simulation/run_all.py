@@ -9,8 +9,8 @@ Protocol framings (same physical layer, two post-processings):
     is discharged by the basis-independent-source argument.
   - Trusted-conduit mode (fixed basis): source-model secret-key
     agreement under a trusted co-located QD source and a noisy but
-    passive fiber. Higher rate (1.32x at the operating point), blind
-    to an in-fiber intercept-resend adversary (exp14).
+    passive fiber. Higher rate (1.41x at the anchored operating
+    point), blind to an in-fiber intercept-resend adversary (exp14).
   Both: pairwise Bell-pair measurement produces correlated bit pairs;
   LDPC reconciliation makes the endpoints' strings bit-exact; Toeplitz
   PA removes residual correlation from the syndrome and physical-layer
@@ -1757,7 +1757,7 @@ def run_experiment_7(quick=False):
     # so it cannot occlude the min-entropy curve or the zero-rate row.
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 4.3))
 
-    # Linear rate axis: the two framings sit 1.32x apart, which a
+    # Linear rate axis: the two framings sit ~1.4x apart, which a
     # multi-decade log axis hides, and the collapse past the code's
     # design point reads as the curve reaching zero rather than as
     # off-scale floor markers.
@@ -2754,8 +2754,9 @@ def run_experiment_12(quick=False):
           "basis-choice or\n      mid-point measurement hardware, and "
           "reveal-based dropout recovery, which those works do\n      "
           "not analyze. QuNetQFL's measured hardware rates (32.8-240 "
-          "kbit/s) exceed our modeled\n      12.7 kbit/s; theirs is "
-          "hardware, ours is simulation.\n    ** 'None' here means no "
+          "kbit/s) exceed our anchored\n      "
+          f"{OPERATING_POINT['secret_rate_bps']/1000:.2f} kbit/s; theirs "
+          "is hardware, ours is simulation.\n    ** 'None' here means no "
           "THIRD party: the source is trusted, but it is endpoint-owned "
           "equipment -\n      an assumption about our own hardware, not "
           "about someone else's.\n    *** The courier dealer's immunity "
@@ -2989,10 +2990,10 @@ def run_experiment_13(quick=False):
           "measured QBER either - the fold-in mechanism the literature "
           "relies on\n      does not operate here).")
     print("    - MDI-specific hardware penalties are NOT modeled: this "
-          "prices the FRAMING on\n      our modeled device, not a "
+          "prices the FRAMING on\n      our anchored device, not a "
           "reproduction of QuNetQFL's stack. Their measured\n      "
-          "hardware rates (32.8-240 kbit/s) exceed our modeled 12.7 "
-          "kbit/s.")
+          "hardware rates (32.8-240 kbit/s) exceed our anchored "
+          f"{OPERATING_POINT['secret_rate_bps']/1000:.2f} kbit/s.")
     print("    - The EC FER model is a finite-blocklength benchmark, not a measured "
           "decoder curve (exp2d); both "
           "arms charge identical\n      EC, so EC-model uncertainty "
