@@ -3938,8 +3938,7 @@ def make_paper_figures(summary):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     win_ps = np.array(e15['windows_ps'])
     for (label, res), ls, col in zip(e15['calibrations'].items(),
-                                     ('-', '--'),
-                                     (C['quantum'], C['unmasked'])):
+                                     ('-', '--'), (C['pareto'], C['dark'])):
         ax1.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
                  linewidth=1.8, label=label.split(' (')[0])
         pen = 100 * (1 - res['opt_secret_bps'] / op['secret_rate_bps'])
@@ -3952,8 +3951,8 @@ def make_paper_figures(summary):
                      xytext=(res['opt_window_ps'] + 60,
                              res['opt_secret_bps'] / 1e3 + 0.08),
                      fontsize=6, color=col)
-    ax1.axhline(y=op['secret_rate_bps'] / 1e3, color='black',
-                linestyle=':', linewidth=1.2,
+    ax1.axhline(y=op['secret_rate_bps'] / 1e3, color=C['unmasked'],
+                linestyle='-.', linewidth=1.5,
                 label='time-resolved operating point (3.54 kbit/s)')
     ax1.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
                 label='T1')
@@ -3961,7 +3960,8 @@ def make_paper_figures(summary):
     ax1.set_ylabel('Secret rate (kbit/s)')
     ax1.set_ylim(0, 4.0)
     ax1.set_title('Window cliff (phase-blind receiver)', fontsize=9)
-    ax1.legend(fontsize=6, loc='center right')
+    ax1.legend(fontsize=6, loc='lower right',
+               bbox_to_anchor=(0.98, 0.08))
     ax1.grid(True, alpha=0.3)
 
     c_now = QUANTUM['coupling_efficiency']
