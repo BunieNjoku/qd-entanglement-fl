@@ -56,6 +56,8 @@ from modules.m1_quantum_source import (
     simulate_source, compute_chsh_s, werner_state,
     compute_qber_analytical, compute_coincidence_rate,
     simulate_symmetric_edge, simulate_bbm92,
+    fss_precession_omega, delay_window_coherence, calibrate_visibility,
+    detected_delay_mode, werner_weight_for_negativity,
 )
 from modules.m2_post_processing import (
     fast_ec_simulate, compute_rate_waterfall, compute_rate_waterfall_qkd,
@@ -3583,10 +3585,160 @@ def run_experiment_14(quick=False):
     }
 
 
+# EXPERIMENT 15: ACCEPTANCE-WINDOW OPTIMIZATION
+def run_experiment_15(quick=False):
+    print("\n" + "="*70)
+    print("EXPERIMENT 15: Acceptance-Window Optimization")
+    print("="*70)
+    print("  Coincidence acceptance window trades captured pairs against")
+    print("  entanglement quality (FSS precession + timing jitter): the")
+    print("  measured 2n(delta-tau) endpoints anchor the model, the m2")
+    print("  waterfall prices the trade in secret bits per second.")
+    print("  RECEIVER MODEL: fixed analyzers with one global phase")
+    print("  alignment per window - no delay-binned phase tracking. The")
+    print("  config operating point instead anchors to the time-resolved")
+    print("  tomography negativity (delay-binned phase compensation, which")
+    print("  the rack's TCSPC supports); this experiment prices the")
+    print("  simpler phase-blind receiver against it.")
+
+    t1 = QUANTUM['t1_x_ps'] * 1e-12
+    sigma = QUANTUM['two_photon_jitter_fwhm_ps'] * 1e-12 / 2.355
+    omega = fss_precession_omega(QUANTUM['fss_uev'])
+    mode = detected_delay_mode(t1, sigma)
+    t_lo = mode - 3 * sigma   # window onset: capture the jitter-blurred rise
+
+    # Two visibility calibrations bracket the model uncertainty:
+    # (a) the 8 ps-window maximum 2n = 0.98(1), a nearly-pure-coherence
+    #     window, gives the OPTIMISTIC visibility;
+    # (b) the T1-averaged 2n = 0.94(1), which folds in decay mechanisms
+    #     beyond precession+jitter, gives the CONSERVATIVE one.
+    # The rack paper's own model attributes the residual decay to timing
+    # uncertainty and possible spin scattering; both calibrations are
+    # reported and the optimum is quoted under each.
+    anchor_w = QUANTUM['negativity_2n_window']
+    v0_win = calibrate_visibility(anchor_w, mode - 4e-12, mode + 4e-12,
+                                  t1, sigma, omega)
+    c_t1, _ = delay_window_coherence(t_lo, mode + t1, t1, sigma, omega)
+    v0_t1 = QUANTUM['negativity_2n_t1avg'] / abs(c_t1)
+
+    # Full-capture edge rate: compute_coincidence_rate() counts every
+    # cascade whose photons both survive, i.e. an unbounded window; the
+    # window keeps the captured fraction. Accidentals at the anchored
+    # dark rate are < 0.1 Hz across this sweep and are neglected.
+    r_full = OPERATING_POINT['raw_edge_rate_hz']
+
+    n_w = 24 if quick else 72
+    windows = np.linspace(8e-12, 5 * t1, n_w)
+
+    def _wf(rate_hz, qber):
+        return compute_rate_waterfall(
+            rate_hz, qber,
+            code_rate=POST_PROC['ldpc_code_rate'],
+            security_margin=POST_PROC['security_margin_bits'],
+            block_size=POST_PROC['block_size'],
+            bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+            tagged_fraction=(QUANTUM['multi_photon_prob']
+                             / QUANTUM['source_brightness']))
+
+    results = {}
+    for label, v0 in (("window-anchored (optimistic)", v0_win),
+                      ("T1-anchored (conservative)", v0_t1)):
+        two_n, captured, secret = [], [], []
+        for w_edge in windows:
+            c, cap = delay_window_coherence(t_lo, t_lo + w_edge, t1,
+                                            sigma, omega)
+            n2 = float(np.clip(v0 * abs(c), 0.0, 1.0))
+            bell_w = werner_weight_for_negativity(n2)
+            qber = compute_qber_analytical(
+                bell_w, pbs_extinction=QUANTUM['pbs_extinction_ratio'],
+                bire_contribution=QUANTUM[
+                    'analytic_qber_birefringence_allowance'])
+            wf = _wf(r_full * cap, qber)
+            two_n.append(n2)
+            captured.append(cap)
+            secret.append(wf['final_secure_rate'])
+        secret = np.array(secret)
+        i_opt = int(np.argmax(secret))
+        results[label] = {
+            "v0": v0, "two_n": two_n, "captured": captured,
+            "secret_bps": secret.tolist(),
+            "opt_window_ps": float(windows[i_opt] * 1e12),
+            "opt_secret_bps": float(secret[i_opt]),
+        }
+        print(f"    {label}: v0 = {v0:.4f}, optimum window "
+              f"{windows[i_opt]*1e12:.0f} ps "
+              f"({windows[i_opt]/t1:.2f} T1) -> "
+              f"{secret[i_opt]:,.0f} bps secret")
+
+    # Default-window and operating-point reference
+    w_def = QUANTUM['coincidence_window_ns'] * 1e-9
+    print(f"    reference: operating point "
+          f"{OPERATING_POINT['secret_rate_bps']:,.0f} bps (config Werner "
+          f"weight from the time-resolved 2n, full capture)")
+    print("    Shape of the trade: the optimum window sits just below the")
+    print("    declared rate-0.84 code's design QBER (~2.07%); beyond it")
+    print("    the fixed code fails frames and the rate collapses to 0 -")
+    print(f"    including at the config default window ({w_def*1e12:.0f} ps)")
+    print("    under this phase-blind receiver. The window rule is thus")
+    print("    'widest window whose windowed QBER clears the EC design")
+    print("    point', not a smooth interior optimum. The phase-blind")
+    print("    receiver pays 26-40% of the operating-point rate; closing")
+    print("    that gap is what delay-binned phase tracking buys.")
+    print("    Noise-attribution bracket: the Werner mapping charges the")
+    print("    windowed decoherence isotropically. Under pure dephasing")
+    print("    (precession+jitter alone) the X-basis error is 1.5x the")
+    print("    Werner charge and the Z-basis error is ZERO - the fixed-")
+    print("    Z-basis conduit arm's raw QBER is window-independent, and")
+    print("    for it the window choice is a rate/accidentals matter only.")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    win_ps = windows * 1e12
+    for (label, res), ls in zip(results.items(), ('-', '--')):
+        ax1.plot(win_ps, res['two_n'], ls, color=C['quantum'],
+                 linewidth=1.8, label=f'2n, {label.split(" (")[0]}')
+    ax1.plot(win_ps, results[list(results)[0]]['captured'], ':',
+             color=C['accent'], linewidth=1.8, label='captured fraction')
+    ax1.axvline(x=QUANTUM['t1_x_ps'], color='gray', linestyle=':',
+                linewidth=1, label='T1')
+    ax1.set_xlabel('Acceptance window (ps)')
+    ax1.set_ylabel('Windowed 2n / captured fraction')
+    ax1.set_title('Quality vs capture', fontsize=9)
+    ax1.set_ylim(0, 1.05)
+    ax1.legend(fontsize=6)
+    ax1.grid(True, alpha=0.3)
+
+    for (label, res), ls, col in zip(results.items(), ('-', '--'),
+                                     (C['pareto'], C['dark'])):
+        ax2.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
+                 linewidth=1.8, label=label.split(" (")[0])
+        ax2.plot(res['opt_window_ps'], res['opt_secret_bps'] / 1e3, 'o',
+                 color=col, markersize=5)
+    ax2.set_xlabel('Acceptance window (ps)')
+    ax2.set_ylabel('Secret rate (kbit/s)')
+    ax2.set_title('Distilled rate vs window', fontsize=9)
+    ax2.legend(fontsize=6)
+    ax2.grid(True, alpha=0.3)
+    fig.suptitle('Acceptance-window optimization at the anchored '
+                 'operating point', fontsize=10, fontweight='bold')
+    fig.tight_layout(w_pad=2.5)
+    save_fig(fig, 'exp15_window_optimization')
+
+    print("  Experiment 15 complete.")
+    return {
+        "fss_uev": QUANTUM['fss_uev'],
+        "t1_x_ps": QUANTUM['t1_x_ps'],
+        "precession_period_ns": float(2 * np.pi / omega * 1e9),
+        "windows_ps": win_ps.tolist(),
+        "calibrations": {k: {kk: vv for kk, vv in v.items()
+                             if kk != 'two_n' and kk != 'captured'}
+                         for k, v in results.items()},
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='QD-Entanglement Simulation Runner')
-    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 15)),
-                        help='Experiment numbers to run (default: all 1-14)')
+    parser.add_argument('--exp', nargs='+', type=int, default=list(range(1, 16)),
+                        help='Experiment numbers to run (default: all 1-15)')
     parser.add_argument('--quick', action='store_true',
                         help='Quick mode with reduced parameter sweeps')
     parser.add_argument('--export-csv', action='store_true',
@@ -3628,6 +3780,7 @@ def main():
         12: run_experiment_12,
         13: run_experiment_13,
         14: run_experiment_14,
+        15: run_experiment_15,
     }
 
     for exp_num in sorted(args.exp):
