@@ -113,11 +113,12 @@ _OUTPUT_SUFFIX = ""
 # and the provenance/SOTA tables are manuscript material outside this
 # repo. Everything else is peripheral.
 MAIN_FIGURES = {
-    'exp5_dropout_recovery',
     'paper_qber_envelope',
     'paper_security',
     'paper_finite_key',
     'paper_limits_levers',
+    'paper_dropout',
+    'paper_fl_correctness',
 }
 
 
@@ -1074,7 +1075,15 @@ def run_experiment_4(quick=False):
               f"{s['mean_rounds']:>8.1f} ± {s['std_rounds']:.1f}")
 
     print("  Experiment 4 complete.")
+    curves4 = {}
+    for mode in modes:
+        all_acc = np.array(results_summary[mode]["all_accuracies"])
+        curves4[mode] = {
+            "acc_mean": all_acc.mean(axis=0).tolist(),
+            "acc_std": all_acc.std(axis=0).tolist(),
+        }
     return {
+        "curves": curves4,
         "fidelity": {
             "exactness_mismatches": int(total_mismatches),
             "agg_rounds_checked": int(n_agg_rounds),
@@ -2157,6 +2166,7 @@ def run_experiment_8(quick=False):
             'rounds_to_target': results[n]['result'].rounds_to_target,
             'n_triangles': results[n]['n_triangles'],
             'tree_depth': results[n]['tree_depth'],
+            'acc_curve': list(results[n]['result'].accuracies),
         } for n in scales
     }
     out['mask_time_per_level_s'] = level_times
@@ -3725,14 +3735,17 @@ def make_paper_figures(summary):
     print("="*70)
     op = OPERATING_POINT
 
-    # Figure: QBER prices key SUPPLY, not mask entropy - both framings'
-    # supply curves collapse at the declared code's capacity while the
-    # per-bit min-entropy floor stays flat. Two-curve contrast over a
-    # continuum plus a cliff whose location is the result.
-    print("  [A] Figure: QBER envelope (supply collapses, floor holds)...")
+    # Figure: QBER prices key SUPPLY, not mask entropy - and what that
+    # supply buys in FL currency. Panel (a): both framings' supply
+    # collapse at the declared code's capacity while the per-bit
+    # min-entropy floor stays flat; the operating point sits 0.47
+    # points under the BBM92 abort threshold. Panel (b): the same
+    # envelope converted to maskable model size at 60 s rounds.
+    print("  [A] Figure: QBER envelope (supply, entropy floor, model "
+          "size)...")
     e7 = summary['exp7']
     q = np.array(e7['qbers'])
-    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+    fig, (ax, axp) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     ax.plot(q * 100, np.array(e7['shared_rates_bps']) / 1e3, 'o-',
             color=C['quantum'], linewidth=1.8, markersize=4,
             label='trusted-conduit supply')
@@ -3742,6 +3755,9 @@ def make_paper_figures(summary):
     ax.axvline(x=op['qber'] * 100, color=C['dark'], linestyle='--',
                linewidth=1.2,
                label=f"operating point ({op['qber']*100:.2f}%)")
+    ax.axvline(x=BBM92['q_tol'] * 100, color=C['unmasked'],
+               linestyle='--', linewidth=1.0,
+               label=f"BBM92 abort threshold ({BBM92['q_tol']*100:.0f}%)")
     ax.axvline(x=estimate_capacity_qber(POST_PROC['ldpc_code_rate']) * 100,
                color='gray', linestyle=':', linewidth=1,
                label='rate-0.84 code capacity')
@@ -3750,18 +3766,38 @@ def make_paper_figures(summary):
              linewidth=1.4, markersize=4)
     axb.set_ylabel('Min-entropy per output bit', color=C['accent'],
                    fontsize=8)
-    axb.set_ylim(0.9, 1.001)
+    axb.set_ylim(0.985, 1.0005)
     ax.set_xlabel('QBER (%)')
     ax.set_ylabel('Secret rate (kbit/s)')
-    ax.set_title('QBER prices supply, not mask entropy', fontsize=9)
-    ax.legend(fontsize=6, loc='center left')
+    ax.set_title('Supply collapses; entropy floor holds', fontsize=9)
+    ax.legend(fontsize=5.5, loc='lower left')
     ax.grid(True, alpha=0.3)
-    fig.tight_layout()
+
+    axp.plot(q * 100, np.array(e7['max_params_at_60s']) / 1e3, 'o-',
+             color=C['quantum'], linewidth=1.8, markersize=4,
+             label='trusted-conduit')
+    axp.plot(q * 100, np.array(e7['bbm92_max_params_at_60s']) / 1e3, 's-',
+             color=C['pareto'], linewidth=1.8, markersize=4,
+             label='BBM92-framed')
+    axp.axhline(y=28.866, color='gray', linestyle=':', linewidth=1,
+                label='ClinicalMLP (29K params)')
+    axp.axvline(x=op['qber'] * 100, color=C['dark'], linestyle='--',
+                linewidth=1.2)
+    axp.set_xlabel('QBER (%)')
+    axp.set_ylabel('Max maskable model (K params, 60 s round)')
+    axp.set_title('The envelope in FL currency\n(150K and 1M models '
+                  'off scale)', fontsize=8)
+    axp.legend(fontsize=6)
+    axp.grid(True, alpha=0.3)
+    fig.suptitle('QBER prices supply, not mask entropy', fontsize=10,
+                 fontweight='bold')
+    fig.tight_layout(w_pad=2.8)
     save_fig(fig, 'paper_qber_envelope')
 
-    # Figure: security comparison - retroactive adversary across the
-    # four provisioning arms, and live adversary across the two
-    # protocol framings on the same tap.
+    # Figure: security comparison - retroactive adversaries across the
+    # four provisioning arms; live tap across the two protocol
+    # framings, including what the adversary GAINS (Eve accuracy on
+    # accepted key), not only what the protocols observe.
     print("  [B] Figure: security comparison (HNDL arms + live tap)...")
     e9 = summary['exp9']
     e14 = summary['exp14']['intercept_resend']
@@ -3808,10 +3844,14 @@ def make_paper_figures(summary):
                 label=f"analytic f* ({e14['analytic_f_star']*100:.1f}%)")
     ax2b = ax2.twinx()
     ax2b.plot(f_sw * 100, e14['bbm92_abort_prob'], '^--',
-              color=C['pareto'], linewidth=1.2, markersize=4)
-    ax2b.set_ylabel('BBM92 abort probability', color=C['pareto'],
-                    fontsize=8)
+              color=C['pareto'], linewidth=1.2, markersize=4,
+              label='BBM92 abort probability')
+    ax2b.plot(f_sw * 100, e14['fixed_eve_acc'], 'v-.',
+              color=C['unmasked'], linewidth=1.2, markersize=4,
+              label='Eve accuracy on fixed-basis key')
+    ax2b.set_ylabel('Probability', fontsize=8)
     ax2b.set_ylim(-0.05, 1.05)
+    ax2b.legend(fontsize=6, loc='center right')
     ax2.set_xlabel('Intercepted fraction of fiber photons (%)')
     ax2.set_ylabel('Error rate (%)')
     ax2.set_xscale('symlog', linthresh=1.0)
@@ -3825,11 +3865,8 @@ def make_paper_figures(summary):
     fig.tight_layout(w_pad=2.8)
     save_fig(fig, 'paper_security')
 
-    # Figure: finite-key effects - (i) certification cliff and
-    # convergence of the executing runs onto the deterministic
-    # finite-key model; (ii) interior basis-split optimum below the
-    # mu = 0 limit (test-set starvation). Both panels are extrema/
-    # cliffs compared against an ideal curve.
+    # Figure: finite-key effects - certification cliff vs the
+    # deterministic model, and the interior basis-split optimum.
     print("  [C] Figure: finite-key effects (cliff + basis optimum)...")
     conv = summary['exp14']['surcharge_convergence']
     model = summary['exp14']['surcharge_model']
@@ -3845,7 +3882,8 @@ def make_paper_figures(summary):
     ax1.errorbar(secs, med,
                  yerr=[[m - d['min'] for m, d in zip(med, conv)],
                        [d['max'] - m for m, d in zip(med, conv)]],
-                 fmt='s', color=C['pareto'], markersize=5, capsize=3,
+                 fmt='s', color=C['pareto'], markersize=5, capsize=4,
+                 zorder=5, elinewidth=1.4,
                  label=f"executing (median, range, "
                        f"{conv[0]['n_seeds']} seeds)")
     ax1.axhline(y=model['asymptotic_ratio'], color=C['accent'],
@@ -3872,14 +3910,19 @@ def make_paper_figures(summary):
                  yerr=np.array(pz['secure_bits_std']) / 1e3, fmt='o-',
                  color=C['pareto'], markersize=4,
                  label='executing (TLGR finite-key)')
-    ax2.axvline(x=BBM92['p_z'], color=C['accent'], linestyle='--',
-                linewidth=1.2, label=f"config p_z = {BBM92['p_z']}")
     i_opt = int(np.argmax(pz['secure_bits']))
+    i_cfg = int(np.argmin(np.abs(np.array(pz['p_z']) - BBM92['p_z'])))
+    ax2.axvline(x=BBM92['p_z'], color=C['accent'], linestyle='--',
+                linewidth=1.2,
+                label=f"config p_z = {BBM92['p_z']} "
+                      f"({pz['secure_bits'][i_cfg]/1e3:.0f} kbit)")
     ax2.plot(pz['p_z'][i_opt], pz['secure_bits'][i_opt] / 1e3, 'o',
              color=C['dark'], markersize=6,
-             label=f"finite-key optimum (p_z = {pz['p_z'][i_opt]:.2f})")
+             label=f"finite-key optimum (p_z = {pz['p_z'][i_opt]:.2f}, "
+                   f"{pz['secure_bits'][i_opt]/1e3:.0f} kbit)")
+    ax2.set_ylim(bottom=0)
     ax2.set_xlabel('Z-basis probability p_z')
-    ax2.set_ylabel('Secure kbits per run')
+    ax2.set_ylabel('Secure kbits per 20 s run')
     ax2.set_title('Basis-split optimum under finite key', fontsize=9)
     ax2.legend(fontsize=6)
     ax2.grid(True, alpha=0.3)
@@ -3888,11 +3931,8 @@ def make_paper_figures(summary):
     fig.tight_layout(w_pad=2.8)
     save_fig(fig, 'paper_finite_key')
 
-    # Figure: rate limits and levers - (a) the acceptance-window cliff
-    # (two visibility calibrations vs the time-resolved operating
-    # point: what caps the rate at today's hardware); (b) the hardware
-    # levers (today's device vs the group's published roadmap: what
-    # raises it).
+    # Figure: rate limits and levers - window choices vs the
+    # time-resolved operating point; today's hardware vs the roadmap.
     print("  [D] Figure: rate limits and levers...")
     e15 = summary['exp15']
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
@@ -3901,15 +3941,24 @@ def make_paper_figures(summary):
                                      ('-', '--'), (C['pareto'], C['dark'])):
         ax1.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
                  linewidth=1.8, label=label.split(' (')[0])
+        pen = 100 * (1 - res['opt_secret_bps'] / op['secret_rate_bps'])
         ax1.plot(res['opt_window_ps'], res['opt_secret_bps'] / 1e3, 'o',
                  color=col, markersize=5)
+        ax1.annotate(f"{res['opt_window_ps']:.0f} ps, "
+                     f"{res['opt_secret_bps']/1e3:.2f} kbit/s "
+                     f"(-{pen:.0f}%)",
+                     xy=(res['opt_window_ps'], res['opt_secret_bps'] / 1e3),
+                     xytext=(res['opt_window_ps'] + 60,
+                             res['opt_secret_bps'] / 1e3 + 0.08),
+                     fontsize=6, color=col)
     ax1.axhline(y=op['secret_rate_bps'] / 1e3, color=C['quantum'],
                 linestyle=':', linewidth=1.2,
-                label='time-resolved operating point')
+                label='time-resolved operating point (3.54 kbit/s)')
     ax1.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
                 label='T1')
     ax1.set_xlabel('Acceptance window (ps)')
     ax1.set_ylabel('Secret rate (kbit/s)')
+    ax1.set_ylim(0, 4.0)
     ax1.set_title('Window cliff (phase-blind receiver)', fontsize=9)
     ax1.legend(fontsize=6)
     ax1.grid(True, alpha=0.3)
@@ -3933,17 +3982,126 @@ def make_paper_figures(summary):
              zorder=5,
              label='charge stabilization at today\'s optics '
                    f'({s_eta1/op["secret_rate_bps"]:.0f}x, linear)')
+    ax2.set_xlim(0.003, 0.55)
     ax2.set_ylim(0.2, 2e4)
     ax2.set_xlabel('Per-arm coupling efficiency')
     ax2.set_ylabel('Secret rate (kbit/s)')
     ax2.set_title(f'Hardware levers vs roadmap, {fl_m} m edge',
                   fontsize=9)
-    ax2.legend(fontsize=6, loc='lower right')
+    ax2.legend(fontsize=6, loc='upper left')
     ax2.grid(True, alpha=0.3, which='both')
     fig.suptitle('Rate limits and improvement levers', fontsize=10,
                  fontweight='bold')
     fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'paper_limits_levers')
+
+    # Figure: dropout recovery vs classical baselines - accuracy under
+    # dropout, per-event recovery cost vs the seed-based baselines, and
+    # the O(d)-vs-O(1) scaling with model dimension.
+    print("  [E] Figure: dropout recovery vs baselines...")
+    e5 = summary['exp5']['dropout_results']
+    e12d = summary['exp12']['recovery_bytes_vs_dim']
+    rates = sorted(e5.keys(), key=lambda k: float(k.rstrip('%')))
+    rr = [float(k.rstrip('%')) for k in rates]
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(7.16, 3.2))
+
+    ax1.errorbar(rr, [e5[k]['final_acc_mean'] for k in rates],
+                 yerr=[e5[k]['final_acc_ci95'] for k in rates],
+                 fmt='o-', color=C['quantum'], markersize=4, capsize=3,
+                 label='final accuracy (95% CI, 10 seeds)')
+    ax1.axhline(y=0.9, color='gray', linestyle=':', linewidth=1,
+                label='0.9 target')
+    ax1.set_xlabel('Per-round dropout rate (%)')
+    ax1.set_ylabel('Final test accuracy (40 rounds)')
+    ax1.set_title('Accuracy under dropout', fontsize=8)
+    ax1.legend(fontsize=5.5)
+    ax1.grid(True, alpha=0.3)
+
+    nz = [k for k in rates if float(k.rstrip('%')) > 0]
+    nzr = [float(k.rstrip('%')) for k in nz]
+    ax2.semilogy(nzr, [e5[k]['recovery_bytes_per_client_round']
+                       for k in nz], 'o-', color=C['quantum'],
+                 markersize=4, label='this system / IT dealer, O(d)')
+    ax2.semilogy(nzr, [e5[k]['recovery_bytes_bonawitz_per_client_round']
+                       for k in nz], 's--', color=C['unmasked'],
+                 markersize=4, label='Bonawitz (Shamir DH), O(1)')
+    ax2.semilogy(nzr, [e5[k]['recovery_bytes_flamingo_per_client_round']
+                       for k in nz], '^:', color=C['dp'],
+                 markersize=4, label='Flamingo (PRF seed), O(1)')
+    ax2.set_ylim(0.5, 3e5)
+    ax2.set_xlabel('Per-round dropout rate (%)')
+    ax2.set_ylabel('Recovery bytes per client-round')
+    ax2.set_title('Cost on the same dropout events', fontsize=8)
+    ax2.legend(fontsize=5.5)
+    ax2.grid(True, alpha=0.3, which='both')
+
+    dims = sorted(int(d) for d in e12d)
+    ax3.loglog(dims, [e12d[str(d)]['entangled'] for d in dims], 'o-',
+               color=C['quantum'], markersize=4,
+               label='this system / IT dealer, O(d)')
+    ax3.loglog(dims, [e12d[str(d)]['bonawitz'] for d in dims], 's--',
+               color=C['unmasked'], markersize=4, label='Bonawitz, O(1)')
+    ax3.loglog(dims, [e12d[str(d)]['flamingo'] for d in dims], '^:',
+               color=C['dp'], markersize=4, label='Flamingo, O(1)')
+    ax3.axvline(x=28866, color='gray', linestyle=':', linewidth=1,
+                label='ClinicalMLP (28,866)')
+    ax3.set_xlabel('Model dimension d (params)')
+    ax3.set_ylabel('Recovery bytes (1 drop, 3 survivors)')
+    ax3.set_title('Cost scaling with model size', fontsize=8)
+    ax3.legend(fontsize=5.5)
+    ax3.grid(True, alpha=0.3, which='both')
+    fig.suptitle('Dropout recovery vs classical baselines', fontsize=10,
+                 fontweight='bold')
+    fig.tight_layout(w_pad=2.2)
+    save_fig(fig, 'paper_dropout')
+
+    # Figure: FL correctness - masking parity across modes and
+    # convergence across mesh scales (the paper's training curves).
+    print("  [F] Figure: FL correctness (parity + mesh scaling)...")
+    c4 = summary['exp4'].get('curves')
+    e8 = summary['exp8']
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    if c4:
+        mode_style = {
+            'entangled': ('-', C['quantum'], 'entangled masks'),
+            'prng': ('--', C['prng'], 'PRNG masks'),
+            'unmasked': (':', C['unmasked'], 'unmasked'),
+            'dp': ('-.', C['dp'], 'DP (eps = 5)'),
+        }
+        for mode, (ls, col, lab) in mode_style.items():
+            if mode not in c4:
+                continue
+            m = np.array(c4[mode]['acc_mean'])
+            sd = np.array(c4[mode]['acc_std'])
+            rx = np.arange(1, len(m) + 1)
+            ax1.plot(rx, m, ls, color=col, linewidth=1.8, label=lab)
+            ax1.fill_between(rx, m - sd, m + sd, alpha=0.12, color=col)
+        ax1.set_xlabel('Training round')
+        ax1.set_ylabel('Test accuracy')
+        ax1.set_title('Masking parity, 3 clients (10 seeds)', fontsize=8)
+        ax1.legend(fontsize=6, loc='lower right')
+        ax1.grid(True, alpha=0.3)
+        ax1.set_ylim(0.2, 1.02)
+    scales8 = [k for k in ('3', '6', '9', '12') if k in e8
+               and isinstance(e8[k], dict) and 'acc_curve' in e8[k]]
+    for k, col in zip(scales8, (C['quantum'], C['pareto'], C['accent'],
+                                C['dark'])):
+        curve = e8[k]['acc_curve']
+        ax2.plot(np.arange(1, len(curve) + 1), curve, '-', color=col,
+                 linewidth=1.6,
+                 label=f"{k} clients (depth {e8[k]['tree_depth']}, "
+                       f"final {e8[k]['accuracy']:.3f})")
+    ax2.axhline(y=0.9, color='gray', linestyle=':', linewidth=1,
+                label='0.9 target')
+    ax2.set_xlabel('Training round')
+    ax2.set_ylabel('Test accuracy')
+    ax2.set_title('Two-level hierarchy across mesh scales', fontsize=8)
+    ax2.legend(fontsize=6, loc='lower right')
+    ax2.grid(True, alpha=0.3)
+    fig.suptitle('FL correctness under masking and hierarchy',
+                 fontsize=10, fontweight='bold')
+    fig.tight_layout(w_pad=2.5)
+    save_fig(fig, 'paper_fl_correctness')
 
     # Table and prose material (no plots: each is carried losslessly by
     # a sentence or table row).
