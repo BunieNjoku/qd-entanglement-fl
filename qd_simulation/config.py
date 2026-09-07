@@ -12,28 +12,99 @@ RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # MODULE 1: QUANTUM SOURCE PARAMETERS
+#
+# Anchor: the rack-based QD-CamNetz entangled photon pair source
+# (Zena et al., arXiv:2604.02024 - "Zena 2026"). Where the rack paper
+# does not report a quantity, sister-device measurements from the same
+# group and excitation protocol are used and marked as such:
+# Hopfmann et al., PRB 103, 075413 (2021) - "Hopfmann 2021" - and
+# Langer et al., APL Photonics 10, 066117 (2025) - "Langer 2025".
+# Source and detection parameters are measured; the two-node fiber link
+# and everything downstream remain modeled.
+
+# Measured entanglement negativity 2n of the rack source. The six-hour
+# unattended average (Zena 2026, Fig. 6b) is the operating anchor; the
+# 8 ps-window maximum and the T1-average bound the acceptance-window
+# trade (Fig. 5).
+_NEGATIVITY_2N = 0.960          # six-hour average, 0.960(4)
+_NEGATIVITY_2N_WINDOW = 0.98    # maximum within an 8 ps window, 0.98(1)
+_NEGATIVITY_2N_T1AVG = 0.94     # averaged over one X lifetime, 0.94(1)
+
+# Werner mapping: for w|phi+><phi+| + (1-w)I/4 the negativity satisfies
+# 2N = (3w - 1)/2 (partial-transpose eigenvalue (1-3w)/4; standard
+# result, pinned numerically in tests/test_anchored_source.py), so
+# w = (2*(2N) + 1)/3. Werner is the conservative noise attribution: the
+# measured negativity loss is dominated by FSS precession (coherent,
+# basis-dependent, absent from the fixed measurement basis), which the
+# window model in m1 refines; charging it as isotropic Werner noise
+# overstates the fixed-basis QBER rather than understating it.
+_WERNER_W = (2 * _NEGATIVITY_2N + 1) / 3          # 0.9733
+
+# Per-pulse excitation efficiency (probability the XX cascade fires):
+# measured 0.076(9) on the sister device (Hopfmann 2021), limited by
+# parasitic positive charging of the dot, not by the coherent pi-pulse.
+_ETA_EX = 0.076
+
+# Measured combined X+XX singles rate in the V basis (Zena 2026,
+# Fig. 6a: six-hour average 697(8) kHz at the 1 GHz clock). Under H/V
+# balance this equals the average per-arm total singles rate, which
+# calibrates the per-arm transmission below.
+_SINGLES_V_BASIS_HZ = 697e3
+_DETECTOR_EFF = 0.85            # Single Quantum SSPD, nominal (Zena 2026)
+# Per-arm transmission dot -> detector input (collection into the fiber
+# objective + module/projection optics), calibrated so the model
+# reproduces the measured singles rate. Cross-check: Hopfmann 2021
+# measures the same-defined per-arm detection efficiency directly as
+# 1.1(1)% including the detector; here 0.0108 * 0.85 = 0.92%.
+_ARM_TRANSMISSION = _SINGLES_V_BASIS_HZ / (1e9 * _ETA_EX) / _DETECTOR_EFF
+
+# Multi-pair emission probability per pulse from the measured
+# second-order autocorrelation g2_XX(0) = 8.0(6)e-4 (Langer 2025) via
+# the sub-Poissonian multiphoton bound p_multi <= g2(0) * <n>^2 / 2
+# (Waks, Santori & Yamamoto, PRA 66, 042315 (2002)). The GLLP tagged
+# fraction consumed by m2 is multi_photon_prob / source_brightness
+# = g2 * eta_ex / 2 ~ 3.0e-5.
+_G2_XX_ZERO = 8.0e-4
+
 QUANTUM = {
-    "fidelity": 0.987,              # Schimpf 2021
+    # m1's werner_state() is parameterized by the Bell weight w; the key
+    # keeps its historical name "fidelity".
+    "fidelity": _WERNER_W,          # derived from measured 2n = 0.960(4)
+    "negativity_2n": _NEGATIVITY_2N,
+    "negativity_2n_window": _NEGATIVITY_2N_WINDOW,
+    "negativity_2n_t1avg": _NEGATIVITY_2N_T1AVG,
     "fidelity_sweep": np.linspace(0.90, 0.99, 10),
-    "source_rep_rate_hz": 80e6,     # 80 MHz pulsed excitation
-    "source_brightness": 0.01,      # Pair emission probability per pulse
-    "fiber_length_m": 500,          # Campus scale default
+    "source_rep_rate_hz": 1e9,      # 1 GHz clocked TPE (Zena 2026)
+    "source_brightness": _ETA_EX,   # per-pulse excitation efficiency
+    "singles_rate_v_basis_hz": _SINGLES_V_BASIS_HZ,
+    "fiber_length_m": 500,          # Campus scale default (SCENARIO)
     "fiber_length_sweep_m": np.array([100, 250, 500, 1000, 2000, 5000]),
-    "fiber_loss_db_per_km_780nm": 3.0,   # Native QD emission wavelength
-    "fiber_loss_db_per_km_1550nm": 0.2,  # Telecom C-band after QFC
-    "use_qfc": True,                      # Enable quantum frequency conversion to 1550nm
-    "qfc_efficiency": 0.35,               # PPLN waveguide conversion efficiency (Weber 2019)
-    "qfc_insertion_loss_db": 4.6,         # -10*log10(0.35) ≈ 4.6 dB
-    "coupling_efficiency": 0.15,    # Source-to-fiber
-    "coupling_sweep": np.linspace(0.05, 0.40, 8),
-    "spad_efficiency": 0.65,        # Excelitas SPCM-AQRH
-    "local_optics_efficiency": 0.90, # PBS + waveplate loss for local Photon 1 (no fiber)
-    "colocated": True,               # Co-located QD architecture (Photon 1 stays local)
-    "spad_jitter_ps": 350,          # FWHM
-    "spad_dark_count_hz": 50,
-    "coincidence_window_ns": 2.0,
-    "multi_photon_prob": 8e-5,      # Schimpf 2021
-    "pbs_extinction_ratio": 1000,   # 1000:1
+    # Native 780 nm link fiber (780HP class, Langer 2025); spec-class
+    # attenuation. No quantum frequency conversion: at campus distances
+    # the PPLN insertion loss (~4.6 dB) exceeds the 780 nm fiber loss
+    # it would save.
+    "fiber_loss_db_per_km_780nm": 3.5,
+    "coupling_efficiency": _ARM_TRANSMISSION,   # calibrated, ~0.0108
+    # Sweep spans the calibrated value up to the group's device roadmap:
+    # theoretical microlens fiber-coupled efficiency 0.21-0.24 (0.37-0.39
+    # with AR coating, Langer 2025); simulated free-standing CBG devices
+    # 0.27-0.40 (Dhurjati 2026, arXiv:2605.02360).
+    "coupling_sweep": np.array([0.005, _ARM_TRANSMISSION, 0.02, 0.05,
+                                0.10, 0.21, 0.30, 0.40]),
+    "detector_efficiency": _DETECTOR_EFF,
+    "local_optics_efficiency": 1.0,  # absorbed into calibrated coupling
+    "colocated": True,               # rack architecture (Photon 1 local)
+    "detector_jitter_rms_ps": 20,    # SSPD single-detector RMS (Zena 2026)
+    "two_photon_jitter_fwhm_ps": 50, # two-photon timing resolution
+    "detector_dark_count_hz": 50,    # not reported; conservative SSPD value
+    "coincidence_window_ns": 0.5,    # ~3x T1; swept in exp15
+    "multi_photon_prob": 0.5 * _G2_XX_ZERO * _ETA_EX**2,  # Waks 2002 bound
+    "g2_xx_zero": _G2_XX_ZERO,
+    "pbs_extinction_ratio": 1000,   # 1000:1, not reported; standard spec
+    # Exciton fine structure and lifetime (Zena 2026): drive the
+    # entanglement-vs-delay model behind the exp15 window optimization.
+    "fss_uev": 2.54,                # 2.54(12) ueV
+    "t1_x_ps": 162.0,               # 162(4) ps
     # Fixed conservative allowance for residual birefringence in the
     # ANALYTIC QBER model (m1.compute_qber_analytical). The Monte Carlo
     # derives birefringence from fiber_birefringence_rad_per_km_per_C ×
@@ -42,7 +113,7 @@ QUANTUM = {
     # declared physics.
     "analytic_qber_birefringence_allowance": 0.001,
     "fiber_birefringence_rad_per_km_per_C": 0.01,  # Compensated SMF (pol. controller)
-    "temperature_variation_C": 2.0,
+    "temperature_variation_C": 2.0,  # lab climate 18(2) C (Zena 2026)
     # CHSH measurement angles (radians) - optimal for |Φ+⟩
     "chsh_angles_alice": [0, np.pi/4],           # 0°, 45°
     "chsh_angles_bob": [np.pi/8, 3*np.pi/8],     # 22.5°, 67.5°
@@ -70,7 +141,14 @@ POST_PROC = {
     "fpga_ldpc_throughput_mbps": 100,     # Conservative estimate
     "fpga_toeplitz_clock_mhz": 300,
     "fpga_latency_safety_factor": 2.0,    # 2× margin
-    "bell_test_duty_cycle": 0.02,  # 2% overhead
+    # Conduit-mode entanglement-witness duty cycle, derived from measured
+    # quantities instead of asserted: one 4-setting CHSH check at the
+    # rack system's 60 s/setting tomography integration (Zena 2026,
+    # Sec. 4) once per measured six-hour hands-off stability window
+    # (2n never below 0.95 without active stabilization, Fig. 6b):
+    # 4 x 60 s / 6 h = 0.0111. BBM92-mode parameter estimation is priced
+    # inside sifting instead and does not use this knob.
+    "bell_test_duty_cycle": (4 * 60) / (6 * 3600),
 }
 
 # QKD-FRAMED COMPARISON ARM (exp13)
@@ -145,13 +223,12 @@ BITS_PER_PARAM = 32
 # round-latency decomposition both consume this).
 CLASSICAL_LINK_BPS = 1e9  # 1 Gbps campus LAN reference
 
-# DERIVED OPERATING POINTS - single source of truth for key rates
+# DERIVED OPERATING POINT - single source of truth for key rates
 # The per-edge secret rate is DERIVED at import time from the m1 device
 # model and the m2 post-processing waterfall, evaluated at the
 # QUANTUM/POST_PROC parameters above. It moves automatically if the physics
-# config changes. Experiments must import OPERATING_POINT (modeled device)
-# or PROJECTED_OPERATING_POINT (labeled hypothetical) - never hardcode a
-# rate literal.
+# config changes. Experiments must import OPERATING_POINT - never hardcode
+# a rate literal.
 
 
 def _rate_waterfall_at(raw_edge_rate_hz, qber):
@@ -173,21 +250,22 @@ def _rate_waterfall_at(raw_edge_rate_hz, qber):
 
 
 def _derive_operating_point():
-    """Modeled-device operating point (analytic, deterministic).
+    """Anchored operating point (analytic, deterministic).
 
     Raw edge rate: the symmetric dual-endpoint edge receives ~R/2 from each
     endpoint's source (m1.edge_key_rate_symmetric), netting one full
     source-link coincidence rate R = m1.compute_coincidence_rate(...) per
     edge; the triangle's three edges distill CONCURRENTLY at this rate, so
     the binding per-round constraint is the per-edge pool-fill time.
-    QBER: m1.compute_qber_analytical at the config fidelity/extinction.
-    Experiment 1 [1d] cross-validates both with Monte Carlo (15,355 Hz,
-    QBER 0.0068 at seed 7 vs analytic ≈15.6 kHz, 0.0085 - the MC includes
-    sampled accidentals/dark counts; agreement within sampling noise, and
-    the analytic QBER is the conservative one).
+    QBER: m1.compute_qber_analytical at the config Bell weight/extinction.
 
-    All numbers are simulation-grade (m1 device model), not hardware
-    measurements.
+    Source and detection inputs are measured (Zena 2026; sister-device
+    values Hopfmann 2021 / Langer 2025 - see the QUANTUM block); the link
+    and distillation are modeled, so the derived rate is still
+    simulation-grade, not a hardware measurement. The coincidence rate
+    inherits the eta_ex sensitivity noted at source_brightness: at fixed
+    measured singles it scales as 1/eta_ex, pending the rack device's own
+    coincidence data.
     """
     try:
         from modules.m1_quantum_source import (
@@ -199,13 +277,10 @@ def _derive_operating_point():
     raw_edge_rate_hz = compute_coincidence_rate(
         QUANTUM['source_rep_rate_hz'], QUANTUM['source_brightness'],
         QUANTUM['coupling_efficiency'], QUANTUM['fiber_length_m'],
-        QUANTUM['fiber_loss_db_per_km_1550nm'] if QUANTUM['use_qfc']
-        else QUANTUM['fiber_loss_db_per_km_780nm'],
-        QUANTUM['spad_efficiency'],
+        QUANTUM['fiber_loss_db_per_km_780nm'],
+        QUANTUM['detector_efficiency'],
         colocated=QUANTUM['colocated'],
         local_optics_efficiency=QUANTUM['local_optics_efficiency'],
-        use_qfc=QUANTUM['use_qfc'],
-        qfc_efficiency=QUANTUM['qfc_efficiency'],
     )
     qber = compute_qber_analytical(
         QUANTUM['fidelity'], pbs_extinction=QUANTUM['pbs_extinction_ratio'],
@@ -213,7 +288,8 @@ def _derive_operating_point():
     )
     wf = _rate_waterfall_at(raw_edge_rate_hz, qber)
     return {
-        "label": "modeled device (m1+m2 derived, simulation-grade)",
+        "label": "QD-CamNetz-anchored (source/detection measured, "
+                 "link+distillation modeled)",
         "raw_edge_rate_hz": raw_edge_rate_hz,
         "qber": qber,
         "secret_rate_bps": wf["final_secure_rate"],
@@ -232,46 +308,7 @@ def _derive_operating_point():
     }
 
 
-def _derive_projected_operating_point():
-    """HYPOTHETICAL 1 MHz-class source - NOT produced by the m1 device model.
-
-    Retained as the explicitly-labeled optimistic projection: raw
-    coincidence rate 1 MHz at QBER 2% - the assumption formerly smuggled
-    into exps 2/3/6/8 as a hardcoded 675000 bps literal. (That legacy
-    literal additionally baked in the superseded pre-GLLP waterfall; run
-    through the corrected waterfall, the same 1 MHz / 2% assumption
-    yields ~0.71 Mbps - ~0.81 Mbps before the finite-blocklength FER
-    charge of ~12%, which applies because 2% QBER sits just below the
-    declared rate-0.84 code's effective design point.) Sources of this
-    brightness class are plausible for state-of-the-art entangled-pair
-    hardware but are hypothetical here: nothing in m1 produces this rate
-    at the config above. Every result computed at this point MUST carry
-    the "projected" label.
-    """
-    raw_edge_rate_hz = 1e6   # hypothetical 1 MHz-class raw coincidence rate
-    qber = 0.02              # exp2's historical Assumption-D midpoint
-    wf = _rate_waterfall_at(raw_edge_rate_hz, qber)
-    return {
-        "label": "projected 1 MHz-class source (hypothetical, not modeled)",
-        "raw_edge_rate_hz": raw_edge_rate_hz,
-        "qber": qber,
-        "secret_rate_bps": wf["final_secure_rate"],
-        "tagged_fraction": wf["tagged_fraction"],
-        "waterfall": wf,
-        # Same honesty caveat as OPERATING_POINT - and it bites harder
-        # here: 2% QBER sits just below the declared code's effective
-        # design point (h2_inv((1-R)/beta_dec) ~ 2.07%), where the
-        # finite-blocklength FER is 0.12 and SENSITIVE to
-        # ec_decoder_beta (see the m2 docstring: 0.73 at 1.15).
-        "ec_model_caveat": "EC FER from the finite-blocklength normal "
-                           "approximation (~0.12 at 2% QBER, sensitive "
-                           "to ec_decoder_beta near this point); not a "
-                           "measured decoder curve - see exp2d",
-    }
-
-
 OPERATING_POINT = _derive_operating_point()
-PROJECTED_OPERATING_POINT = _derive_projected_operating_point()
 
 # MODULE 3: MESH TOPOLOGY PARAMETERS
 MESH = {

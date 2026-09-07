@@ -49,7 +49,7 @@ import matplotlib.patches as mpatches
 # Add project root to path
 sys.path.insert(0, os.path.dirname(__file__))
 from config import (QUANTUM, POST_PROC, MESH, FL, VIZ, RESULTS_DIR,
-                    BITS_PER_PARAM, OPERATING_POINT, PROJECTED_OPERATING_POINT,
+                    BITS_PER_PARAM, OPERATING_POINT,
                     CLASSICAL_LINK_BPS, QKD_FRAMING, BBM92)
 
 from modules.m1_quantum_source import (
@@ -110,8 +110,6 @@ MAIN_FIGURES = {
     'exp5_dropout_recovery',
     'exp7_qber_key_rate_envelope',
     'exp9_hndl_transcript',
-    'exp12_sota_comparison',
-    'exp13_qkd_framing',
     'exp14_bbm92_executing',
 }
 
@@ -345,13 +343,11 @@ def run_experiment_1(quick=False):
 
     fidelities = QUANTUM['fidelity_sweep'] if not quick else np.linspace(0.90, 0.99, 5)
     fiber_lengths = QUANTUM['fiber_length_sweep_m'] if not quick else np.array([100, 500, 2000])
-    coupling_effs = QUANTUM['coupling_sweep'] if not quick else np.linspace(0.05, 0.35, 4)
+    coupling_effs = (QUANTUM['coupling_sweep'] if not quick
+                     else QUANTUM['coupling_sweep'][::2])
 
-    use_qfc = QUANTUM.get('use_qfc', False)
-    qfc_eff = QUANTUM.get('qfc_efficiency', 0.35)
-    # Select fiber loss based on whether QFC converts to telecom C-band
-    fiber_loss = QUANTUM.get('fiber_loss_db_per_km_1550nm', 0.2) if use_qfc else QUANTUM['fiber_loss_db_per_km_780nm']
-    wavelength_label = "1550nm (C-band via QFC)" if use_qfc else "780nm (native)"
+    # Native 780 nm link, no frequency conversion (rack architecture).
+    fiber_loss = QUANTUM['fiber_loss_db_per_km_780nm']
 
     # 1a: QBER vs fidelity, with noise-model sensitivity and a
     # finite-statistics CHSH estimate.
@@ -375,11 +371,10 @@ def run_experiment_1(quick=False):
                  * POST_PROC['bell_test_duty_cycle'] * 60)
     rng_bell = np.random.default_rng(11)
     for f in fidelities:
-        result = simulate_source(fidelity=f, n_pairs=5_000_000, fiber_length_m=100,
+        result = simulate_source(fidelity=f, n_pairs=1_520_000_000, fiber_length_m=100,
                                  fiber_loss_db_per_km=fiber_loss,
                                  colocated=QUANTUM.get('colocated', True),
-                                 local_optics_efficiency=QUANTUM.get('local_optics_efficiency', 0.90),
-                                 use_qfc=use_qfc, qfc_efficiency=qfc_eff,
+                                 local_optics_efficiency=QUANTUM['local_optics_efficiency'],
                                  rng=np.random.default_rng(42))
         qbers_sim.append(result.qber)
         qbers_analytical.append(compute_qber_analytical(f))
@@ -394,7 +389,7 @@ def run_experiment_1(quick=False):
         sm, ss = sample_chsh_s(werner_state(f), n_bell, rng=rng_bell)
         s_sampled_mean.append(sm)
         s_sampled_std.append(ss)
-    print(f"      amplitude damping at F={fidelities[-1]:.3f}: e_z "
+    print(f"      amplitude damping at w={fidelities[-1]:.3f}: e_z "
           f"{qbers_ad_z[-1]*100:.2f}% vs e_x {qbers_ad_x[-1]*100:.2f}% "
           f"(Werner: equal at {(1-fidelities[-1])/2*100:.2f}% + "
           f"extinction + birefringence).\n      The e_ph = e_bit "
@@ -408,9 +403,10 @@ def run_experiment_1(quick=False):
           f"      unaffected: it measures e_x directly, and e_x "
           f"remains essentially at the\n      Werner value (within 3% "
           f"relative at matched Bell weight).")
-    print(f"      sampled CHSH at F={fidelities[-1]:.3f}: S = "
+    print(f"      sampled CHSH at w={fidelities[-1]:.3f}: S = "
           f"{s_sampled_mean[-1]:.3f} +- {s_sampled_std[-1]:.3f} "
-          f"({n_bell:,} events = one 60 s round's 2% duty cycle)")
+          f"({n_bell:,} events = one 60 s round at the "
+          f"{POST_PROC['bell_test_duty_cycle']*100:.2f}% witness duty cycle)")
 
     # 1d: Symmetric dual-endpoint edge keying (availability/fairness witness)
     print("  [1d] Dual-endpoint (beamsplitter-multiplexed) edge keying...")
@@ -422,15 +418,14 @@ def run_experiment_1(quick=False):
         fiber_length_m=QUANTUM['fiber_length_m'],
         fiber_loss_db_per_km=fiber_loss,
         coupling_efficiency=QUANTUM['coupling_efficiency'],
-        spad_efficiency=QUANTUM['spad_efficiency'],
-        spad_dark_count_hz=QUANTUM['spad_dark_count_hz'],
+        detector_efficiency=QUANTUM['detector_efficiency'],
+        detector_dark_count_hz=QUANTUM['detector_dark_count_hz'],
         coincidence_window_ns=QUANTUM['coincidence_window_ns'],
         pbs_extinction_ratio=QUANTUM['pbs_extinction_ratio'],
         fiber_birefringence_rad_per_km_per_C=QUANTUM['fiber_birefringence_rad_per_km_per_C'],
         temperature_variation_C=QUANTUM['temperature_variation_C'],
         colocated=QUANTUM.get('colocated', True),
-        local_optics_efficiency=QUANTUM.get('local_optics_efficiency', 0.90),
-        use_qfc=use_qfc, qfc_efficiency=qfc_eff,
+        local_optics_efficiency=QUANTUM['local_optics_efficiency'],
         rng=np.random.default_rng(7))
     print(f"      edge rate={_sym.coincidence_rate_hz:,.0f} Hz  QBER={_sym.qber:.4f}  "
           f"S={_sym.chsh_s:.3f}  symmetry_ratio={_sym.params['source_symmetry_ratio']:.3f} "
@@ -443,9 +438,10 @@ def run_experiment_1(quick=False):
              linewidth=1.5, label='Amplitude damping, e_z')
     ax1.plot(fidelities, np.array(qbers_ad_x)*100, ':', color=C['dark'],
              linewidth=1.5, label='Amplitude damping, e_x')
-    ax1.axhline(y=1.9, color='gray', linestyle=':', linewidth=1, label='Schimpf 2021 (1.9%)')
-    ax1.axvline(x=0.987, color='gray', linestyle=':', alpha=0.5)
-    ax1.set_xlabel('Entanglement Fidelity F')
+    ax1.axvline(x=QUANTUM['fidelity'], color='gray', linestyle=':', alpha=0.7,
+                label=f"anchored Bell weight ({QUANTUM['fidelity']:.3f}, "
+                      f"from 2n = {QUANTUM['negativity_2n']:.3f})")
+    ax1.set_xlabel('Bell weight w (Werner)')
     ax1.set_ylabel('QBER (%)')
     ax1.set_title('QBER vs fidelity by noise model')
     ax1.legend(fontsize=6, loc='upper right')
@@ -458,7 +454,7 @@ def run_experiment_1(quick=False):
                  label=f'Sampled ({n_bell:,} events/round)')
     ax2.axhline(y=2.0, color=C['unmasked'], linestyle='--', linewidth=2, label='Classical bound (S=2)')
     ax2.axhline(y=2*np.sqrt(2), color='gray', linestyle=':', linewidth=1.5, label=f'Quantum max (S={2*np.sqrt(2):.2f})')
-    ax2.set_xlabel('Entanglement Fidelity F')
+    ax2.set_xlabel('Bell weight w (Werner)')
     ax2.set_ylabel('CHSH S-parameter')
     ax2.set_title('CHSH S: exact and sampled')
     ax2.legend(fontsize=6)
@@ -474,10 +470,9 @@ def run_experiment_1(quick=False):
         rate = compute_coincidence_rate(
             QUANTUM['source_rep_rate_hz'], QUANTUM['source_brightness'],
             QUANTUM['coupling_efficiency'], fl,
-            fiber_loss, QUANTUM['spad_efficiency'],
+            fiber_loss, QUANTUM['detector_efficiency'],
             colocated=QUANTUM.get('colocated', True),
-            local_optics_efficiency=QUANTUM.get('local_optics_efficiency', 0.90),
-            use_qfc=use_qfc, qfc_efficiency=qfc_eff,
+            local_optics_efficiency=QUANTUM['local_optics_efficiency'],
         )
         rates.append(rate)
 
@@ -493,13 +488,14 @@ def run_experiment_1(quick=False):
                     textcoords='offset points',
                     ha='center', fontsize=7, color=C['dark'])
 
-    # Reference lines in kHz
-    ax.axhline(y=1000, color=C['pareto'], linestyle='--', alpha=0.7, label='1 MHz target')
-    ax.axhline(y=100, color=C['accent'], linestyle='--', alpha=0.7, label='100 kHz minimum')
+    # Reference line: the anchored edge rate at the campus default length
+    ax.axhline(y=OPERATING_POINT['raw_edge_rate_hz'] / 1e3, color=C['pareto'],
+               linestyle='--', alpha=0.7,
+               label=f"operating point ({OPERATING_POINT['raw_edge_rate_hz']/1e3:.1f} kHz at "
+                     f"{QUANTUM['fiber_length_m']} m)")
 
     ax.set_xlabel('Fiber Length (km)')
     ax.set_ylabel('Coincidence Rate (kHz)')
-    qfc_note = f', QFC eff={qfc_eff}' if use_qfc else ''
     ax.set_title('Coincidence rate vs fiber length')
     ax.legend()
 
@@ -524,17 +520,24 @@ def run_experiment_1(quick=False):
     for fl in [100, 500, 1000, 2000]:
         rates_c = [compute_coincidence_rate(
             QUANTUM['source_rep_rate_hz'], QUANTUM['source_brightness'],
-            ce, fl, fiber_loss, QUANTUM['spad_efficiency'],
+            ce, fl, fiber_loss, QUANTUM['detector_efficiency'],
             colocated=QUANTUM.get('colocated', True),
-            local_optics_efficiency=QUANTUM.get('local_optics_efficiency', 0.90),
-            use_qfc=use_qfc, qfc_efficiency=qfc_eff,
+            local_optics_efficiency=QUANTUM['local_optics_efficiency'],
         ) for ce in coupling_effs]
-        ax.semilogy(coupling_effs, rates_c, 'o-', linewidth=2, label=f'{fl}m fiber')
+        ax.loglog(coupling_effs, rates_c, 'o-', linewidth=2, label=f'{fl}m fiber')
 
-    ax.axhline(y=1e6, color='gray', linestyle=':', alpha=0.5,
-               label='1 MHz-class (hypothetical projection)')
-    ax.set_ylim(top=3e6)
-    ax.set_xlabel('Source-to-Fiber Coupling Efficiency')
+    # Hardware anchors on the coupling axis: the calibrated arm
+    # transmission of the rack device and the group's device-roadmap
+    # ceilings (theoretical microlens with AR coating, Langer 2025;
+    # simulated free-standing CBG, Dhurjati 2026).
+    ax.axvline(x=QUANTUM['coupling_efficiency'], color=C['dark'],
+               linestyle='--', linewidth=1,
+               label=f"calibrated ({QUANTUM['coupling_efficiency']:.4f})")
+    ax.axvline(x=0.21, color=C['accent'], linestyle=':', linewidth=1,
+               label='microlens theory (0.21)')
+    ax.axvline(x=0.40, color=C['pareto'], linestyle=':', linewidth=1,
+               label='CBG simulated (0.40)')
+    ax.set_xlabel('Per-arm coupling efficiency (dot to detector input)')
     ax.set_ylabel('Coincidence Rate (Hz)')
     ax.set_title('Coincidence rate vs coupling efficiency')
     ax.legend()
@@ -553,10 +556,8 @@ def run_experiment_2(quick=False):
     print("="*70)
 
     qber_sweep = POST_PROC['qber_sweep'] if not quick else np.linspace(0.01, 0.05, 5)
-    # Operating points from config - single source of truth.
-    # base_rate is the MODELED device's raw edge rate, not an assumed 1 MHz.
+    # Operating point from config - single source of truth.
     op = OPERATING_POINT
-    proj = PROJECTED_OPERATING_POINT
     base_rate = op['raw_edge_rate_hz']
 
     def _wf(rate_hz, qber, **kw):
@@ -569,8 +570,8 @@ def run_experiment_2(quick=False):
             bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
             **kw)
 
-    # 2a: Rate waterfall at both operating points
-    print("  [2a] Rate waterfall - modeled device vs labeled projection...")
+    # 2a: Rate waterfall at the anchored operating point
+    print("  [2a] Rate waterfall at the anchored operating point...")
     wf = _wf(op['raw_edge_rate_hz'], op['qber'])
     # Sanity: this experiment's waterfall input IS the config
     # operating point, and its output must reproduce config's derived rate -
@@ -578,39 +579,34 @@ def run_experiment_2(quick=False):
     assert abs(wf['final_secure_rate'] - op['secret_rate_bps']) < 1e-6, (
         f"exp2 waterfall ({wf['final_secure_rate']:.3f} bps) diverged from "
         f"config.OPERATING_POINT ({op['secret_rate_bps']:.3f} bps)")
-    wf_proj = _wf(proj['raw_edge_rate_hz'], proj['qber'])
 
     stages = ['Raw', 'Sift', 'EC', 'PA', 'Verif', 'Final']
-    fig, axes = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    for ax, w, point in ((axes[0], wf, op), (axes[1], wf_proj, proj)):
-        vals_khz = [w['raw_coincidence_rate']/1000, w['after_sifting']/1000,
-                    w['after_ec']/1000, w['after_pa']/1000,
-                    w['after_verification']/1000, w['final_secure_rate']/1000]
-        bars = ax.bar(stages, vals_khz,
-                      color=[C['dark'], C['quantum'], C['quantum'],
-                             C['quantum'], C['quantum'], C['pareto']],
-                      edgecolor='white', linewidth=1.5)
-        overheads = ['', '0%', f'−{w["ec_overhead_pct"]:.1f}%',
-                     f'−{w["pa_overhead_pct"]:.1f}%',
-                     f'−{w["verification_overhead_pct"]:.1f}%',
-                     f'−{w["bell_overhead_pct"]:.1f}%']
-        for bar, oh in zip(bars, overheads):
-            if oh:
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                        oh, ha='center', va='bottom', fontsize=6, color='gray')
-        ax.set_ylabel('Rate (kbit/s)')
-        ax.set_title(f"{point['label']}\nQBER {point['qber']*100:.2f}% -> "
-                     f"{w['final_secure_rate']/1000:.1f} kbit/s", fontsize=8)
-        ax.grid(True, alpha=0.2, axis='y')
+    fig, ax = plt.subplots(figsize=VIZ['figsize'])
+    vals_khz = [wf['raw_coincidence_rate']/1000, wf['after_sifting']/1000,
+                wf['after_ec']/1000, wf['after_pa']/1000,
+                wf['after_verification']/1000, wf['final_secure_rate']/1000]
+    bars = ax.bar(stages, vals_khz,
+                  color=[C['dark'], C['quantum'], C['quantum'],
+                         C['quantum'], C['quantum'], C['pareto']],
+                  edgecolor='white', linewidth=1.5)
+    overheads = ['', '0%', f'-{wf["ec_overhead_pct"]:.1f}%',
+                 f'-{wf["pa_overhead_pct"]:.1f}%',
+                 f'-{wf["verification_overhead_pct"]:.1f}%',
+                 f'-{wf["bell_overhead_pct"]:.1f}%']
+    for bar, oh in zip(bars, overheads):
+        if oh:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                    oh, ha='center', va='bottom', fontsize=6, color='gray')
+    ax.set_ylabel('Rate (kbit/s)')
+    ax.set_title(f"{op['label']}\nQBER {op['qber']*100:.2f}% -> "
+                 f"{wf['final_secure_rate']/1000:.2f} kbit/s", fontsize=8)
+    ax.grid(True, alpha=0.2, axis='y')
     fig.suptitle('Shared-bit rate waterfall', fontsize=10, fontweight='bold')
-    fig.tight_layout(w_pad=2.5)
+    fig.tight_layout()
     save_fig(fig, 'exp2a_rate_waterfall')
 
-    print(f"    modeled device : {op['raw_edge_rate_hz']:>11,.0f} Hz raw -> "
+    print(f"    anchored device: {op['raw_edge_rate_hz']:>11,.0f} Hz raw -> "
           f"{wf['final_secure_rate']:>9,.0f} bps secret  (QBER {op['qber']:.4f})")
-    print(f"    PROJECTED      : {proj['raw_edge_rate_hz']:>11,.0f} Hz raw -> "
-          f"{wf_proj['final_secure_rate']:>9,.0f} bps secret  (QBER {proj['qber']:.4f})"
-          f"  - hypothetical 1 MHz-class, not modeled")
 
     # 2b: Final secure rate vs QBER
     print("  [2b] Secure rate vs QBER sweep...")
@@ -658,40 +654,12 @@ def run_experiment_2(quick=False):
     fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp2b_rate_vs_qber')
 
-    # 2c: Rate gain of fixed-basis (no sifting) vs sifting protocol
-    print("  [2c] Fixed-basis vs sifting protocol rate comparison...")
-    our_rates = []
-    sifting_rates = []
-    for q in qber_sweep:
-        our_wf = _wf(base_rate, q)
-        sift_wf = _wf(base_rate * 0.5, q)  # 50% sifting loss
-        our_rates.append(our_wf['final_secure_rate'])
-        sifting_rates.append(sift_wf['final_secure_rate'])
-
-    fig, ax = plt.subplots(figsize=VIZ['figsize'])
-    ax.plot(qber_sweep*100, np.array(our_rates)/1000, 'o-', color=C['quantum'],
-            linewidth=2, label='entangled-key fixed-basis (trusted source)')
-    ax.plot(qber_sweep*100, np.array(sifting_rates)/1000, 's--', color=C['unmasked'],
-            linewidth=2, label='Sifting-based reference (50% loss)')
-    ax.fill_between(qber_sweep*100,
-                     np.array(sifting_rates)/1000, np.array(our_rates)/1000,
-                     alpha=0.15, color=C['quantum'],
-                     label='Rate gain from trusted-source assumption')
-    ax.set_xlabel('QBER (%)')
-    ax.set_ylabel('Shared bit rate (kbit/s)')
-    ax.set_title('Fixed-basis vs sifting-based shared-bit rate',
-                 fontsize=9)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    save_fig(fig, 'exp2c_fixedbasis_vs_sifting')
-
     # 2d: BP decoder spot check (design band vs one degraded point)
     print("  [2d] BP decoder spot check against the finite-blocklength "
           "FER model (toy random LDPC)...")
     bp_validation = validate_bp_against_statistical(
         qber_values=[0.005, 0.01, 0.02] if quick
-        else [0.005, 0.0085, 0.01, 0.02],
+        else [0.005, 0.01, round(OPERATING_POINT['qber'], 4), 0.02],
         block_size=800 if quick else 1000,
         n_blocks=3 if quick else 10,
     )
@@ -723,7 +691,7 @@ def run_experiment_2(quick=False):
           "pipeline output...")
     rng_pa = np.random.default_rng(42)
     src_pa = simulate_source(fidelity=QUANTUM['fidelity'],
-                             n_pairs=8_000_000 if not quick else 4_000_000,
+                             n_pairs=2_000_000_000 if not quick else 1_000_000_000,
                              fiber_length_m=100, rng=rng_pa)
     ec_pa = fast_ec_simulate(src_pa.raw_bits_alice, src_pa.raw_bits_bob,
                              qber_estimate=src_pa.qber, rng=rng_pa)
@@ -761,7 +729,6 @@ def run_experiment_2(quick=False):
     print("  Experiment 2 complete.")
     return {
         "operating_point_secret_bps": op['secret_rate_bps'],
-        "projected_secret_bps": wf_proj['final_secure_rate'],
         "final_rates": final_rates,
         "qber_sweep": qber_sweep.tolist(),
         "bp_validation": bp_validation,
@@ -783,13 +750,12 @@ def run_experiment_3(quick=False):
     node_counts = MESH['node_counts_sweep'] if not quick else [3, 6, 12, 24, 40]
     model_sizes = [5e4, 1e5, 5e5, 1e6, 2e6] if not quick else [1e5, 5e5, 1e6]
     round_periods = [15, 30, 60, 120, 300] if not quick else [30, 60, 300]
-    # Operating points from config - single source of truth.
+    # Operating point from config - single source of truth.
     op_rate = OPERATING_POINT['secret_rate_bps']
-    proj_rate = PROJECTED_OPERATING_POINT['secret_rate_bps']
 
     # 3a: Aggregation depth vs node count
     # (Depth and triangle count are geometric - independent of key rate;
-    #  the mesh's latency fields use the modeled-device rate.)
+    #  the mesh's latency fields use the anchored-device rate.)
     print("  [3a] Aggregation depth vs node count...")
     depths, n_triangles_list = [], []
     for n in node_counts:
@@ -818,41 +784,21 @@ def run_experiment_3(quick=False):
     fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp3a_mesh_scaling')
 
-    # 3b: Max nodes heatmap - modeled device vs labeled projection
-    print("  [3b] Max mesh size heatmap - modeled device vs labeled projection...")
+    # 3b: Max feasible nodes vs model size and round period at the
+    # anchored operating point (table only; the figure said what exp6
+    # already shows - key supply binds)
+    print("  [3b] Max mesh size table at the anchored operating point...")
     rate_points = [
-        (op_rate, f'modeled device ({op_rate/1000:.1f} kbit/s)'),
-        (proj_rate, f'PROJECTED 1 MHz-class ({proj_rate/1000:.0f} kbit/s, hypothetical)'),
+        (op_rate, f'anchored device ({op_rate/1000:.2f} kbit/s)'),
     ]
     heatmaps = []
-    fig, axes = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    for ax, (rate, rlabel) in zip(axes, rate_points):
+    for rate, rlabel in rate_points:
         heatmap = np.zeros((len(model_sizes), len(round_periods)))
         for i, ms in enumerate(model_sizes):
             for j, rp in enumerate(round_periods):
                 max_tri, max_n = compute_max_mesh_size(int(ms), rp, rate)
                 heatmap[i, j] = max_n
         heatmaps.append(heatmap)
-        im = ax.imshow(heatmap, aspect='auto', cmap='YlOrBr', interpolation='nearest')
-        ax.set_xticks(range(len(round_periods)))
-        ax.set_xticklabels([f'{r}s' for r in round_periods])
-        ax.set_yticks(range(len(model_sizes)))
-        ax.set_yticklabels([f'{int(ms/1000)}K' for ms in model_sizes])
-        ax.set_xlabel('Training Round Period')
-        ax.set_ylabel('Model Size (parameters)')
-        ax.set_title(rlabel, fontsize=8)
-        vmax = heatmap.max() if heatmap.max() > 0 else 1
-        for i in range(len(model_sizes)):
-            for j in range(len(round_periods)):
-                val = int(heatmap[i, j])
-                ax.text(j, i, str(val), ha='center', va='center', fontsize=6,
-                        color='white' if val > 0.55 * vmax else 'black',
-                        fontweight='bold')
-        fig.colorbar(im, ax=ax, label='Max nodes')
-    fig.suptitle('Maximum feasible nodes vs model size and round period',
-                 fontsize=10, fontweight='bold')
-    fig.tight_layout(w_pad=2.5)
-    save_fig(fig, 'exp3b_max_nodes_heatmap')
 
     print("    Max nodes (rows = model size), modeled | projected:")
     header = "  ".join(f"{rp:>9}s" for rp in round_periods)
@@ -1100,6 +1046,15 @@ def run_experiment_5(quick=False):
     the MECHANISM is not quantum-unique; the quantum differentiator is that
     freshness is unconditional (no PRF/DH assumption, no key-erasure or
     forward-secrecy reliance).
+
+    Recovery cost is drawn against the seed-based baselines on the SAME
+    dropout events: exp12's executing Bonawitz and Flamingo arms charge
+    threshold-many DH-secret shares per dropped client and one PRF seed
+    per (survivor, dropped) pair respectively; those byte models are
+    applied here to the reveal pairs the ledger records each round, so
+    the O(d) / O(1) gap is shown across the whole sweep rather than at
+    exp12's single dropout. The IT-dealer arms pay exactly this system's
+    O(d) reveal (a pad has no compact seed either).
     """
     print("\n" + "="*70)
     print("EXPERIMENT 5: Dropout recovery under per-round-fresh two-mask aggregation")
@@ -1107,8 +1062,9 @@ def run_experiment_5(quick=False):
 
     from modules.m4_federated_learning import (
         ClinicalMLP, load_clinical_data, run_multitriangle_fl,
-        define_triangle_topology,
+        define_triangle_topology, BYTES_PER_MASKED_WORD,
     )
+    from modules.m7_baselines import BYTES_PER_DH_SHARE, BYTES_PER_PRF_SEED
 
     num_rounds = 40 if not quick else 20
     target_acc = 0.90
@@ -1131,6 +1087,8 @@ def run_experiment_5(quick=False):
             n_clients, rng_seed=seed,
             dirichlet_alpha=FL.get('dirichlet_alpha', 0.5))
         model_fn = lambda: ClinicalMLP(input_dim=input_dim, hidden=128)
+        if si == 0:
+            n_params = sum(p.numel() for p in model_fn().parameters())
         for dr in dropout_rates:
             res, aux = run_multitriangle_fl(
                 model_fn, client_data, test_data,
@@ -1167,6 +1125,23 @@ def run_experiment_5(quick=False):
         rec_bytes = [np.mean([rc.recovery_bytes() / max(rc.n_clients, 1)
                               for rc in r.comm_rounds])
                      for r, _ in results[dr]]
+        # The same dropout events under the seed-based baselines' byte
+        # models (exp12): the ledger charges n_params words per
+        # (survivor, dropped) pair, so the pair count is exact. A
+        # triangle under threshold 2 reveals only when exactly one
+        # member drops (two survivors), so pairs = 2 x drop events.
+        pairs = [[rc.reveal_bytes // (n_params * BYTES_PER_MASKED_WORD)
+                  for rc in r.comm_rounds] for r, _ in results[dr]]
+        assert all(pc % 2 == 0 for ps in pairs for pc in ps), \
+            "reveal pairs not paired: a cluster other than a triangle revealed"
+        rec_bytes_bon = [np.mean([(pc // 2) * 2 * BYTES_PER_DH_SHARE
+                                  / max(rc.n_clients, 1)
+                                  for pc, rc in zip(ps, r.comm_rounds)])
+                         for ps, (r, _) in zip(pairs, results[dr])]
+        rec_bytes_fla = [np.mean([pc * BYTES_PER_PRF_SEED
+                                  / max(rc.n_clients, 1)
+                                  for pc, rc in zip(ps, r.comm_rounds)])
+                         for ps, (r, _) in zip(pairs, results[dr])]
         # latency - modeled wire time of the recovery bytes on the
         # aggregator's access link;
         rec_wire_ms = [1000 * np.mean([rc.recovery_bytes() * 8
@@ -1185,6 +1160,8 @@ def run_experiment_5(quick=False):
             "acc": _mean_ci(accs),
             "recovery_pct": _mean_ci(rec_pct),
             "rec_bytes": _mean_ci(rec_bytes),
+            "rec_bytes_bonawitz": _mean_ci(rec_bytes_bon),
+            "rec_bytes_flamingo": _mean_ci(rec_bytes_fla),
             "rec_wire_ms": _mean_ci(rec_wire_ms),
             "tfail_pct": _mean_ci(tfail_pct),
             "chi_pct": _mean_ci(chi_pct),
@@ -1197,68 +1174,88 @@ def run_experiment_5(quick=False):
                            label=f"dropout {int(dr*100)}% (seed "
                                  f"{42 + num_seeds - 1})")
 
-    # Plot 1: accuracy vs dropout rate (mean ± 95% CI across seeds)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    # Panel 1: accuracy vs dropout rate (mean +- 95% CI across seeds).
+    # Panel 2: recovery bytes per client-round, this system against the
+    # seed-based baselines on the same dropout events (log axis: the
+    # gap is n_params-fold). Panel 3: threshold-failed triangle-rounds,
+    # identical in every arm (same Shamir threshold).
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=VIZ['figsize_wide'])
     acc_means = [stats[dr]["acc"][0] for dr in drs]
     acc_hws = [stats[dr]["acc"][2] for dr in drs]
     xpct = [100 * dr for dr in drs]
     ax1.errorbar(xpct, acc_means, yerr=acc_hws, fmt='o-', linewidth=2,
                  capsize=4, color=C['quantum'],
-                 label=f'final accuracy (mean +- 95% CI, {num_seeds} seeds)')
+                 label=f'final accuracy\n(mean +- 95% CI, {num_seeds} seeds)')
     ax1.axhline(y=target_acc, color='gray', linestyle=':', alpha=0.5,
                 label=f'{target_acc} target')
     ax1.set_xlabel('Per-round dropout rate (%)')
     ax1.set_ylabel(f'Final test accuracy ({num_rounds} rounds)')
     ax1.set_xlim(min(xpct) - 2.5, max(xpct) + 2.5)
-    ax1.set_title(f'Accuracy degradation vs dropout ({num_seeds} seeds)')
-    ax1.legend(fontsize=8)
+    ax1.set_title('Accuracy vs dropout', fontsize=8)
+    ax1.legend(fontsize=6, loc='lower left')
     ax1.grid(True, alpha=0.3)
 
-    # Plot 2 (HEADLINE): the cost of recovery
-    rb_means = [stats[dr]["rec_bytes"][0] / 1000 for dr in drs]
-    rb_hws = [stats[dr]["rec_bytes"][2] / 1000 for dr in drs]
+    # 0% dropout has no recovery traffic in any arm; a log axis cannot
+    # show it, so the byte panel starts at the first non-zero rate.
+    nz = [dr for dr in drs if stats[dr]["rec_bytes"][0] > 0]
+    xnz = [100 * dr for dr in nz]
+    ax2.errorbar(xnz, [stats[dr]["rec_bytes"][0] for dr in nz],
+                 yerr=[stats[dr]["rec_bytes"][2] for dr in nz],
+                 fmt='o-', linewidth=2, capsize=3, color=C['quantum'],
+                 label='this system / IT dealer\n(reveal pad bits, O(d))')
+    ax2.plot(xnz, [stats[dr]["rec_bytes_bonawitz"][0] for dr in nz],
+             's--', linewidth=1.5, color=C['unmasked'],
+             label='Bonawitz (Shamir DH shares, O(1))')
+    ax2.plot(xnz, [stats[dr]["rec_bytes_flamingo"][0] for dr in nz],
+             '^:', linewidth=1.5, color=C['dp'],
+             label='Flamingo (PRF seed, O(1))')
+    ax2.set_yscale('log')
+    ax2.set_xlim(min(xpct) - 2.5, max(xpct) + 2.5)
+    _ymax = max(stats[dr]["rec_bytes"][0] + stats[dr]["rec_bytes"][2]
+                for dr in nz)
+    ax2.set_ylim(0.5, _ymax * 8)
+    ax2.set_xlabel('Per-round dropout rate (%)')
+    ax2.set_ylabel('Recovery bytes per client-round')
+    ax2.set_title('Recovery cost, same dropout events', fontsize=8)
+    # the band between the O(1) floor and the O(d) curve is empty
+    ax2.legend(fontsize=6, loc='center left')
+    ax2.grid(True, alpha=0.3, which='both')
+
     tf_means = [stats[dr]["tfail_pct"][0] for dr in drs]
     tf_hws = [stats[dr]["tfail_pct"][2] for dr in drs]
-    ax2.bar(np.arange(len(drs)) - 0.18, rb_means, 0.36, yerr=rb_hws,
-            capsize=3, color=C['pareto'],
-            label='recovery bytes (reveals) kB/client/round')
-    ax2b = ax2.twinx()
-    ax2b.bar(np.arange(len(drs)) + 0.18, tf_means, 0.36, yerr=tf_hws,
-             capsize=3, color=C['unmasked'],
-             label='threshold-failed triangle-rounds %')
-    ax2.set_xticks(np.arange(len(drs)))
-    ax2.set_xticklabels([f'{int(dr*100)}%' for dr in drs])
-    ax2.set_xlabel('Per-round dropout rate')
-    ax2.set_ylabel('Recovery bytes (kB/client/round)', color=C['pareto'])
-    # headroom above the tallest error whisker on both y-axes
-    ax2.set_ylim(0, max(r + h for r, h in zip(rb_means, rb_hws)) * 1.15)
-    ax2b.set_ylim(0, max(t + h for t, h in zip(tf_means, tf_hws)) * 1.15)
-    ax2b.set_ylabel('Threshold failures (% of triangle-rounds)',
-                    color=C['unmasked'])
-    ax2.set_title('Reveal-based recovery cost')
-    h1, l1 = ax2.get_legend_handles_labels()
-    h2, l2 = ax2b.get_legend_handles_labels()
-    ax2.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper left')
-    ax2.grid(True, alpha=0.3, axis='y')
+    ax3.bar(np.arange(len(drs)), tf_means, 0.6, yerr=tf_hws, capsize=3,
+            color=C['unmasked'])
+    ax3.set_xticks(np.arange(len(drs)))
+    ax3.set_xticklabels([f'{int(dr*100)}' for dr in drs])
+    ax3.set_xlabel('Per-round dropout rate (%)')
+    ax3.set_ylabel('Threshold-failed triangle-rounds (%)')
+    ax3.set_ylim(0, max(t + h for t, h in zip(tf_means, tf_hws)) * 1.15)
+    ax3.set_title('Lost work (all arms)', fontsize=8)
+    ax3.grid(True, alpha=0.3, axis='y')
 
     fig.suptitle('Dropout recovery: accuracy and cost',
                  fontsize=10, fontweight='bold')
-    fig.tight_layout(w_pad=2.5)
+    fig.tight_layout(w_pad=2.0)
     save_fig(fig, 'exp5_dropout_recovery')
 
     print(f"\n  Summary ({num_seeds} seeds, mean ± std [95% CI half-width]):")
     print(f"  {'Dropout':>8}  {'Final acc':>22}  {'Recovery %':>12}  "
-          f"{'Reveal kB/cl-rd':>16}  {'Wire ms':>8}  {'T-fail %':>9}  "
-          f"{'χ² fail %':>10}")
+          f"{'Reveal kB/cl-rd':>16}  {'Bonawitz B':>11}  {'Flamingo B':>11}  "
+          f"{'Wire ms':>8}  {'T-fail %':>9}  {'chi2 fail %':>12}")
     for dr in drs:
         s = stats[dr]
         print(f"  {int(dr*100):>7}%  "
-              f"{s['acc'][0]:.4f} ± {s['acc'][1]:.4f} [{s['acc'][2]:.4f}]  "
+              f"{s['acc'][0]:.4f} +- {s['acc'][1]:.4f} [{s['acc'][2]:.4f}]  "
               f"{s['recovery_pct'][0]:>11.1f}%  "
               f"{s['rec_bytes'][0]/1000:>15.1f}  "
+              f"{s['rec_bytes_bonawitz'][0]:>11.1f}  "
+              f"{s['rec_bytes_flamingo'][0]:>11.1f}  "
               f"{s['rec_wire_ms'][0]:>8.3f}  "
               f"{s['tfail_pct'][0]:>8.2f}%  "
-              f"{s['chi_pct'][0]:>9.1f}%")
+              f"{s['chi_pct'][0]:>11.1f}%")
+    print("  Baseline bytes: exp12's seed-reveal byte models on the same "
+          "dropout events\n  (Bonawitz 2 x 6 B shares per dropped client; "
+          "Flamingo 4 B per survivor-dropped pair).")
     # Classical parity baseline (Flamingo-style per-round pool)
     # Same reveal-based recovery, same dropout, two mask-material sources.
     # Mechanism parity is EXPECTED; the differentiator is the assumption class.
@@ -1294,6 +1291,11 @@ def run_experiment_5(quick=False):
         "final_acc_ci95": float(stats[dr]["acc"][2]),
         "recovery_pct_mean": float(stats[dr]["recovery_pct"][0]),
         "recovery_bytes_per_client_round": float(stats[dr]["rec_bytes"][0]),
+        "recovery_bytes_ci95": float(stats[dr]["rec_bytes"][2]),
+        "recovery_bytes_bonawitz_per_client_round":
+            float(stats[dr]["rec_bytes_bonawitz"][0]),
+        "recovery_bytes_flamingo_per_client_round":
+            float(stats[dr]["rec_bytes_flamingo"][0]),
         "recovery_wire_ms": float(stats[dr]["rec_wire_ms"][0]),
         "threshold_fail_pct": float(stats[dr]["tfail_pct"][0]),
         "chi2_fail_pct": float(stats[dr]["chi_pct"][0]),
@@ -1582,11 +1584,9 @@ def run_experiment_6(quick=False):
     # Operating points from config - single source of truth.
     # The sweep brackets the two labeled points; no unlabeled rate literals.
     op_rate = OPERATING_POINT['secret_rate_bps']
-    proj_rate = PROJECTED_OPERATING_POINT['secret_rate_bps']
-    key_rates = [op_rate, 100e3, 300e3, proj_rate] if not quick else [op_rate, proj_rate]
+    key_rates = [op_rate, 30e3, 100e3, 300e3] if not quick else [op_rate, 100e3]
     rate_labels = {
-        op_rate: f'{op_rate/1000:.1f} kbit/s - modeled device',
-        proj_rate: f'{proj_rate/1000:.0f} kbit/s - PROJECTED 1 MHz-class (hypothetical)',
+        op_rate: f'{op_rate/1000:.2f} kbit/s - anchored device',
     }
 
     # Measured local compute time per model size
@@ -1756,26 +1756,18 @@ def run_experiment_7(quick=False):
     # so it cannot occlude the min-entropy curve or the zero-rate row.
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 4.3))
 
-    # A log axis cannot show 0. Past the code capacity the declared rate
-    # collapses to (numerically) zero; those points are drawn as 'v'
-    # markers ON a display floor rather than letting the curve run off
-    # the bottom of the box.
-    rate_floor_kbps = 1e-4          # 0.1 bit/s display floor
+    # Linear rate axis: the two framings sit 1.32x apart, which a
+    # multi-decade log axis hides, and the collapse past the code's
+    # design point reads as the curve reaching zero rather than as
+    # off-scale floor markers.
     sr = np.array(shared_rates) / 1000
-    sr_line = np.where(sr >= rate_floor_kbps, sr, np.nan)
-    sr_clip = qbers[sr < rate_floor_kbps]
     br = np.array(bbm92_rates) / 1000
-    br_line = np.where(br >= rate_floor_kbps, br, np.nan)
-    ax1.plot(qbers, br_line, 's-', linewidth=2, markersize=4,
+    ax1.plot(qbers, br, 's-', linewidth=2, markersize=4,
              color=C['pareto'],
              label='BBM92-framed (keep 0.82), rate-0.84 code')
-    ax1.plot(qbers, sr_line, 'o-', linewidth=1.6,
+    ax1.plot(qbers, sr, 'o-', linewidth=1.6,
              color=C['quantum'],
              label='trusted-conduit mode, same code')
-    if len(sr_clip):
-        ax1.plot(sr_clip, np.full(len(sr_clip), rate_floor_kbps), 'v',
-                 color=C['quantum'], markersize=5,
-                 label='rate < 0.1 bit/s (effectively zero)')
     ax1.plot(qbers, np.array(envelope_rates) / 1000, '--', linewidth=1.5,
              color=C['accent'], label='Rate-adapted family (hypothetical)')
     ax1.axvline(x=OPERATING_POINT['qber'], color=C['dark'], linestyle='--',
@@ -1793,9 +1785,8 @@ def run_experiment_7(quick=False):
     ax1.set_xlabel('QBER')
     ax1.set_ylabel('Shared bit rate (kbit/s)', color=C['quantum'])
     ax1_b.set_ylabel('Min-entropy per output bit', color=C['accent'])
-    ax1.set_yscale('log')
     ax1.set_xlim(qbers[0] - 0.003, qbers[-1] + 0.003)
-    ax1.set_ylim(rate_floor_kbps * 0.4, max(sr) * 4)
+    ax1.set_ylim(0, max(sr.max(), br.max()) * 1.18)
     if cutoff_qber is not None:
         ax1.axvline(x=cutoff_qber, color='gray', linestyle=':',
                     label=f'1 kbit/s cutoff (QBER={cutoff_qber:.3f})')
@@ -1810,42 +1801,31 @@ def run_experiment_7(quick=False):
 
     mp = np.array(max_params) / 1000
     bp = np.array(bbm92_max_params) / 1000
-    mp_floor = 1e-3                 # 1-parameter display floor (K params)
-    mp_line = np.where(mp >= mp_floor, mp, np.nan)
-    bp_line = np.where(bp >= mp_floor, bp, np.nan)
-    mp_clip = qbers[mp < mp_floor]
-    ax2.plot(qbers, bp_line, 's-', linewidth=2, markersize=4,
+    ax2.plot(qbers, bp, 's-', linewidth=2, markersize=4,
              color=C['pareto'], label='BBM92-framed (keep 0.82)')
-    ax2.plot(qbers, mp_line, 'o-', linewidth=1.6, color=C['quantum'],
+    ax2.plot(qbers, mp, 'o-', linewidth=1.6, color=C['quantum'],
              label='trusted-conduit mode')
-    if len(mp_clip):
-        ax2.plot(mp_clip, np.full(len(mp_clip), mp_floor), 'v',
-                 color=C['quantum'], markersize=5)
-        ax2.text(float(np.mean(mp_clip)), mp_floor * 2.2,
-                 'below 1 param (rate collapse)', fontsize=6,
-                 color=C['quantum'], ha='center')
-    # anchored above the zero-marker row and its annotation, clear of
-    # the reference lines
-    ax2.legend(fontsize=6, loc='lower right', bbox_to_anchor=(0.98, 0.19))
     ax2.axvline(x=OPERATING_POINT['qber'], color=C['dark'], linestyle='--',
                 linewidth=1)
     ax2.axvline(x=cap_q, color='gray', linestyle=':', linewidth=1)
-    ax2.set_yscale('log')
     ax2.set_xlim(qbers[0] - 0.003, qbers[-1] + 0.003)
-    ax2.set_ylim(mp_floor * 0.4, 4000)
-    ax2.text(cap_q, mp_floor, ' 0.84-code capacity', fontsize=6,
+    _ref = 28866 / 1000
+    ax2.axhline(y=_ref, color='gray', linestyle=':', alpha=0.7)
+    ax2.text(qbers[-1], _ref, '29K (ClinicalMLP) ', fontsize=6,
+             color='gray', va='bottom', ha='right')
+    ax2.set_ylim(0, max(_ref, mp.max()) * 1.25)
+    ax2.text(cap_q, 0.4, ' 0.84-code capacity', fontsize=6,
              color='gray', rotation=90, va='bottom')
-    ax2.text(OPERATING_POINT['qber'], mp_floor, ' operating point',
+    ax2.text(OPERATING_POINT['qber'], 0.4, ' operating point',
              fontsize=6, color=C['dark'], rotation=90, va='bottom')
-    for ref, lbl in [(29, '29K (ClinicalMLP)'),
-                      (150, '150K params'),
-                      (1000, '1M params')]:
-        ax2.axhline(y=ref, color='gray', linestyle=':', alpha=0.5)
-        ax2.text(qbers[0], ref, lbl, fontsize=7, color='gray', va='bottom')
+    ax2.text(qbers[-1], ax2.get_ylim()[1] * 0.97,
+             '150K and 1M references off scale ', fontsize=6,
+             color='gray', va='top', ha='right')
+    ax2.legend(fontsize=6, loc='center right')
     ax2.set_xlabel('QBER')
     ax2.set_ylabel('Max model size at 60s round (K params)')
     ax2.set_title('Max maskable model size vs QBER (rate-driven)')
-    ax2.grid(True, alpha=0.3, which='both')
+    ax2.grid(True, alpha=0.3)
 
     fig.suptitle('QBER, key rate, and min-entropy',
                  fontsize=10, fontweight='bold')
@@ -2062,50 +2042,28 @@ def run_experiment_8(quick=False):
     fig.tight_layout(rect=[0, 0, 1, 0.92], w_pad=2.0)
     save_fig(fig, 'exp8b_multitri_scaling_bars')
 
-    # PLOT 3: Aggregation overhead at both operating points
-    # Modeled device AND the labeled hypothetical projection.
+    # Aggregation overhead at both operating points: tree depth times
+    # the per-level mask time (model bits / secret rate). Modeled device
+    # AND the labeled hypothetical projection. Table only; the plotted
+    # version repeated exp6's point that key supply binds.
     rate_points = [
-        (OPERATING_POINT['secret_rate_bps'], 'modeled device'),
-        (PROJECTED_OPERATING_POINT['secret_rate_bps'],
-         'PROJECTED 1 MHz-class (hypothetical)'),
+        (OPERATING_POINT['secret_rate_bps'], 'anchored device'),
     ]
     model_params = [5e4, 1e5, 5e5, 1e6]
-
-    fig, axes = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    for ax, (secure_rate, rlabel) in zip(axes, rate_points):
+    level_times = {}
+    print("\n  Inter-triangle aggregation overhead = tree depth x per-level "
+          "mask time (s):")
+    for secure_rate, rlabel in rate_points:
+        print(f"    {rlabel} ({secure_rate/1000:.1f} kbit/s):")
+        print(f"      {'params':>8} {'s/level':>9}  "
+              + "  ".join(f"{n:>2} clients (d={d})"
+                          for n, d in zip(scales, tree_depths)))
         for mp in model_params:
-            gradient_bits = int(mp) * BITS_PER_PARAM
-            mask_time_per_level = gradient_bits / secure_rate
-            # depth 0 (single triangle, no inter-triangle stage) means zero
-            # tree overhead; NaN keeps the log axis from drawing a fake
-            # vertical segment up from the clipped zero
-            overhead_at_depths = [mask_time_per_level * d if d > 0 else np.nan
-                                  for d in tree_depths]
-            ax.plot(scales, overhead_at_depths, 'o-', linewidth=2,
-                    label=f'{int(mp/1000)}K ({mask_time_per_level:.0f}s/level)')
-        ax.set_xlabel('Number of Clients')
-        ax.set_ylabel('Aggregation Overhead (seconds)')
-        ax.set_yscale('log')
-        ax.set_title(f'{rlabel}\n({secure_rate/1000:.1f} kbit/s)', fontsize=8)
-        # 3 clients = one triangle = depth 0: zero tree overhead, which a
-        # log axis cannot plot; keep the x range so the point's absence is
-        # explicit and the legend has a data-free band
-        ax.set_xlim(1.0, 12.8)
-        ax.text(0.02, 0.03, '3 clients: depth 0,\n'
-                'zero tree overhead\n(not plottable, log axis)',
-                transform=ax.transAxes, fontsize=5.5, color='gray',
-                va='bottom')
-        ax.legend(fontsize=6, loc='center left', borderaxespad=0.2)
-        ax.grid(True, alpha=0.3, which='both')
-        # Round period reference lines
-        for period, plabel in [(30, '30s'), (60, '60s'), (300, '5min')]:
-            ax.axhline(y=period, color='gray', linestyle=':', alpha=0.4)
-            ax.text(scales[-1], period * 1.08, plabel, fontsize=6,
-                    color='gray', ha='right')
-    fig.suptitle('Hierarchical aggregation overhead',
-                 fontsize=10, fontweight='bold')
-    fig.tight_layout(w_pad=2.5)
-    save_fig(fig, 'exp8c_aggregation_overhead')
+            per_level = int(mp) * BITS_PER_PARAM / secure_rate
+            level_times[f"{rlabel}|{int(mp)}"] = per_level
+            print(f"      {int(mp/1000):>7}K {per_level:>9.0f}  "
+                  + "  ".join(f"{per_level * d:>14.0f}"
+                              for d in tree_depths))
 
     # Summary
     print("\n  MULTI-TRIANGLE SCALING SUMMARY")
@@ -2130,7 +2088,7 @@ def run_experiment_8(quick=False):
 
     print("  Experiment 8 complete.")
 
-    return {
+    out = {
         str(n): {
             'accuracy': results[n]['result'].final_accuracy,
             'rounds_to_target': results[n]['result'].rounds_to_target,
@@ -2138,14 +2096,17 @@ def run_experiment_8(quick=False):
             'tree_depth': results[n]['tree_depth'],
         } for n in scales
     }
+    out['mask_time_per_level_s'] = level_times
+    return out
 
 
 # MAIN RUNNER
 def run_experiment_9(quick=False):
     """HNDL - harvest-now / decrypt-later retroactive transcript attack.
 
-    makes claim (b) empirical. Two arms differ ONLY in the
-    pairwise-mask source; both record the full classical transcript
+    makes claim (b) empirical. Four arms differ ONLY in the
+    pairwise-mask source and its provisioning; all record the full
+    classical transcript
     (masked payloads, Shamir shares, seed disclosures, dropout reveals),
     then a recording adversary is granted retroactive god-mode over every
     COMPUTATIONAL secret (future quantum computer: DH/PRF/channel
@@ -2183,8 +2144,8 @@ def run_experiment_9(quick=False):
     bits_per_mask = n_params * 32
 
     rng = np.random.default_rng(42)
-    tr_ent, tr_cls, tr_dlr = [], [], []
-    print(f"  Recording {num_rounds} rounds x all 3 arms "
+    tr_ent, tr_cls, tr_dlr, tr_cou = [], [], [], []
+    print(f"  Recording {num_rounds} rounds x all 4 arms "
           f"(drops at rounds {sorted(dropout_schedule)})...")
     for rd in range(num_rounds):
         drops = dropout_schedule.get(rd, set())
@@ -2208,6 +2169,8 @@ def run_experiment_9(quick=False):
 
         dealer_pool = rng.integers(0, 2, size=3 * bits_per_mask,
                                    dtype=np.int8)
+        courier_pool = rng.integers(0, 2, size=3 * bits_per_mask,
+                                    dtype=np.int8)
         t_e, agg_e = run_transcript_round(
             rd, grads, range(n_clients), drops, "entangled",
             pairwise_pool=pool, self_seeds=self_seeds)
@@ -2217,6 +2180,9 @@ def run_experiment_9(quick=False):
         t_d, agg_d = run_transcript_round(
             rd, grads, range(n_clients), drops, "it_dealer_online",
             pairwise_pool=dealer_pool, self_seeds=self_seeds)
+        t_k, agg_k = run_transcript_round(
+            rd, grads, range(n_clients), drops, "it_dealer_courier",
+            pairwise_pool=courier_pool, self_seeds=self_seeds)
         # Coherence assertions: the wire-faithful transcript must equal
         # the LIVE implementation on identical inputs, and the two arms
         # must agree in the clear (they differ only inside the masks).
@@ -2228,9 +2194,12 @@ def run_experiment_9(quick=False):
             "transcript arm diverges from secure_aggregation_round"
         assert np.array_equal(agg_c, agg_e), "arms diverge in the clear"
         assert np.array_equal(agg_d, agg_e), "dealer arm diverges in the clear"
+        assert np.array_equal(agg_k, agg_e), \
+            "courier arm diverges in the clear"
         tr_ent.append(t_e)
         tr_cls.append(t_c)
         tr_dlr.append(t_d)
+        tr_cou.append(t_k)
 
         survivors = n_clients - len(drops)
         set_model_params(global_model,
@@ -2238,6 +2207,7 @@ def run_experiment_9(quick=False):
 
     atk_c = retroactive_attack(tr_cls, "classical")
     atk_d = retroactive_attack(tr_dlr, "it_dealer_online")
+    atk_k = retroactive_attack(tr_cou, "it_dealer_courier")
     atk_e = retroactive_attack(tr_ent, "entangled")
 
     print("\n  Retroactive god-mode attack on the recorded transcripts")
@@ -2249,6 +2219,7 @@ def run_experiment_9(quick=False):
           f"{'min masks left':>15} {'residual p':>11} {'median|err|':>12}")
     for label, atk in [("classical (DH/PRF masks)", atk_c),
                        ("IT dealer (online provisioning)", atk_d),
+                       ("IT dealer (courier provisioning)", atk_k),
                        ("entangled (distilled keys)", atk_e)]:
         print(f"  {label:<32} {atk['n_payloads']:>8} "
               f"{100*atk['recovered_fraction']:>9.1f}% "
@@ -2259,6 +2230,8 @@ def run_experiment_9(quick=False):
         "classical arm should be fully recoverable under god-mode"
     assert atk_d["recovered_fraction"] == 1.0, \
         "online-dealer arm should be fully recoverable under god-mode"
+    assert atk_k["recovered_fraction"] == 0.0, \
+        "courier-dealer arm leaked a payload - nothing was on the wire"
     assert atk_e["recovered_fraction"] == 0.0, \
         "entangled arm leaked a payload - HNDL claim violated"
     assert atk_e["min_masks_remaining"] >= 1, \
@@ -2269,11 +2242,16 @@ def run_experiment_9(quick=False):
           "computationally-secured provisioning\n    is still HNDL-exposed "
           "(the hole moves from the key agreement to the dealer's\n    "
           "distribution channel);")
-    print("    entangled arm: 0% - every delivered payload retains ≥ 1 "
+    print("    courier-dealer arm: 0% - the same pads, delivered out of "
+          "band, leave nothing\n    recorded to open; its immunity is "
+          "against the channel recorder only (the dealer\n    holds every "
+          "pad);")
+    print("    entangled arm: 0% - every delivered payload retains >= 1 "
           "pairwise mask that\n    never appeared in any transcript, and "
           "god-mode residuals remain uniform\n    (mean monobit p above; "
-          "median reconstruction error ~10³ in gradient units\n    vs ~0 "
-          "classically).")
+          "median reconstruction error ~10^3 in gradient units\n    vs ~0 "
+          "classically). Online vs courier differ only in provisioning: "
+          "HNDL\n    immunity is a provisioning property.")
     print("\n  HONEST SCOPE: the self-mask leg rides classical channels "
           "(Shamir shares)\n  and is only computationally protected - "
           "god-mode strips it in ALL arms\n  here. The PAIRWISE leg alone "
@@ -2282,12 +2260,15 @@ def run_experiment_9(quick=False):
 
     # Plot: recovery fraction + residual uniformity per arm
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    arms = ["classical\n(DH/PRF)", "IT dealer\n(online prov.)",
-            "entangled\n(distilled)"]
+    arms = ["classical\n(DH/PRF)", "IT dealer\n(online)",
+            "IT dealer\n(courier)", "entangled\n(distilled)"]
+    arm_colors = [C['unmasked'], C['accent'], C['dark'], C['quantum']]
     fracs = [100 * atk_c["recovered_fraction"],
              100 * atk_d["recovered_fraction"],
+             100 * atk_k["recovered_fraction"],
              100 * atk_e["recovered_fraction"]]
-    ax1.bar(arms, fracs, color=[C['unmasked'], C['accent'], C['quantum']])
+    ax1.bar(arms, fracs, color=arm_colors)
+    ax1.tick_params(axis='x', labelsize=7)
     ax1.set_ylabel('Gradients recovered retroactively (%)')
     ax1.set_ylim(0, 114)  # headroom for the bar labels
     for i, v in enumerate(fracs):
@@ -2297,20 +2278,24 @@ def run_experiment_9(quick=False):
 
     pc = [r["residual_monobit_p"] for r in atk_c["records"]]
     pd_ = [r["residual_monobit_p"] for r in atk_d["records"]]
+    pk = [r["residual_monobit_p"] for r in atk_k["records"]]
     pe = [r["residual_monobit_p"] for r in atk_e["records"]]
     ax2.scatter(np.zeros(len(pc)) + 0.0, pc, color=C['unmasked'],
                 alpha=0.7, label='classical: residual = the gradient')
     ax2.scatter(np.zeros(len(pd_)) + 1.0, pd_, color=C['accent'],
-                alpha=0.85, label='IT dealer (online): residual = the gradient')
-    ax2.scatter(np.zeros(len(pe)) + 2.0, pe, color=C['quantum'],
+                alpha=0.85, label='dealer (online): residual = the gradient')
+    ax2.scatter(np.zeros(len(pk)) + 2.0, pk, color=C['dark'],
+                alpha=0.7, label='dealer (courier): residual stays uniform')
+    ax2.scatter(np.zeros(len(pe)) + 3.0, pe, color=C['quantum'],
                 alpha=0.7, label='entangled: residual stays uniform')
     ax2.axhline(y=0.01, color='gray', linestyle=':', linewidth=1,
-                label='α = 0.01')
-    ax2.set_xticks([0, 1, 2])
+                label='alpha = 0.01')
+    ax2.set_xticks([0, 1, 2, 3])
     ax2.set_xticklabels(arms)
+    ax2.tick_params(axis='x', labelsize=7)
     ax2.set_ylabel('Monobit p-value of post-attack residual')
-    ax2.set_ylim(-0.05, 1.05)
-    ax2.legend(fontsize=7)
+    ax2.set_ylim(-0.05, 1.45)  # headroom keeps the legend off the points
+    ax2.legend(fontsize=6, loc='upper center', ncol=2)
     ax2.set_title('Post-attack residual uniformity')
     ax2.grid(True, alpha=0.3, axis='y')
 
@@ -2324,6 +2309,8 @@ def run_experiment_9(quick=False):
         "classical": {k: v for k, v in atk_c.items() if k != "records"},
         "it_dealer_online": {k: v for k, v in atk_d.items()
                              if k != "records"},
+        "it_dealer_courier": {k: v for k, v in atk_k.items()
+                              if k != "records"},
         "entangled": {k: v for k, v in atk_e.items() if k != "records"},
         "rounds": num_rounds,
         "payloads_per_arm": atk_c["n_payloads"],
@@ -2651,20 +2638,15 @@ def run_experiment_12(quick=False):
           "in d. The O(d) gap is the price of the pad,\n      whatever "
           "provisioned it.")
 
-    # (C) Key-supply latency this system pays and the baselines do NOT,
-    # at BOTH operating points
+    # (C) Key-supply latency this system pays and the baselines do NOT
     op = OPERATING_POINT['secret_rate_bps']
-    proj = PROJECTED_OPERATING_POINT['secret_rate_bps']
     # One pairwise pool per cluster edge per round: bits_per_mask = n_params*32.
     key_wait_op = bpm / op
-    key_wait_proj = bpm / proj
     print("\n  (C) Key-supply latency (this system only; the baselines "
           "distill no key):")
     print(f"      pairwise pool per edge/round = {bpm:,} bits")
-    print(f"      modeled operating point ({op/1000:.1f} kbit/s): "
+    print(f"      anchored operating point ({op/1000:.2f} kbit/s): "
           f"key_wait {key_wait_op:.1f} s/edge")
-    print(f"      projected 1 MHz-class ({proj/1000:.0f} kbit/s, "
-          f"hypothetical): key_wait {key_wait_proj:.1f} s/edge")
     print("      Bonawitz/Flamingo pay 0 s here - computational key setup "
           "is ~instant. This latency is\n      the operational cost of "
           "the unconditional-freshness guarantee. The dealer arms also "
@@ -2808,8 +2790,13 @@ def run_experiment_12(quick=False):
     ax1.grid(True, alpha=0.3, which='both')
 
     names = ARMS
-    labels = ["this system", "Bonawitz", "Flamingo",
-              "dealer\n(online)", "dealer\n(courier)"]
+    # Assumption class and HNDL status ride the tick labels; the bar
+    # annotations carry only the numbers, so nothing overlaps.
+    labels = ["this system\nuncond.\nHNDL-imm.*",
+              "Bonawitz\ncomput.\nHNDL-exp.",
+              "Flamingo\ncomput.\nHNDL-exp.",
+              "dealer\n(online)\nIT + comp.\nHNDL-exp.",
+              "dealer\n(courier)\nIT + dealer\nHNDL-imm.\nvs recorder"]
     cols = [C['quantum'], C['unmasked'], C['dp'], C['accent'], C['dark']]
     vals = [costs1[n].recovery_bytes for n in names]
     ax2.bar(labels, vals, color=cols)
@@ -2817,21 +2804,14 @@ def run_experiment_12(quick=False):
     # Log scale in BYTES so the 12-B seed reveals are visible bars, not
     # sub-pixel slivers next to the 346 KB OTP reveals.
     ax2.set_yscale('log')
-    ax2.set_ylim(4, max(vals) * 300)  # headroom for the annotations
-    HNDL_NOTE = {"entangled": "HNDL-imm.*",
-                 "bonawitz": "HNDL-exp.",
-                 "flamingo": "HNDL-exp.",
-                 "it_dealer_online": "HNDL-exp.",
-                 "it_dealer_courier": "HNDL-imm.\n(vs ch. recorder)"}
+    ax2.set_ylim(4, max(vals) * 30)  # headroom for the annotations
     for i, n in enumerate(names):
         c = costs1[n]
         ax2.text(i, c.recovery_bytes * 1.4,
                  f'{c.recovery_bytes:,} B\n'
-                 f'{SHORT_ASSUME[n]}\n'
-                 f'{HNDL_NOTE[n]}\n'
                  f'{c.aggregator_prg_expansions} PRG exp',
                  ha='center', va='bottom', fontsize=6)
-    ax2.tick_params(axis='x', labelsize=6)
+    ax2.tick_params(axis='x', labelsize=5.5)
     ax2.set_xlabel('* contingent on GLLP PA margin + Shamir t>=2 (exp9)',
                    fontsize=5, color='gray')
     ax2.set_title('Recovery bytes and assumption class (ClinicalMLP)')
@@ -2861,7 +2841,7 @@ def run_experiment_12(quick=False):
                                            "bonawitz": v[1], "flamingo": v[2],
                                            "it_dealer": v[3]}
                                   for d, v in scaling.items()},
-        "key_wait_s": {"modeled": key_wait_op, "projected": key_wait_proj},
+        "key_wait_s": {"anchored": key_wait_op},
         "n_params": n_params,
     }
 
@@ -3042,9 +3022,13 @@ def run_experiment_13(quick=False):
     mode_colors = {'symmetric': C['unmasked'],
                    'efficient-90/10': C['pareto'],
                    'efficient-asymptotic': C['dp']}
-    bar_labels = [short[n] for n in mode_names]
-    ax2.bar(bar_labels, [ratios[n] for n in mode_names],
+    bar_labels = {"symmetric": "symmetric\nkeep 0.50",
+                  "efficient-90/10": "efficient 90/10\nkeep 0.82",
+                  "efficient-asymptotic": "efficient\nkeep 1.00"}
+    ax2.bar([bar_labels[n] for n in mode_names],
+            [ratios[n] for n in mode_names],
             color=[mode_colors[n] for n in mode_names])
+    ax2.set_xlabel('QKD sifting protocol')
     ax2.axhline(y=floor_ratio, color='gray', linestyle=':',
                 label=f'asymptotic-sifting floor {floor_ratio:.2f}x')
     ax2.axhline(y=1.0, color='gray', linewidth=0.8)
@@ -3076,11 +3060,8 @@ def run_experiment_13(quick=False):
     ax3.legend(fontsize=6)
     ax3.grid(True, alpha=0.3)
 
-    fig.suptitle('Source-model vs QKD framing of the same physical layer '
-                 '- the rate ratio prices the trusted-source assumption\n'
-                 '(comparison-only; not a security ranking - the QKD '
-                 'framing tolerates the stronger adversary)',
-                 fontsize=9, fontweight='bold')
+    fig.suptitle('Source-model vs QKD framing, same physical layer',
+                 fontsize=10, fontweight='bold')
     fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp13_qkd_framing')
 
@@ -3100,18 +3081,15 @@ def run_experiment_13(quick=False):
 def _bbm92_source_kwargs():
     """m1 parameters at the config operating point, shared by both exp14
     arms (fixed-basis arm = same function at p_z = 1)."""
-    use_qfc = QUANTUM.get('use_qfc', False)
     return dict(
         fidelity=QUANTUM['fidelity'],
         source_rep_rate_hz=QUANTUM['source_rep_rate_hz'],
         source_brightness=QUANTUM['source_brightness'],
         fiber_length_m=QUANTUM['fiber_length_m'],
-        fiber_loss_db_per_km=(QUANTUM['fiber_loss_db_per_km_1550nm']
-                              if use_qfc
-                              else QUANTUM['fiber_loss_db_per_km_780nm']),
+        fiber_loss_db_per_km=QUANTUM['fiber_loss_db_per_km_780nm'],
         coupling_efficiency=QUANTUM['coupling_efficiency'],
-        spad_efficiency=QUANTUM['spad_efficiency'],
-        spad_dark_count_hz=QUANTUM['spad_dark_count_hz'],
+        detector_efficiency=QUANTUM['detector_efficiency'],
+        detector_dark_count_hz=QUANTUM['detector_dark_count_hz'],
         coincidence_window_ns=QUANTUM['coincidence_window_ns'],
         pbs_extinction_ratio=QUANTUM['pbs_extinction_ratio'],
         fiber_birefringence_rad_per_km_per_C=(
@@ -3119,8 +3097,6 @@ def _bbm92_source_kwargs():
         temperature_variation_C=QUANTUM['temperature_variation_C'],
         colocated=QUANTUM['colocated'],
         local_optics_efficiency=QUANTUM['local_optics_efficiency'],
-        use_qfc=use_qfc,
-        qfc_efficiency=QUANTUM['qfc_efficiency'],
     )
 
 
@@ -3166,8 +3142,11 @@ def run_experiment_14(quick=False):
     code_rate = POST_PROC['ldpc_code_rate']
     block = POST_PROC['block_size']
 
-    n_pairs_a = 2_000_000 if quick else 8_000_000
-    n_pairs_c = 1_000_000 if quick else 4_000_000
+    # Emitted-pair budgets in seconds of source time at the anchored
+    # emission rate (1 GHz x 0.076 = 76M pairs/s); the anchored per-pair
+    # coincidence probability is ~5.6e-5.
+    n_pairs_a = 760_000_000 if quick else 3_040_000_000    # 10 s / 40 s
+    n_pairs_c = 380_000_000 if quick else 1_520_000_000    # 5 s / 20 s
     seeds_a = [0, 1] if quick else list(range(10))
     seeds_c = [0, 1] if quick else list(range(10))
     duty = POST_PROC['bell_test_duty_cycle']
@@ -3401,8 +3380,8 @@ def run_experiment_14(quick=False):
         fx *= (1 - duty)
         return fx / bb if bb > 0 else float('nan')
 
-    pairs_sweep = [1_000_000, 4_000_000] if quick \
-        else [2_000_000, 8_000_000, 32_000_000]
+    pairs_sweep = [380_000_000, 1_520_000_000] if quick \
+        else [760_000_000, 3_040_000_000, 12_160_000_000]
     seeds_d = [0, 1] if quick else list(range(10))
     # Near the certification cliff (small runs), some seeds certify
     # ZERO key and the ratio diverges: report the median and range of

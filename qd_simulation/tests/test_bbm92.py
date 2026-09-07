@@ -17,7 +17,12 @@ from modules.m1_quantum_source import simulate_bbm92  # noqa: E402
 from modules.m2_post_processing import (  # noqa: E402
     bbm92_distill, tlgr_deviation, binary_entropy, toeplitz_hash)
 
-N_PAIRS = 4_000_000
+# Emitted-pair budget: 20 s of source time at the anchored emission rate
+# (1 GHz clock x 0.076 excitation efficiency = 76M pairs/s). The anchored
+# per-pair coincidence probability is ~5.6e-5, so this yields ~8.5e4
+# detected coincidences - comparable statistical power to the pre-anchor
+# suite.
+N_PAIRS = 1_520_000_000
 CODE_RATE = POST_PROC['ldpc_code_rate']
 BLOCK = POST_PROC['block_size']
 
@@ -27,8 +32,7 @@ def run(p_z=0.9, eve_fraction=0.0, eve_basis_mode='none', seed=0,
     kw = dict(
         fidelity=QUANTUM['fidelity'],
         fiber_length_m=QUANTUM['fiber_length_m'],
-        fiber_loss_db_per_km=QUANTUM['fiber_loss_db_per_km_1550nm'],
-        use_qfc=True, qfc_efficiency=QUANTUM['qfc_efficiency'],
+        fiber_loss_db_per_km=QUANTUM['fiber_loss_db_per_km_780nm'],
         fiber_birefringence_rad_per_km_per_C=(
             QUANTUM['fiber_birefringence_rad_per_km_per_C']),
         temperature_variation_C=QUANTUM['temperature_variation_C'],
@@ -61,7 +65,9 @@ def test_fixed_basis_limit():
     assert r.sifting_keep == 1.0
     assert r.n_test == 0
     assert r.n_key == r.n_coincidences
-    assert 0.004 < r.e_z_actual < 0.015, r.e_z_actual
+    # analytic operating QBER is 0.0153 (Werner (1-w)/2 + extinction +
+    # birefringence allowance); the sampled value adds two-sided PBS flips
+    assert 0.010 < r.e_z_actual < 0.021, r.e_z_actual
 
 
 def test_e_x_equals_e_z():
@@ -92,8 +98,9 @@ def test_eve_visible_to_bbm92():
     """The same tap raises the BBM92 test-set error as (1-f)e0 + f/2 and
     crosses the abort threshold."""
     f = 0.2
+    clean = run(p_z=0.9, eve_fraction=0.0, seed=6)
     r = run(p_z=0.9, eve_fraction=f, eve_basis_mode='z', seed=6)
-    expected = (1 - f) * 0.0085 + f / 2
+    expected = (1 - f) * clean.e_x_observed + f / 2
     se = math.sqrt(expected * (1 - expected) / r.n_test)
     assert abs(r.e_x_observed - expected) < 5 * se, \
         (r.e_x_observed, expected)
@@ -123,8 +130,14 @@ def test_distill_key_length_and_agreement():
     """Non-aborted distillation: output length matches the TLGR formula
     recomputed per successful block, and both endpoints derive identical
     bits (EC makes Bob hold Alice's block; the hash is deterministic
-    given the same seed exchange)."""
-    r = run(p_z=0.9, seed=8)
+    given the same seed exchange).
+
+    Runs at an elevated Bell weight so the observed test-set error sits
+    well below q_tol: the arithmetic under test is independent of the
+    operating point, and at the anchored point (e_x ~ 0.0153 vs
+    q_tol = 0.02) small test sets abort by fluctuation - that behavior
+    is covered by exp14's abort-probability panel, not this test."""
+    r = run(p_z=0.9, seed=8, fidelity=0.99)
     d = bbm92_distill(r.key_bits_alice, r.key_bits_bob, r.e_x_observed,
                       r.n_test, q_tol=BBM92['q_tol'],
                       code_rate=CODE_RATE, block_size=BLOCK,

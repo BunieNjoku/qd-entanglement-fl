@@ -53,7 +53,8 @@ def default_tagged_fraction():
             from ..config import QUANTUM
         return QUANTUM['multi_photon_prob'] / QUANTUM['source_brightness']
     except Exception:
-        return 8e-5 / 0.01  # config.py defaults
+        # config.py defaults: Waks-2002 bound g2 * eta_ex / 2
+        return 0.5 * 8.0e-4 * 0.076
 
 
 @dataclass

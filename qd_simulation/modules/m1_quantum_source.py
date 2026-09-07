@@ -1,15 +1,21 @@
 """
 Module 1: Bell-pair source and detection.
 
-Models entangled photon pair generation from InAs/GaAs QD (Schimpf et al. 2021),
-fiber transmission (optionally via QFC to telecom C-band), and SPAD detection.
-Werner state density matrix is used as a tractable noise model for the
-partially-mixed Bell state; for near-pure sources (F > 0.95) the qualitative
-behavior matches depolarizing-channel models.
+Models entangled photon pair generation from a GaAs QD driven by pulsed
+resonant two-photon excitation, anchored to the rack-based QD-CamNetz
+source (Zena et al., arXiv:2604.02024) with sister-device values from the
+same group where the rack paper does not report (Hopfmann et al., PRB 103,
+075413; Langer et al., APL Photonics 10, 066117). Werner state density
+matrix is used as a tractable noise model for the partially-mixed Bell
+state; the Bell weight is derived from the measured entanglement
+negativity in config.py.
 
-Co-located architecture: QD source at one node; Photon 1 measured locally,
-Photon 2 frequency-converted (780nm -> 1550nm via PPLN, Weber et al. 2019)
-and transmitted over standard telecom fiber (0.2 dB/km) to partner node.
+Co-located architecture matching the rack system: QD source at one node,
+both photons collected through one in-situ fiber objective and separated
+by wavelength; Photon 1 is detected locally, Photon 2 travels native
+780 nm single-mode fiber (780HP class) to the partner node. No quantum
+frequency conversion: at campus distances the PPLN insertion loss
+(~4.6 dB) exceeds the 780 nm fiber loss it would save.
 
 This module produces correlated bit pairs at the two endpoints. Under the
 trusted-source assumption (Assumption B), the CHSH S-parameter > 2 verifies
@@ -91,27 +97,33 @@ def compute_chsh_s(rho):
 
 
 def simulate_source(
-    fidelity=0.987,
-    source_rep_rate_hz=80e6,
-    source_brightness=0.01,
+    fidelity=0.9733,
+    source_rep_rate_hz=1e9,
+    source_brightness=0.076,
     fiber_length_m=500,
-    fiber_loss_db_per_km=3.0,
-    coupling_efficiency=0.15,
-    spad_efficiency=0.65,
-    spad_dark_count_hz=50,
-    coincidence_window_ns=2.0,
+    fiber_loss_db_per_km=3.5,
+    coupling_efficiency=0.0108,
+    detector_efficiency=0.85,
+    detector_dark_count_hz=50,
+    coincidence_window_ns=0.5,
     pbs_extinction_ratio=1000,
     fiber_birefringence_rad_per_km_per_C=0.1,
     temperature_variation_C=5.0,
     duration_s=1.0,
     n_pairs=None,
     colocated=True,
-    local_optics_efficiency=0.90,
-    use_qfc=False,
-    qfc_efficiency=0.35,
+    local_optics_efficiency=1.0,
     rng=None,
 ):
     """Simulate entangled photon pair source with all noise contributions.
+
+    coupling_efficiency is the per-photon arm transmission from the dot to
+    the detector input (collection into the fiber objective, module and
+    projection optics), calibrated in config.py from the measured singles
+    rate; it applies to BOTH photons because both are collected through
+    the same in-situ fiber objective before wavelength separation.
+    local_optics_efficiency is an extra local-arm-only factor kept for
+    model flexibility (1.0 by default: the calibration absorbs it).
 
     Args:
         duration_s: Simulation duration in seconds (default 1s).
@@ -140,32 +152,33 @@ def simulate_source(
     fiber_transmission = 10 ** (-fiber_loss_db / 10)
 
     if colocated:
-        # Co-located architecture: Photon 1 stays local (no fiber loss),
-        # Photon 2 traverses fiber to partner node.
-        # Alice = local detector: local_optics × spad_eff (no fiber)
-        # Bob = remote detector: coupling × [QFC ×] fiber_transmission × spad_eff
-        alice_efficiency = local_optics_efficiency * spad_efficiency
-        bob_efficiency = coupling_efficiency * fiber_transmission * spad_efficiency
-        if use_qfc:
-            # QFC stage on remote photon before fiber (780nm -> 1550nm via PPLN)
-            bob_efficiency *= qfc_efficiency
+        # Co-located architecture: both photons pass the shared collection
+        # path (coupling_efficiency); Photon 1 is detected locally, Photon 2
+        # additionally traverses the 780 nm link fiber to the partner node.
+        alice_efficiency = (coupling_efficiency * local_optics_efficiency
+                            * detector_efficiency)
+        bob_efficiency = (coupling_efficiency * fiber_transmission
+                          * detector_efficiency)
     else:
         # Mid-fiber model: both photons traverse fiber (legacy)
-        total_link_efficiency = coupling_efficiency * fiber_transmission * spad_efficiency
-        if use_qfc:
-            total_link_efficiency *= qfc_efficiency
+        total_link_efficiency = (coupling_efficiency * fiber_transmission
+                                 * detector_efficiency)
         alice_efficiency = total_link_efficiency
         bob_efficiency = total_link_efficiency
 
-    # Each photon independently survives with its respective probability
-    alice_detected = rng.random(n_emitted) < alice_efficiency
-    bob_detected = rng.random(n_emitted) < bob_efficiency
-    coincidence_mask = alice_detected & bob_detected
-    n_true_coinc = int(np.sum(coincidence_mask))
+    # Each photon independently survives with its respective probability;
+    # a coincidence therefore occurs per emission with probability
+    # alice_efficiency * bob_efficiency. The binomial draw is
+    # distribution-identical to per-emission Bernoulli sampling (detection
+    # is polarization-independent in this model) and keeps memory O(1) in
+    # n_emitted, which matters at the anchored per-pair detection
+    # probability of order 1e-5.
+    n_true_coinc = int(rng.binomial(n_emitted,
+                                    alice_efficiency * bob_efficiency))
 
     # Step 3: Dark count accidentals
     # Accidentals = dark counts at A coinciding with real detections at B and vice versa
-    dark_rate_per_window = spad_dark_count_hz * (coincidence_window_ns * 1e-9)
+    dark_rate_per_window = detector_dark_count_hz * (coincidence_window_ns * 1e-9)
     n_accidental = rng.poisson(
         dark_rate_per_window * n_emitted * (alice_efficiency + bob_efficiency)
     )
@@ -255,29 +268,26 @@ def compute_qber_analytical(fidelity, pbs_extinction=1000, bire_contribution=0.0
 
 def compute_coincidence_rate(
     source_rep_rate_hz, source_brightness, coupling_efficiency,
-    fiber_length_m, fiber_loss_db_per_km, spad_efficiency,
-    colocated=True, local_optics_efficiency=0.90,
-    use_qfc=False, qfc_efficiency=0.35
+    fiber_length_m, fiber_loss_db_per_km, detector_efficiency,
+    colocated=True, local_optics_efficiency=1.0,
 ):
     """Analytical coincidence rate for quick sweeps.
 
-    Co-located model: Photon 1 stays local (no fiber loss), Photon 2 traverses fiber.
+    Co-located model: both photons pass the shared collection path
+    (coupling_efficiency); Photon 1 is detected locally, Photon 2
+    additionally traverses the link fiber.
     Mid-fiber model (legacy): both photons traverse fiber.
-    With QFC: adds frequency conversion loss on the fiber-traversing photon(s).
     """
     fiber_loss_db = fiber_loss_db_per_km * (fiber_length_m / 1000)
     fiber_trans = 10 ** (-fiber_loss_db / 10)
 
     if colocated:
-        eff_local = local_optics_efficiency * spad_efficiency
-        eff_remote = coupling_efficiency * fiber_trans * spad_efficiency
-        if use_qfc:
-            eff_remote *= qfc_efficiency
+        eff_local = (coupling_efficiency * local_optics_efficiency
+                     * detector_efficiency)
+        eff_remote = coupling_efficiency * fiber_trans * detector_efficiency
         return source_rep_rate_hz * source_brightness * eff_local * eff_remote
     else:
-        link_eff = coupling_efficiency * fiber_trans * spad_efficiency
-        if use_qfc:
-            link_eff *= qfc_efficiency
+        link_eff = coupling_efficiency * fiber_trans * detector_efficiency
         return source_rep_rate_hz * source_brightness * link_eff ** 2
 
 
@@ -413,24 +423,22 @@ def _eigenstate(angle, outcome):
 
 
 def simulate_bbm92(
-    fidelity=0.987,
-    source_rep_rate_hz=80e6,
-    source_brightness=0.01,
+    fidelity=0.9733,
+    source_rep_rate_hz=1e9,
+    source_brightness=0.076,
     fiber_length_m=500,
-    fiber_loss_db_per_km=3.0,
-    coupling_efficiency=0.15,
-    spad_efficiency=0.65,
-    spad_dark_count_hz=50,
-    coincidence_window_ns=2.0,
+    fiber_loss_db_per_km=3.5,
+    coupling_efficiency=0.0108,
+    detector_efficiency=0.85,
+    detector_dark_count_hz=50,
+    coincidence_window_ns=0.5,
     pbs_extinction_ratio=1000,
     fiber_birefringence_rad_per_km_per_C=0.1,
     temperature_variation_C=5.0,
     duration_s=1.0,
     n_pairs=None,
     colocated=True,
-    local_optics_efficiency=0.90,
-    use_qfc=False,
-    qfc_efficiency=0.35,
+    local_optics_efficiency=1.0,
     p_z_alice=0.9,
     p_z_bob=0.9,
     eve_fraction=0.0,
@@ -482,22 +490,21 @@ def simulate_bbm92(
     fiber_loss_db = fiber_loss_db_per_km * (fiber_length_m / 1000)
     fiber_transmission = 10 ** (-fiber_loss_db / 10)
     if colocated:
-        alice_efficiency = local_optics_efficiency * spad_efficiency
-        bob_efficiency = coupling_efficiency * fiber_transmission * spad_efficiency
-        if use_qfc:
-            bob_efficiency *= qfc_efficiency
+        alice_efficiency = (coupling_efficiency * local_optics_efficiency
+                            * detector_efficiency)
+        bob_efficiency = (coupling_efficiency * fiber_transmission
+                          * detector_efficiency)
     else:
-        total = coupling_efficiency * fiber_transmission * spad_efficiency
-        if use_qfc:
-            total *= qfc_efficiency
+        total = coupling_efficiency * fiber_transmission * detector_efficiency
         alice_efficiency = total
         bob_efficiency = total
 
-    alice_detected = rng.random(n_emitted) < alice_efficiency
-    bob_detected = rng.random(n_emitted) < bob_efficiency
-    n_true_coinc = int(np.sum(alice_detected & bob_detected))
+    # Binomial coincidence draw: distribution-identical to per-emission
+    # Bernoulli sampling and O(1) memory in n_emitted (cf. simulate_source).
+    n_true_coinc = int(rng.binomial(n_emitted,
+                                    alice_efficiency * bob_efficiency))
 
-    dark_rate_per_window = spad_dark_count_hz * (coincidence_window_ns * 1e-9)
+    dark_rate_per_window = detector_dark_count_hz * (coincidence_window_ns * 1e-9)
     n_accidental = rng.poisson(
         dark_rate_per_window * n_emitted * (alice_efficiency + bob_efficiency))
     n_accidental = min(n_accidental, n_true_coinc // 2)
