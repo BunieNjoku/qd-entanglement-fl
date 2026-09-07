@@ -61,15 +61,15 @@ python run_all.py --exp 1 2 3 # Specific experiments
 | 2 | Post-processing | Shared-bit rate budget closes; reconciliation efficiency |
 | 3 | Mesh scaling | Delaunay topology, triangle coverage, aggregation depth |
 | 4 | FL training correctness | Modular masking does not degrade convergence vs unmasked baseline |
-| 5 | **Dropout recovery** | entangled-key two-mask aggregation tolerates client dropout at per-round freshness; classical Bonawitz needs Shamir reconstruction for pairwise leg |
+| 5 | **Dropout recovery** | entangled-key two-mask aggregation tolerates client dropout at per-round freshness; recovery bytes drawn against the Bonawitz and Flamingo seed-reveal models on the same dropout events (O(d) vs O(1)) |
 | 6 | Throughput | Round-rate ceiling under shared-bit-rate constraints |
 | 7 | **QBER -> key-rate / capacity envelope** | QBER prices key SUPPLY (rate, max maskable model size); the PA mask-entropy floor stays flat |
 | 8 | Multi-triangle FL | Two-level hierarchical Bonawitz at 3/6/9/12 client scales |
-| 9 | **HNDL transcript attack** | Record everything, break all computational secrets later: classical arm 100% retro-recovered, IT-dealer (online provisioning) arm 100% - IT masking with recorded provisioning still falls - entangled arm 0% |
+| 9 | **HNDL transcript attack** | Record everything, break all computational secrets later: classical arm 100% retro-recovered, IT-dealer online provisioning 100% - IT masking with recorded provisioning still falls - IT-dealer courier provisioning 0%, entangled arm 0%: immunity tracks provisioning |
 | 10 | Availability under source failure | Kill one node's source: edges continue at ~half rate from far endpoints (availability/fairness, not security) |
 | 11 | **Gradient inversion (real construction)** | Tabular DLG/iDLG: unmasked leaks (100% attr-infer), modular mask blocks (theorem), plaintext aggregate partially leaks (motivates DP-on-top) |
-| 12 | **SOTA comparison** | Five executing arms: Bonawitz-DH, Flamingo-PRF, and a classical IT-dealer (online + courier provisioning). Every OTP arm pays O(d) recovery; the arms differ in what must be trusted: DH/PRF hardness, a dealer, or one's own source |
-| 13 | **QKD-framing rate cost** | Same physics, two post-processings: source-model vs Shor-Preskill QKD framing. Ratio 2.16x/1.32x/1.08x by sifting protocol - prices the trusted-source assumption; not a security ranking |
+| 12 | SOTA comparison | Five executing arms: Bonawitz-DH, Flamingo-PRF, and a classical IT-dealer (online + courier provisioning). Every OTP arm pays O(d) recovery; the arms differ in what must be trusted: DH/PRF hardness, a dealer, or one's own source. Tables; the figure repeats Table 1 of the paper |
+| 13 | QKD-framing rate cost | Same physics, two post-processings: source-model vs Shor-Preskill QKD framing. Ratio 2.16x/1.32x/1.08x by sifting protocol - prices the trusted-source assumption; not a security ranking. Reported as prose; the ratio is the asymptote in exp14(d) |
 | 14 | **Executing BBM92 arm** | The QKD framing executed on sampled bits (basis choice, sifting, TLGR finite-key PA): the same key-basis intercept-resend tap is invisible to the fixed-basis protocol (flat QBER, Eve predicts 99.9% of accepted key at full tap) and aborts BBM92 near the analytic threshold f* = 0.023. Finite-key penalty priced honestly (executing ratio 4.1x at 8M-pair runs vs 1.32x asymptotic; fixed-length TLGR charge at the a-priori q_tol) |
 
 ## Assumptions
@@ -87,12 +87,16 @@ python run_all.py --exp 1 2 3 # Specific experiments
 Results in `results/`, tiered for the publication figure budget
 (IEEE Network: six figures/tables total):
 
-- `main/` - publication candidates: exp5 (dropout cost), exp7 (QBER
-  envelope), exp9 (HNDL), exp12 (five-arm comparison), exp13
-  (QKD-framing cost), exp14 (executing BBM92 arm)
-- `peripheral/` - validation, sensitivity, and scaling figures kept
-  for the technical-report version and reviewers (exp1-4, 6, 8, 10,
-  11, exp14b basis split, quick-mode variants)
+- `main/` - the four paper figures: exp5 (dropout accuracy and
+  five-arm recovery cost), exp7 (QBER envelope), exp9 (HNDL, four
+  arms), exp14 (executing BBM92 arm)
+- `peripheral/` - validation, sensitivity, scaling, and comparison
+  figures kept for the technical-report version and reviewers (exp1,
+  2a-b, 3a, 4, 6, 8a-b, 10, 11, 12, 13, exp14b basis split, quick-mode
+  variants). exp2c, exp3b, and exp8c are no longer drawn: exp13
+  supersedes exp2c, and exp3b and exp8c repeated exp6's point that
+  key supply binds; their numbers stay in summary.json and the run
+  log
 - `figure_captions.md` - paper-ready captions; figure titles are kept
   short and technical, the configuration and scope context lives here
 - `replaced_by_text.md` - prose blocks replacing peripheral figures

@@ -34,6 +34,16 @@ computer breaking DH / channel encryption / PRFs after the fact):
       100%. IT-secure MASKING with computationally-secured PROVISIONING
       is still HNDL-exposed - the hole moves one layer down.
 
+  it_dealer_courier arm - the same dealer pads delivered out of band
+      (courier / HSM install). No pad ever crosses a recorded channel,
+      so the transcript is byte-identical in shape to the entangled
+      arm's and the attack has nothing to open: expected retroactive
+      recovery 0%. The two dealer arms differ ONLY in provisioning,
+      which is what makes HNDL immunity a provisioning property in
+      the data rather than in the argument. The courier arm's immunity
+      is against a CHANNEL recorder only; the dealer generated and
+      held every pad, and future pads sit in storage between visits.
+
 The t >= 2 structural argument, stated once: a payload loses ALL its
 pairwise masks only if every partner's pairwise material is revealed,
 i.e. all other cluster members dropped - but then survivors < Shamir
@@ -101,10 +111,16 @@ class TranscriptRound:
     pair_mask_seeds: Dict[Tuple[int, int], int] = None
     # it_dealer_online arm only: the dealer's per-round pad distribution,
     # recorded as TLS ciphertexts on the wire; god-mode decrypts them.
-    # None in the other arms.
+    # None in the other arms (the courier arm's pads never touch a
+    # recorded channel).
     dealer_pad_bits: Dict[Tuple[int, int], np.ndarray] = None
     # --- ground truth for scoring (NOT in the transcript) ---
     truth_quant: Dict[int, np.ndarray] = field(default_factory=dict)
+
+
+# Arms whose pairwise masks are one-time pads sliced from a pool (the
+# classical arm PRG-expands seeds instead).
+_POOL_ARMS = ("entangled", "it_dealer_online", "it_dealer_courier")
 
 
 def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
@@ -122,6 +138,8 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
     the dealer's pad-distribution messages ride recorded classical
     channels under computational encryption - so the pads themselves
     join the transcript as ciphertexts god-mode can open later.
+    arm='it_dealer_courier': the same pads delivered out of band; the
+    transcript carries no provisioning messages at all.
 
     Returns (TranscriptRound, aggregate_quantized) where the aggregate is
     the unmasked modular sum of survivor payloads (for the coherence
@@ -143,7 +161,7 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
     for i_idx, ci in enumerate(cluster):
         for cj in cluster[i_idx + 1:]:
             key = (ci, cj)
-            if arm in ("entangled", "it_dealer_online"):
+            if arm in _POOL_ARMS:
                 bits = pairwise_pool[off:off + bits_per_mask]
                 off += bits_per_mask
                 pair_masks[key] = derive_modular_mask(n_params, bits)
@@ -179,7 +197,7 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
     for c in dropouts:
         for s in survivors:
             lo, hi = (s, c) if s < c else (c, s)
-            if arm in ("entangled", "it_dealer_online"):
+            if arm in _POOL_ARMS:
                 revealed[(lo, hi)] = pair_bits[(lo, hi)]
             else:
                 revealed[(lo, hi)] = np.int64(pair_mask_seeds[(lo, hi)])
@@ -217,11 +235,14 @@ def retroactive_attack(transcript: List[TranscriptRound], arm):
     """Replay the recorded transcript with god-mode over computational
     secrets; attempt to unmask every recorded payload.
 
-    God-mode grants (both arms): channel encryption broken -> Shamir
+    God-mode grants (all arms): channel encryption broken -> Shamir
     shares readable -> every self-mask seed reconstructible (the
     computationally-protected leg falls, as documented); all dropout
     reveals readable. Classical arm additionally: per-pair mask seeds
-    (DH/PRF) broken -> every pairwise mask recomputable.
+    (DH/PRF) broken -> every pairwise mask recomputable. Online-dealer
+    arm additionally: recorded pad ciphertexts opened. The courier-
+    dealer and entangled arms grant nothing further - there is nothing
+    further in their transcripts.
 
     Returns per-payload records and summary fractions.
     """
