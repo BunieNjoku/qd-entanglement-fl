@@ -116,13 +116,19 @@ python run_all.py --exp 1 2 3 # Specific experiments
 Results in `results/`, tiered for the publication figure budget
 (IEEE Network: six figures/tables total):
 
-- `main/` - the four paper figures: exp5 (dropout accuracy and
-  five-arm recovery cost), exp7 (QBER envelope), exp9 (HNDL, four
-  arms), exp14 (executing BBM92 arm)
+- `main/` - the paper tier (ICC target): exp5 (dropout accuracy and
+  five-arm recovery cost) plus four composite figures built by
+  `python run_all.py --paper` from the full-mode summary:
+  paper_fig2_key_supply (waterfall + rate vs edge length),
+  paper_fig3_security (HNDL arms + intercept-resend visibility),
+  paper_fig4_finite_key (surcharge convergence vs source time),
+  paper_fig6_limits_levers (window cliff + hardware levers). The
+  architecture figure and the provenance/SOTA tables are manuscript
+  material outside this repo
 - `peripheral/` - validation, sensitivity, scaling, and comparison
   figures kept for the technical-report version and reviewers (exp1,
-  2a-b, 3a, 4, 6, 8a-b, 10, 11, 12, 13, exp14b basis split, exp15
-  window optimization, quick-mode variants). exp2c, exp3b, and exp8c are no longer drawn: exp13
+  2a-b, 3a, 4, 6, 7, 8a-b, 9, 10, 11, 12, 13, 14, exp14b basis split,
+  exp15 window optimization, quick-mode variants). exp2c, exp3b, and exp8c are no longer drawn: exp13
   supersedes exp2c, and exp3b and exp8c repeated exp6's point that
   key supply binds; their numbers stay in summary.json and the run
   log

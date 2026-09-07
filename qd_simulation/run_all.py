@@ -108,11 +108,16 @@ _OUTPUT_SUFFIX = ""
 # Captions carrying the context stripped from figure titles live in
 # results/figure_captions.md; prose replacing demoted figures lives in
 # results/replaced_by_text.md.
+# Paper tier (ICC target): four composite figures built by --paper from
+# the full-mode summary, plus exp5 as-is. The architecture figure (F1)
+# and the provenance/SOTA tables are manuscript material outside this
+# repo. Everything else is peripheral.
 MAIN_FIGURES = {
     'exp5_dropout_recovery',
-    'exp7_qber_key_rate_envelope',
-    'exp9_hndl_transcript',
-    'exp14_bbm92_executing',
+    'paper_fig2_key_supply',
+    'paper_fig3_security',
+    'paper_fig4_finite_key',
+    'paper_fig6_limits_levers',
 }
 
 
@@ -3645,6 +3650,219 @@ def run_experiment_14(quick=False):
     }
 
 
+# PAPER FIGURE PASS (--paper)
+#
+# Builds the four composite paper figures from the full-mode
+# summary.json (source of record) plus config-derived analytics. Panel
+# content re-tiers existing experiment results; no new simulation runs.
+
+def _secret_rate_at(coupling, eta_ex, fiber_length_m, qber=None):
+    """Distilled secret rate through the m2 waterfall for an analytic
+    coincidence rate at the given hardware point (QBER defaults to the
+    operating value: these axes do not move entanglement quality)."""
+    raw = compute_coincidence_rate(
+        QUANTUM['source_rep_rate_hz'], eta_ex, coupling, fiber_length_m,
+        QUANTUM['fiber_loss_db_per_km_780nm'], QUANTUM['detector_efficiency'],
+        colocated=QUANTUM.get('colocated', True),
+        local_optics_efficiency=QUANTUM['local_optics_efficiency'])
+    wf = compute_rate_waterfall(
+        raw, OPERATING_POINT['qber'] if qber is None else qber,
+        code_rate=POST_PROC['ldpc_code_rate'],
+        security_margin=POST_PROC['security_margin_bits'],
+        block_size=POST_PROC['block_size'],
+        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+        tagged_fraction=(QUANTUM['multi_photon_prob']
+                         / QUANTUM['source_brightness']))
+    return wf['final_secure_rate']
+
+
+def make_paper_figures(summary):
+    print("\n" + "="*70)
+    print("PAPER FIGURE PASS: composite figures from the full-mode summary")
+    print("="*70)
+    op = OPERATING_POINT
+    c_now = QUANTUM['coupling_efficiency']
+    eta_now = QUANTUM['source_brightness']
+
+    # F2: anchored key supply - waterfall + secret rate vs edge length
+    print("  [F2] Key supply: waterfall + rate vs edge length...")
+    wf = compute_rate_waterfall(
+        op['raw_edge_rate_hz'], op['qber'],
+        code_rate=POST_PROC['ldpc_code_rate'],
+        security_margin=POST_PROC['security_margin_bits'],
+        block_size=POST_PROC['block_size'],
+        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'],
+        tagged_fraction=op['tagged_fraction'])
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    stages = ['Raw', 'Sift', 'EC', 'PA', 'Verif', 'Final']
+    vals = [wf['raw_coincidence_rate'], wf['after_sifting'], wf['after_ec'],
+            wf['after_pa'], wf['after_verification'], wf['final_secure_rate']]
+    ax1.bar(stages, [v / 1e3 for v in vals],
+            color=[C['dark']] + [C['quantum']] * 4 + [C['pareto']],
+            edgecolor='white', linewidth=1.5)
+    ax1.set_ylabel('Rate (kbit/s)')
+    ax1.set_title(f"Distillation waterfall, QBER {op['qber']*100:.2f}%\n"
+                  f"{op['raw_edge_rate_hz']/1e3:.2f} kHz raw -> "
+                  f"{wf['final_secure_rate']/1e3:.2f} kbit/s", fontsize=8)
+    ax1.grid(True, alpha=0.2, axis='y')
+
+    lengths = np.linspace(100, 5000, 60)
+    ax2.semilogy(lengths / 1e3,
+                 [_secret_rate_at(c_now, eta_now, fl) / 1e3
+                  for fl in lengths],
+                 '-', color=C['quantum'], linewidth=2)
+    ax2.plot(QUANTUM['fiber_length_m'] / 1e3,
+             op['secret_rate_bps'] / 1e3, 'o', color=C['dark'],
+             markersize=6,
+             label=f"operating point ({QUANTUM['fiber_length_m']} m)")
+    ax2.set_xlabel('Edge length (km)')
+    ax2.set_ylabel('Secret rate (kbit/s)')
+    ax2.set_title('Secret rate vs edge length (780 nm)', fontsize=9)
+    ax2.legend(fontsize=7)
+    ax2.grid(True, alpha=0.3, which='both')
+    fig.suptitle('Anchored per-edge key supply', fontsize=10,
+                 fontweight='bold')
+    fig.tight_layout(w_pad=2.5)
+    save_fig(fig, 'paper_fig2_key_supply')
+
+    # F3: security - HNDL retro-recovery + live tap visibility
+    print("  [F3] Security: HNDL arms + intercept-resend visibility...")
+    e9 = summary['exp9']
+    e14 = summary['exp14']['intercept_resend']
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    arm_keys = ['classical', 'it_dealer_online', 'it_dealer_courier',
+                'entangled']
+    arm_labels = ['classical\n(DH/PRF)', 'dealer\n(online)',
+                  'dealer\n(courier)', 'entangled\n(distilled)']
+    fracs = [100 * e9[k]['recovered_fraction'] for k in arm_keys]
+    bars = ax1.bar(arm_labels, fracs,
+                   color=[C['unmasked'], C['accent'], C['prng'],
+                          C['quantum']], edgecolor='white')
+    for b, f in zip(bars, fracs):
+        ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 1.5,
+                 f'{f:.0f}%', ha='center', fontsize=7)
+    ax1.set_ylabel('Payloads retro-recovered (%)')
+    ax1.set_ylim(0, 112)
+    ax1.set_title('HNDL transcript attack\n(record now, break DH/PRF/TLS '
+                  'later)', fontsize=8)
+    ax1.grid(True, alpha=0.2, axis='y')
+
+    f_sw = np.array(e14['f_sweep'])
+    ax2.plot(f_sw * 100, np.array(e14['fixed_qber']) * 100, 'o-',
+             color=C['dark'], linewidth=1.6, markersize=4,
+             label='fixed-basis QBER (attack invisible)')
+    ax2.plot(f_sw * 100, np.array(e14['bbm92_e_x']) * 100, 's-',
+             color=C['quantum'], linewidth=1.6, markersize=4,
+             label='BBM92 test-set error e_x')
+    ax2.axhline(y=BBM92['q_tol'] * 100, color=C['unmasked'],
+                linestyle='--', linewidth=1.2,
+                label=f"abort threshold q_tol ({BBM92['q_tol']*100:.0f}%)")
+    ax2.axvline(x=e14['analytic_f_star'] * 100, color='gray',
+                linestyle=':', linewidth=1,
+                label=f"analytic f* ({e14['analytic_f_star']*100:.1f}%)")
+    ax2b = ax2.twinx()
+    ax2b.plot(f_sw * 100, e14['bbm92_abort_prob'], '^--',
+              color=C['pareto'], linewidth=1.2, markersize=4)
+    ax2b.set_ylabel('BBM92 abort probability', color=C['pareto'],
+                    fontsize=8)
+    ax2b.set_ylim(-0.05, 1.05)
+    ax2.set_xlabel('Intercepted fraction of fiber photons (%)')
+    ax2.set_ylabel('Error rate (%)')
+    ax2.set_xscale('symlog', linthresh=1.0)
+    ax2.set_xlim(0, 110)
+    ax2.set_title('Key-basis intercept-resend tap', fontsize=9)
+    ax2.legend(fontsize=6, loc='upper left')
+    ax2.grid(True, alpha=0.3)
+    fig.suptitle('Security evaluation: retroactive and live adversaries',
+                 fontsize=10, fontweight='bold')
+    fig.tight_layout(w_pad=2.8)
+    save_fig(fig, 'paper_fig3_security')
+
+    # F4: finite-key convergence in seconds of source time
+    print("  [F4] Finite-key penalty vs accumulated source time...")
+    conv = summary['exp14']['surcharge_convergence']
+    asym = summary['exp13']['rate_ratios']['efficient-90/10']
+    pair_rate = QUANTUM['source_rep_rate_hz'] * QUANTUM['source_brightness']
+    secs = [d['pairs'] / pair_rate for d in conv]
+    med = [d['median'] for d in conv]
+    lo = [d['min'] for d in conv]
+    hi = [d['max'] for d in conv]
+    fig, ax = plt.subplots(figsize=VIZ['figsize_single'])
+    ax.fill_between(secs, lo, hi, color=C['quantum'], alpha=0.2,
+                    label='seed range (10 seeds)')
+    ax.plot(secs, med, 'o-', color=C['quantum'], linewidth=2,
+            label='median executing ratio')
+    ax.axhline(y=asym, color=C['pareto'], linestyle='--', linewidth=1.5,
+               label=f'asymptotic waterfall ratio ({asym:.2f}x)')
+    z = conv[0]
+    if z.get('n_zero_cert', 0):
+        ax.annotate(f"{z['n_zero_cert']}/{z['n_seeds']} seeds certify\n"
+                    f"zero key here", xy=(secs[0], med[0]),
+                    xytext=(secs[0] * 1.6, med[0] * 0.55), fontsize=6,
+                    arrowprops=dict(arrowstyle='-', lw=0.7, color='gray'))
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel('Accumulated source time (s)')
+    ax.set_ylabel('Fixed-basis / BBM92 rate ratio')
+    ax.set_title('Finite-key surcharge convergence', fontsize=9)
+    ax.legend(fontsize=6)
+    ax.grid(True, alpha=0.3, which='both')
+    fig.tight_layout()
+    save_fig(fig, 'paper_fig4_finite_key')
+
+    # F6: rate limits and levers
+    print("  [F6] Limits and levers: window cliff + hardware levers...")
+    e15 = summary['exp15']
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    win_ps = np.array(e15['windows_ps'])
+    for (label, res), ls, col in zip(e15['calibrations'].items(),
+                                     ('-', '--'), (C['pareto'], C['dark'])):
+        ax1.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
+                 linewidth=1.8, label=label.split(' (')[0])
+        ax1.plot(res['opt_window_ps'], res['opt_secret_bps'] / 1e3, 'o',
+                 color=col, markersize=5)
+    ax1.axhline(y=op['secret_rate_bps'] / 1e3, color=C['quantum'],
+                linestyle=':', linewidth=1.2,
+                label='time-resolved operating point')
+    ax1.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
+                label='T1')
+    ax1.set_xlabel('Acceptance window (ps)')
+    ax1.set_ylabel('Secret rate (kbit/s)')
+    ax1.set_title('Window cliff (phase-blind receiver)', fontsize=9)
+    ax1.legend(fontsize=6)
+    ax1.grid(True, alpha=0.3)
+
+    cs = np.logspace(np.log10(0.004), np.log10(0.45), 40)
+    fl_m = QUANTUM['fiber_length_m']
+    ax2.loglog(cs, [_secret_rate_at(c, eta_now, fl_m) / 1e3 for c in cs],
+               '-', color=C['quantum'], linewidth=2,
+               label='coupling lever (quadratic)')
+    for cval, mlabel, col in (
+            (c_now, f'today ({c_now:.4f})', C['dark']),
+            (0.21, 'microlens theory', C['accent']),
+            (0.40, 'CBG simulated', C['pareto'])):
+        ax2.plot(cval, _secret_rate_at(cval, eta_now, fl_m) / 1e3, 'o',
+                 color=col, markersize=6, zorder=5, label=mlabel)
+    s_eta1 = _secret_rate_at(c_now, 1.0, fl_m)
+    ax2.plot(c_now, s_eta1 / 1e3, '^', color=C['unmasked'], markersize=7,
+             zorder=5,
+             label='charge stabilization at today\'s optics '
+                   f'({s_eta1/op["secret_rate_bps"]:.0f}x)')
+    ax2.set_ylim(0.2, 2e4)
+    ax2.set_xlabel('Per-arm coupling efficiency')
+    ax2.set_ylabel('Secret rate (kbit/s)')
+    ax2.set_title(f'Hardware levers, {fl_m} m edge', fontsize=9)
+    ax2.legend(fontsize=6, loc='lower right')
+    ax2.grid(True, alpha=0.3, which='both')
+    fig.suptitle('Rate limits and improvement levers', fontsize=10,
+                 fontweight='bold')
+    fig.tight_layout(w_pad=2.5)
+    save_fig(fig, 'paper_fig6_limits_levers')
+
+    print("  Paper figures complete (F5 = exp5_dropout_recovery as-is; "
+          "F1 architecture and tables are manuscript material).")
+
+
 # EXPERIMENT 15: ACCEPTANCE-WINDOW OPTIMIZATION
 def run_experiment_15(quick=False):
     print("\n" + "="*70)
@@ -3804,7 +4022,19 @@ def main():
     parser.add_argument('--export-csv', action='store_true',
                         help='Rewrite results/data CSV tables from the '
                              'existing summary and exit')
+    parser.add_argument('--paper', action='store_true',
+                        help='Build the composite paper figures from the '
+                             'existing full-mode summary and exit')
     args = parser.parse_args()
+
+    if args.paper:
+        summary_path = os.path.join(RESULTS_DIR, "summary.json")
+        if not os.path.exists(summary_path):
+            raise SystemExit("--paper needs a full-mode summary.json; "
+                             "run the suite first")
+        with open(summary_path) as f:
+            make_paper_figures(json.load(f))
+        return
 
     if args.quick:
         set_output_suffix("_quick")
