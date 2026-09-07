@@ -401,8 +401,9 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     #       code family tuned to q would leak, which a real system needs
     #       once q exceeds the fixed code's design point (~2% for 0.84).
     # max(a, b) never claims less leakage than the implemented code and
-    # never more correction capability than the envelope allows: a pure beta*h(q) charge would be 9.5% optimistic at the
-    # operating QBER of 0.0085.
+    # never more correction capability than the envelope allows: a pure
+    # beta*h(q) charge would be 3.4% optimistic at the anchored
+    # operating QBER of 1.53%.
     # D_tag is the GLLP tagged fraction (multi-pair emissions a passive
     # beamsplitter could copy undetected; removed in PA for HNDL immunity).
     if assume_rate_adapted:
@@ -486,6 +487,17 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
     Comparison-only; never feeds headline numbers. Returns the same dict
     shape as compute_rate_waterfall with 'tagged_fraction' fixed at 0.0,
     plus 'eve_bound_fraction' and 'sifting_keep'.
+    
+
+    ACCOUNTING CONVENTION (exp7/exp13): the same witness duty cycle is
+    charged to BOTH framings, and the sifted fraction keep = p^2+(1-p)^2
+    (which includes the X-X estimation subset, 1% at the 90/10 split) is
+    counted as key. This matched charging isolates the sifting/PA
+    framing difference; protocol-faithful accounting (no CHSH witness
+    for BBM92, key-bearing fraction p^2 = 0.81) shifts the 90/10 rate by
+    under 0.2% net, the duty and test-subset corrections nearly
+    cancelling. exp14's executing arm uses the protocol-faithful
+    convention instead.
     """
     h_q = binary_entropy(qber)
     beta = 1.15  # same envelope inefficiency as the source waterfall
@@ -905,9 +917,9 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000,
     if rng is None:
         rng = np.random.default_rng(42)
     if qber_values is None:
-        # Design band including the 0.85% operating point itself, plus
-        # one degraded-band point (2%) to exhibit the toy code's threshold.
-        qber_values = [0.005, 0.0085, 0.01, 0.02]
+        # Band bracketing the anchored 1.53% operating point, plus one
+        # degraded-band point (2%) to exhibit the toy code's threshold.
+        qber_values = [0.005, 0.01, 0.0153, 0.02]
 
     code_rate = 0.84
     n_blocks_per_qber = n_blocks  # FER resolution = 1/n_blocks
@@ -956,7 +968,10 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000,
             "bp_fer": bp_fer,
             "stat_fer": stat_fer,
             "bp_success_rate": bp_successes / n_blocks_per_qber,
-            "agreement": abs(bp_fer - stat_fer) < 0.3,
+            # The toy 3-regular code is claimed only as a CONSERVATIVE
+            # FLOOR: its FER must sit at or above the finite-blocklength
+            # model (one FER resolution step of slack for sampling).
+            "floor_consistent": bp_fer >= stat_fer - 1.0 / n_blocks_per_qber,
         })
 
     return validation_table

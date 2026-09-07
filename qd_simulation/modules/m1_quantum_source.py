@@ -259,11 +259,14 @@ def simulate_source(
     )
 
 
-def compute_qber_analytical(fidelity, pbs_extinction=1000, bire_contribution=0.001):
+def compute_qber_analytical(fidelity, pbs_extinction=1000, bire_contribution=0.0):
     """Analytical QBER estimate for quick sweeps.
-    QBER ≈ (1-F)/2 + 1/extinction + birefringence_contribution
+    QBER ~ (1-F)/2 + 2/extinction + birefringence_contribution
+    Both analyzers flip independently with probability 1/extinction, so
+    the discordance contribution is ~2/extinction (matches the Monte
+    Carlo, which flips each side separately).
     """
-    return (1 - fidelity) / 2 + 1 / pbs_extinction + bire_contribution
+    return (1 - fidelity) / 2 + 2 / pbs_extinction + bire_contribution
 
 
 def partial_transpose_b(rho):

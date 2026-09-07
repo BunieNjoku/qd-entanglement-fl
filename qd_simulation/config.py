@@ -94,7 +94,12 @@ QUANTUM = {
     "local_optics_efficiency": 1.0,  # absorbed into calibrated coupling
     "colocated": True,               # rack architecture (Photon 1 local)
     "detector_jitter_rms_ps": 20,    # SSPD single-detector RMS (Zena 2026)
-    "two_photon_jitter_fwhm_ps": 50, # two-photon timing resolution
+    # Two-photon timing resolution as QUOTED by Zena 2026 (supplement).
+    # Note: two independent 20 ps RMS detectors would give 66 ps FWHM;
+    # the quoted 50 ps implies partially correlated jitter. The window
+    # model uses this measured two-photon figure directly (the operative
+    # quantity) and assumes nothing about the split between detectors.
+    "two_photon_jitter_fwhm_ps": 50,
     "detector_dark_count_hz": 50,    # not reported; conservative SSPD value
     "coincidence_window_ns": 0.5,    # ~3x T1; swept in exp15
     "multi_photon_prob": 0.5 * _G2_XX_ZERO * _ETA_EX**2,  # Waks 2002 bound
@@ -104,13 +109,14 @@ QUANTUM = {
     # entanglement-vs-delay model behind the exp15 window optimization.
     "fss_uev": 2.54,                # 2.54(12) ueV
     "t1_x_ps": 162.0,               # 162(4) ps
-    # Fixed conservative allowance for residual birefringence in the
-    # ANALYTIC QBER model (m1.compute_qber_analytical). The Monte Carlo
-    # derives birefringence from fiber_birefringence_rad_per_km_per_C ×
-    # length × ΔT; for campus links (≤3 km) this allowance upper-bounds
-    # that contribution. Config-visible so OPERATING_POINT moves with
-    # declared physics.
-    "analytic_qber_birefringence_allowance": 0.001,
+    # Residual-birefringence allowance in the ANALYTIC QBER model
+    # (m1.compute_qber_analytical). The Monte Carlo derives
+    # birefringence from fiber_birefringence_rad_per_km_per_C x length
+    # x dT; at campus lengths its discordance contribution is below
+    # 2e-4, within the two-sided extinction term's rounding, so the
+    # analytic model carries no separate allowance. Config-visible so
+    # OPERATING_POINT moves with declared physics.
+    "analytic_qber_birefringence_allowance": 0.0,
     "fiber_birefringence_rad_per_km_per_C": 0.01,  # Compensated SMF (pol. controller)
     "temperature_variation_C": 2.0,  # lab climate 18(2) C (Zena 2026)
     # CHSH measurement angles (radians) - optimal for |Φ+⟩
@@ -145,8 +151,11 @@ POST_PROC = {
     # rack system's 60 s/setting tomography integration (Zena 2026,
     # Sec. 4) once per measured six-hour hands-off stability window
     # (2n never below 0.95 without active stabilization, Fig. 6b):
-    # 4 x 60 s / 6 h = 0.0111. BBM92-mode parameter estimation is priced
-    # inside sifting instead and does not use this knob.
+    # 4 x 60 s / 6 h = 0.0111. The BBM92 protocol itself replaces the
+    # witness with X-basis parameter estimation; exp14's executing arm
+    # therefore charges this knob to the fixed-basis arm only, while
+    # exp7/exp13 charge it to both framings as part of their matched-
+    # charging convention (see m2.compute_rate_waterfall_qkd).
     "bell_test_duty_cycle": (4 * 60) / (6 * 3600),
 }
 

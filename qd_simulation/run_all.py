@@ -388,7 +388,7 @@ def run_experiment_1(quick=False):
         rho_ad = amplitude_damping_state(
             amplitude_damping_gamma_for_fidelity(f))
         # same additive device terms the analytic Werner curve carries
-        device_err = (1.0 / QUANTUM['pbs_extinction_ratio']
+        device_err = (2.0 / QUANTUM['pbs_extinction_ratio']
                       + QUANTUM['analytic_qber_birefringence_allowance'])
         qbers_ad_z.append(qber_in_basis(rho_ad, 0.0) + device_err)
         qbers_ad_x.append(qber_in_basis(rho_ad, np.pi / 4) + device_err)
@@ -728,11 +728,11 @@ def run_experiment_2(quick=False):
         block_size=800 if quick else 1000,
         n_blocks=3 if quick else 10,
     )
-    print(f"    QBER     BP FER    Stat FER    Agreement   "
-          f"(FER resolution 1/{3 if quick else 10} per point)")
+    print(f"    QBER     BP FER    Stat FER    Floor holds "
+          f"(toy FER >= model; resolution 1/{3 if quick else 10})")
     print("    " + "-"*60)
     for row in bp_validation:
-        agree = "YES" if row["agreement"] else "NO"
+        agree = "YES" if row["floor_consistent"] else "NO"
         print(f"    {row['qber']:.4f}   {row['bp_fer']:.2f}      "
               f"{row['stat_fer']:.2f}        {agree}")
     print("    Note: this toy 3-regular rate-0.84 LDPC has a low BSC "
@@ -3235,9 +3235,14 @@ def run_experiment_14(quick=False):
         probability rising to 1 past f* ~ 2(q_tol - e0). Detection is
         reported as an abort PROBABILITY, not a verdict.
     (D) Surcharge convergence: the executing fixed-basis/BBM92 ratio vs
-        run length, against the deterministic finite-key model and the
-        asymptotic waterfall ratio - showing the exp13 asymptote is
-        approached as accumulated key/test bits grow.
+        run length, against the deterministic finite-key model. The
+        model FLOORS near 1.8x and does not reach exp13's 1.41x
+        infinite-key waterfall ratio: that reference uses a different
+        accounting (h2 at the observed error rather than the a-priori
+        q_tol, no per-block mu floor at the fixed 50-kbit block size,
+        the 0.82 sifted fraction counted as key, matched duty
+        charging). The floor is computed and drawn; 1.41x is drawn as
+        a labeled accounting reference, not a limit.
 
     (C) demonstrates DETECTION of one concrete attack, not security
     against general attacks; the general claim rests on the h2(e_ph)
@@ -3278,8 +3283,9 @@ def run_experiment_14(quick=False):
                             rng=np.random.default_rng(seed), **kw)
         # fast_ec_simulate drops bits beyond n_blocks*block_size; process
         # the tail separately so both arms account every sifted bit, and
-        # charge the fixed-basis arm its 2% CHSH duty (its waterfall
-        # does; the sampled run spent no coincidences on it).
+        # charge the fixed-basis arm its config-derived CHSH witness
+        # duty (its waterfall does; the sampled run spent no
+        # coincidences on it).
         rng_ec = np.random.default_rng(20_000 + seed)
         n_whole = (len(rf.key_bits_alice) // block) * block
         ec = []
@@ -3351,8 +3357,8 @@ def run_experiment_14(quick=False):
           f"q_tol, plus per-block floors)")
     print("      note: the BBM92 arm charges NO CHSH duty cycle - "
           "parameter estimation replaces\n      the source-QA witness; "
-          "the fixed-basis arm's secure bits are scaled by its 2% Bell "
-          "duty.")
+          "the fixed-basis arm's secure bits are scaled by its "
+          f"{POST_PROC['bell_test_duty_cycle']*100:.2f}% witness duty.")
 
     # (B) basis-split tradeoff at finite run size
     p_z_sweep = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95]
@@ -3521,6 +3527,12 @@ def run_experiment_14(quick=False):
     model_pairs = np.geomspace(pairs_sweep[0] / 2,
                                pairs_sweep[-1] * 8, 40)
     model_curve = [ratio_model(npp) for npp in model_pairs]
+    # Long-run floor of the implemented accounting (per-block mu at the
+    # fixed block size never vanishes; evaluated far past the plotted
+    # range - the minimum sits near 1e4 s of source time).
+    _floor_grid = np.geomspace(pairs_sweep[-1], 2e15, 60)
+    floor_ratio = float(np.nanmin([ratio_model(npp)
+                                   for npp in _floor_grid]))
     print(f"\n  (D) Finite-key penalty convergence ({len(seeds_d)} seeds "
           f"per point):")
     for st in d_stats:
@@ -3535,13 +3547,16 @@ def run_experiment_14(quick=False):
             print(f"      {st['pairs']/1e6:>5.0f}M pairs: median ratio "
                   f"{st['median']:.2f}x, range "
                   f"[{st['min']:.2f}, {st['max']:.2f}]{zero_note}")
-    print(f"      asymptotic waterfall ratio {model_ratio:.2f}x; the "
-          f"executing ratio approaches it as\n      accumulated "
-          f"key/test bits grow. The deterministic finite-key model is "
-          f"drawn for\n      comparison; near the cliff, sampling of "
-          f"the ~400-bit test set moves individual\n      seeds far "
-          f"around it. FER omitted from both model arms - it cancels "
-          f"in the ratio.")
+    print(f"      implemented-accounting floor {floor_ratio:.2f}x "
+          f"(per-block mu at the fixed block size never\n      "
+          f"vanishes); exp13's infinite-key waterfall ratio "
+          f"{model_ratio:.2f}x is a different accounting\n      "
+          f"(h2 at the observed error, no mu floor, 0.82 counted as "
+          f"key, matched duty) and is\n      NOT reached by the "
+          f"protocol. Near the cliff, sampling of the ~400-bit test "
+          f"set\n      moves individual seeds far around the model. "
+          f"FER omitted from both model arms -\n      it cancels in "
+          f"the ratio.")
 
     # Main figure: 2x2
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2,
@@ -3624,7 +3639,8 @@ def run_experiment_14(quick=False):
                              color=C['unmasked'])
     ax4.axhline(model_ratio, color=C['accent'], linestyle='--',
                 linewidth=1,
-                label=f'asymptotic ratio {model_ratio:.2f}x')
+                label=f'infinite-key accounting reference '
+                      f'({model_ratio:.2f}x, not reached)')
     ax4.set_xscale('log')
     ax4.set_yscale('log')
     # bottom below the asymptote line, top above the widest seed range
@@ -3697,6 +3713,7 @@ def run_experiment_14(quick=False):
             "pairs": model_pairs.tolist(),
             "ratio": [float(r) for r in model_curve],
             "asymptotic_ratio": float(model_ratio),
+            "floor_ratio": floor_ratio,
         },
     }
 
@@ -3886,9 +3903,14 @@ def make_paper_figures(summary):
                  zorder=5, elinewidth=1.4,
                  label=f"executing (median, range, "
                        f"{conv[0]['n_seeds']} seeds)")
-    ax1.axhline(y=model['asymptotic_ratio'], color=C['accent'],
+    ax1.axhline(y=model['floor_ratio'], color=C['unmasked'],
                 linestyle='--', linewidth=1.4,
-                label=f"asymptotic ratio ({model['asymptotic_ratio']:.2f}x)")
+                label=f"implemented-accounting floor "
+                      f"({model['floor_ratio']:.2f}x)")
+    ax1.axhline(y=model['asymptotic_ratio'], color=C['accent'],
+                linestyle=':', linewidth=1.2,
+                label=f"infinite-key accounting reference "
+                      f"({model['asymptotic_ratio']:.2f}x, not reached)")
     z = conv[0]
     if z.get('n_zero_cert', 0):
         ax1.annotate(f"{z['n_zero_cert']}/{z['n_seeds']} seeds: zero key",
@@ -3999,7 +4021,7 @@ def make_paper_figures(summary):
     # Figure: dropout recovery vs classical baselines - accuracy under
     # dropout, per-event recovery cost vs the seed-based baselines, and
     # the O(d)-vs-O(1) scaling with model dimension.
-    print("  [E] Figure: dropout recovery vs baselines...")
+    print("  [Ed] Figure: dropout recovery vs baselines...")
     e5 = summary['exp5']['dropout_results']
     e12d = summary['exp12']['recovery_bytes_vs_dim']
     rates = sorted(e5.keys(), key=lambda k: float(k.rstrip('%')))
@@ -4106,7 +4128,7 @@ def make_paper_figures(summary):
 
     # Table and prose material (no plots: each is carried losslessly by
     # a sentence or table row).
-    print("  [E] Table/prose material:")
+    print("  [G] Table/prose material:")
     wf = op['waterfall']
     print(f"      key supply: {op['raw_edge_rate_hz']/1e3:.2f} kHz raw, "
           f"QBER {op['qber']*100:.2f}% -> "
@@ -4122,8 +4144,10 @@ def make_paper_figures(summary):
     e5 = summary.get('exp5', {})
     print("      dropout recovery (table rows): pad-reveal arms "
           "346,392 B/dropout at ClinicalMLP vs 12 B seed-based; "
-          "accuracy holds to 20% dropout, crosses the 0.9 target at "
-          "40%; threshold failures rise superlinearly (exp5/exp12)")
+          "accuracy holds to 20% dropout; the 40% point estimate "
+          "(0.892) sits below the 0.9 target with a 95% CI that "
+          "includes it; threshold failures rise superlinearly "
+          "(exp5/exp12)")
     lev = summary['exp1'].get('levers', {})
     if lev:
         s0 = lev['secret_bps_today']
@@ -4135,7 +4159,7 @@ def make_paper_figures(summary):
     r13 = summary['exp13']['rate_ratios']
     print("      framing ratios (prose): "
           + ", ".join(f"{k} {v:.2f}x" for k, v in r13.items()))
-    print("  Paper pass complete: 4 result figures + architecture "
+    print("  Paper pass complete: 6 result figures + architecture "
           "drawing + provenance and cost/trust tables.")
 
 
@@ -4236,8 +4260,12 @@ def run_experiment_15(quick=False):
     print("    under this phase-blind receiver. The window rule is thus")
     print("    'widest window whose windowed QBER clears the EC design")
     print("    point', not a smooth interior optimum. The phase-blind")
-    print("    receiver pays 26-40% of the operating-point rate; closing")
-    print("    that gap is what delay-binned phase tracking buys.")
+    pens = sorted(
+        100 * (1 - r['opt_secret_bps'] / OPERATING_POINT['secret_rate_bps'])
+        for r in results.values())
+    print(f"    receiver pays {pens[0]:.0f}-{pens[-1]:.0f}% of the "
+          f"operating-point rate by calibration;")
+    print("    closing that gap is what delay-binned phase tracking buys.")
     print("    Noise-attribution bracket: the Werner mapping charges the")
     print("    windowed decoherence isotropically. Under pure dephasing")
     print("    (precession+jitter alone) the X-basis error is 1.5x the")
