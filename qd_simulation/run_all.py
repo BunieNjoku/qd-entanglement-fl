@@ -127,6 +127,62 @@ def set_output_suffix(suffix):
     _OUTPUT_SUFFIX = suffix
 
 
+# Column-format variants: the paper figures are authored at 7.16 in
+# with 5.5-9 pt type, which prints too small next to 10 pt body text
+# once the figure is scaled to the page. The resized pass scales fonts
+# (rcParams for implicit sizes, call wrappers for explicit fontsize=
+# arguments) and adds vertical room; save_fig then appends _resized
+# and writes PNG only. Frame text (titles, axis labels, ticks) takes
+# the full factor; in-panel text (legends, data labels, annotations)
+# competes with the data for space inside narrow panels, so it takes
+# a reduced factor or the long legends overflow their axes.
+_RESIZED = False
+
+def enable_resized_output(font_scale=1.5, height_scale=1.2):
+    global _RESIZED
+    _RESIZED = True
+    dense_scale = 1.0 + (font_scale - 1.0) * 0.4
+    for key in ('font.size', 'axes.titlesize', 'axes.labelsize',
+                'xtick.labelsize', 'ytick.labelsize', 'figure.titlesize'):
+        plt.rcParams[key] = float(plt.rcParams[key]) * font_scale
+    plt.rcParams['legend.fontsize'] = (
+        float(plt.rcParams['legend.fontsize']) * dense_scale)
+    # Larger tick labels reach above the axes corner; keep the panel
+    # title clear of them.
+    plt.rcParams['axes.titlepad'] = (
+        float(plt.rcParams['axes.titlepad']) * font_scale * 1.3)
+
+    def scale_fontsize(fn, factor):
+        def wrapper(*args, **kwargs):
+            if isinstance(kwargs.get('fontsize'), (int, float)):
+                kwargs['fontsize'] = kwargs['fontsize'] * factor
+            return fn(*args, **kwargs)
+        return wrapper
+
+    import matplotlib.axes
+    import matplotlib.figure
+    for cls, names, factor in (
+            (matplotlib.axes.Axes,
+             ('set_title', 'set_xlabel', 'set_ylabel'), font_scale),
+            (matplotlib.axes.Axes,
+             ('legend', 'set_xticklabels', 'set_yticklabels',
+              'text', 'annotate'), dense_scale),
+            (matplotlib.figure.Figure, ('suptitle',), font_scale),
+            (matplotlib.figure.Figure, ('legend', 'text'), dense_scale)):
+        for name in names:
+            setattr(cls, name, scale_fontsize(getattr(cls, name), factor))
+
+    orig_subplots = plt.subplots
+
+    def subplots(*args, **kwargs):
+        if 'figsize' in kwargs:
+            w, h = kwargs['figsize']
+            kwargs['figsize'] = (w, h * height_scale)
+        return orig_subplots(*args, **kwargs)
+
+    plt.subplots = subplots
+
+
 def _expand_axis_margins(fig, frac=0.10):
     """Guarantee every axis bound sits beyond the outermost drawn data.
 
@@ -248,12 +304,15 @@ def save_fig(fig, name):
     out_dir = os.path.join(RESULTS_DIR, tier)
     os.makedirs(out_dir, exist_ok=True)
     name = f"{name}{_OUTPUT_SUFFIX}"
-    for ext in ['png', 'pdf']:
+    if _RESIZED:
+        name = f"{name}_resized"
+    exts = ['png'] if _RESIZED else ['png', 'pdf']
+    for ext in exts:
         path = os.path.join(out_dir, f"{name}.{ext}")
         fig.savefig(path, dpi=VIZ['dpi'], bbox_inches='tight',
                     facecolor='white', pad_inches=0.03)
     plt.close(fig)
-    print(f"    Saved: {tier}/{name}.png/pdf")
+    print(f"    Saved: {tier}/{name}." + "/".join(exts))
 
 
 def export_summary_csv(summary, suffix=""):
@@ -3499,8 +3558,11 @@ def run_experiment_14(quick=False):
         fx *= (1 - duty)
         return fx / bb if bb > 0 else float('nan')
 
+    # 10 s / 40 s / 160 s / 320 s of source time at 76M pairs/s; the
+    # 320 s point pins the approach to the implemented-accounting floor.
     pairs_sweep = [380_000_000, 1_520_000_000] if quick \
-        else [760_000_000, 3_040_000_000, 12_160_000_000]
+        else [760_000_000, 3_040_000_000, 12_160_000_000,
+              24_320_000_000]
     seeds_d = [0, 1] if quick else list(range(10))
     # Near the certification cliff (small runs), some seeds certify
     # ZERO key and the ratio diverges: report the median and range of
@@ -3761,13 +3823,19 @@ def make_paper_figures(summary):
     print("  [A] Figure: QBER envelope (supply, entropy floor, model "
           "size)...")
     e7 = summary['exp7']
-    q = np.array(e7['qbers'])
+    q_all = np.array(e7['qbers'])
+    # Both supplies are identically zero past the code capacity
+    # (~2.3%); the sweep runs to 6% but drawing that flat tail
+    # compresses the region where the three thresholds sit, so the
+    # display stops just past capacity.
+    m = q_all <= 0.031
+    q = q_all[m]
     fig, (ax, axp) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    ax.plot(q * 100, np.array(e7['shared_rates_bps']) / 1e3, 'o-',
+    ax.plot(q * 100, np.array(e7['shared_rates_bps'])[m] / 1e3, 'o-',
             color=C['quantum'], linewidth=1.8, markersize=4,
             label='trusted-conduit supply')
-    ax.plot(q * 100, np.array(e7['bbm92_framed_rates_bps']) / 1e3, 's-',
-            color=C['pareto'], linewidth=1.8, markersize=4,
+    ax.plot(q * 100, np.array(e7['bbm92_framed_rates_bps'])[m] / 1e3,
+            's-', color=C['pareto'], linewidth=1.8, markersize=4,
             label='BBM92-framed supply (keep 0.82)')
     ax.axvline(x=op['qber'] * 100, color=C['dark'], linestyle='--',
                linewidth=1.2,
@@ -3779,9 +3847,10 @@ def make_paper_figures(summary):
                color='gray', linestyle=':', linewidth=1,
                label='rate-0.84 code capacity')
     axb = ax.twinx()
-    axb.plot(q * 100, e7['mask_entropy_per_bit'], 'd--', color=C['accent'],
-             linewidth=1.4, markersize=4)
-    axb.set_ylabel('Min-entropy per output bit', color=C['accent'],
+    entropy_col = '#8A6D1A'   # darker than C['accent']: 8 pt axis text
+    axb.plot(q * 100, np.array(e7['mask_entropy_per_bit'])[m], 'd--',
+             color=entropy_col, linewidth=1.4, markersize=4)
+    axb.set_ylabel('Min-entropy per output bit', color=entropy_col,
                    fontsize=8)
     axb.set_ylim(0.985, 1.0005)
     ax.set_xlabel('QBER (%)')
@@ -3790,11 +3859,11 @@ def make_paper_figures(summary):
     ax.legend(fontsize=5.5, loc='lower left')
     ax.grid(True, alpha=0.3)
 
-    axp.plot(q * 100, np.array(e7['max_params_at_60s']) / 1e3, 'o-',
+    axp.plot(q * 100, np.array(e7['max_params_at_60s'])[m] / 1e3, 'o-',
              color=C['quantum'], linewidth=1.8, markersize=4,
              label='trusted-conduit')
-    axp.plot(q * 100, np.array(e7['bbm92_max_params_at_60s']) / 1e3, 's-',
-             color=C['pareto'], linewidth=1.8, markersize=4,
+    axp.plot(q * 100, np.array(e7['bbm92_max_params_at_60s'])[m] / 1e3,
+             's-', color=C['pareto'], linewidth=1.8, markersize=4,
              label='BBM92-framed')
     axp.axhline(y=28.866, color='gray', linestyle=':', linewidth=1,
                 label='ClinicalMLP (29K params)')
@@ -3832,9 +3901,12 @@ def make_paper_figures(summary):
     b2 = ax1.bar(x + w / 2, prov, w, color=C['dark'],
                  edgecolor='white', hatch='//',
                  label='recorder + provisioner archive')
-    for bars in (b1, b2):
+    # One row of labels; adjacent bars leave no horizontal room for
+    # two centered labels, so each shifts outward from the group line.
+    for bars, dx in ((b1, -0.07), (b2, 0.07)):
         for b in bars:
-            ax1.text(b.get_x() + b.get_width() / 2, b.get_height() + 1.5,
+            ax1.text(b.get_x() + b.get_width() / 2 + dx,
+                     b.get_height() + 2.5,
                      f'{b.get_height():.0f}%', ha='center', fontsize=6)
     ax1.set_xticks(x)
     ax1.set_xticklabels(arm_labels, fontsize=7)
@@ -3858,18 +3930,16 @@ def make_paper_figures(summary):
                 label=f"abort threshold q_tol ({BBM92['q_tol']*100:.0f}%)")
     ax2.axvline(x=e14['analytic_f_star'] * 100, color='gray',
                 linestyle=':', linewidth=1,
-                label=f"analytic f* ({e14['analytic_f_star']*100:.1f}%)")
+                label=f"BBM92 detection threshold "
+                      f"({e14['analytic_f_star']*100:.1f}% intercepted)")
     ax2b = ax2.twinx()
     ax2b.plot(f_sw * 100, e14['bbm92_abort_prob'], '^--',
               color=C['pareto'], linewidth=1.2, markersize=4,
               label='BBM92 abort probability')
-    ax2b.plot(f_sw * 100, e14['fixed_eve_acc'], 'v-.',
-              color=C['unmasked'], linewidth=1.2, markersize=4,
-              label='Eve accuracy on fixed-basis key')
     ax2b.set_ylabel('Probability', fontsize=8)
     ax2b.set_ylim(-0.05, 1.05)
     ax2b.legend(fontsize=6, loc='center right')
-    ax2.set_xlabel('Intercepted fraction of fiber photons (%)')
+    ax2.set_xlabel('Intercepted fraction f of fiber photons (%)')
     ax2.set_ylabel('Error rate (%)')
     ax2.set_xscale('symlog', linthresh=1.0)
     ax2.set_xlim(0, 110)
@@ -3910,20 +3980,22 @@ def make_paper_figures(summary):
     ax1.axhline(y=model['asymptotic_ratio'], color=C['accent'],
                 linestyle=':', linewidth=1.2,
                 label=f"infinite-key accounting reference "
-                      f"({model['asymptotic_ratio']:.2f}x, not reached)")
+                      f"({model['asymptotic_ratio']:.2f}x)")
     z = conv[0]
     if z.get('n_zero_cert', 0):
         ax1.annotate(f"{z['n_zero_cert']}/{z['n_seeds']} seeds: zero key",
                      xy=(secs[0], med[0]),
-                     xytext=(secs[0] * 1.8, med[0] * 1.5), fontsize=6,
+                     xytext=(secs[0] * 0.16, med[0] * 0.3), fontsize=6,
                      color=C['unmasked'],
                      arrowprops=dict(arrowstyle='-', lw=0.7, color='gray'))
     ax1.set_xscale('log')
     ax1.set_yscale('log')
+    # Top headroom holds the legend clear of the first point's whisker.
+    ax1.set_ylim(1, 800)
     ax1.set_xlabel('Accumulated source time (s)')
     ax1.set_ylabel('Fixed-basis / BBM92 rate ratio')
     ax1.set_title('Certification cliff and convergence', fontsize=9)
-    ax1.legend(fontsize=6)
+    ax1.legend(fontsize=6, loc='upper right')
     ax1.grid(True, alpha=0.3, which='both')
 
     ax2.plot(pz['p_z'], np.array(pz['asymptotic_model_bits']) / 1e3, ':',
@@ -3963,19 +4035,11 @@ def make_paper_figures(summary):
                                      ('-', '--'), (C['pareto'], C['dark'])):
         ax1.plot(win_ps, np.array(res['secret_bps']) / 1e3, ls, color=col,
                  linewidth=1.8, label=label.split(' (')[0])
-        pen = 100 * (1 - res['opt_secret_bps'] / op['secret_rate_bps'])
         ax1.plot(res['opt_window_ps'], res['opt_secret_bps'] / 1e3, 'o',
                  color=col, markersize=5)
-        ax1.annotate(f"{res['opt_window_ps']:.0f} ps, "
-                     f"{res['opt_secret_bps']/1e3:.2f} kbit/s "
-                     f"(-{pen:.0f}%)",
-                     xy=(res['opt_window_ps'], res['opt_secret_bps'] / 1e3),
-                     xytext=(res['opt_window_ps'] + 60,
-                             res['opt_secret_bps'] / 1e3 + 0.08),
-                     fontsize=6, color=col)
     ax1.axhline(y=op['secret_rate_bps'] / 1e3, color=C['unmasked'],
                 linestyle='-.', linewidth=1.5,
-                label='time-resolved operating point (3.54 kbit/s)')
+                label='time-resolved operating point')
     ax1.axvline(x=e15['t1_x_ps'], color='gray', linestyle=':', linewidth=1,
                 label='T1')
     ax1.set_xlabel('Acceptance window (ps)')
@@ -4003,15 +4067,15 @@ def make_paper_figures(summary):
     s_eta1 = _paper_secret_rate(c_now, 1.0, fl_m)
     ax2.plot(c_now, s_eta1 / 1e3, '^', color=C['unmasked'], markersize=7,
              zorder=5,
-             label='charge stabilization at today\'s optics '
-                   f'({s_eta1/op["secret_rate_bps"]:.0f}x, linear)')
+             label='charge stabilization only '
+                   f'({s_eta1/op["secret_rate_bps"]:.0f}x)')
     ax2.set_xlim(0.003, 0.55)
     ax2.set_ylim(0.2, 2e4)
     ax2.set_xlabel('Per-arm coupling efficiency')
     ax2.set_ylabel('Secret rate (kbit/s)')
     ax2.set_title(f'Hardware levers vs roadmap, {fl_m} m edge',
                   fontsize=9)
-    ax2.legend(fontsize=6, loc='upper left')
+    ax2.legend(fontsize=6, loc='lower right')
     ax2.grid(True, alpha=0.3, which='both')
     fig.suptitle('Rate limits and improvement levers', fontsize=10,
                  fontweight='bold')
@@ -4071,7 +4135,10 @@ def make_paper_figures(summary):
     ax3.set_xlabel('Model dimension d (params)')
     ax3.set_ylabel('Recovery bytes (1 drop, 3 survivors)')
     ax3.set_title('Cost scaling with model size', fontsize=8)
-    ax3.legend(fontsize=5.5)
+    # The empty pocket between the O(d) diagonal and the flat O(1)
+    # baselines: clear of both curve families at either font scale.
+    ax3.legend(fontsize=5.5, loc='lower right',
+               bbox_to_anchor=(0.98, 0.10))
     ax3.grid(True, alpha=0.3, which='both')
     fig.suptitle('Dropout recovery vs classical baselines', fontsize=10,
                  fontweight='bold')
@@ -4102,7 +4169,10 @@ def make_paper_figures(summary):
         ax1.set_xlabel('Training round')
         ax1.set_ylabel('Test accuracy')
         ax1.set_title('Masking parity, 3 clients (10 seeds)', fontsize=8)
-        ax1.legend(fontsize=6, loc='lower right')
+        # Mid-right pocket between the DP spread band below and the
+        # parity curves above.
+        ax1.legend(fontsize=6, loc='center right',
+                   bbox_to_anchor=(0.98, 0.62))
         ax1.grid(True, alpha=0.3)
         ax1.set_ylim(0.2, 1.02)
     scales8 = [k for k in ('3', '6', '9', '12') if k in e8
@@ -4329,13 +4399,22 @@ def main():
     parser.add_argument('--paper', action='store_true',
                         help='Build the composite paper figures from the '
                              'existing full-mode summary and exit')
+    parser.add_argument('--paper-resized', action='store_true',
+                        help='Build column-format variants of the paper '
+                             'figures (fonts scaled up, PNG only, '
+                             '_resized filename suffix) and exit')
+    parser.add_argument('--font-scale', type=float, default=1.5,
+                        help='Font multiplier for --paper-resized '
+                             '(default 1.5)')
     args = parser.parse_args()
 
-    if args.paper:
+    if args.paper or args.paper_resized:
         summary_path = os.path.join(RESULTS_DIR, "summary.json")
         if not os.path.exists(summary_path):
             raise SystemExit("--paper needs a full-mode summary.json; "
                              "run the suite first")
+        if args.paper_resized:
+            enable_resized_output(font_scale=args.font_scale)
         with open(summary_path) as f:
             make_paper_figures(json.load(f))
         return
