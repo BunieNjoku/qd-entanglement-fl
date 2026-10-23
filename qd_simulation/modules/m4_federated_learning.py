@@ -14,7 +14,6 @@ Modes:
   - gaussian-legacy: float Gaussian masks - NO Bonawitz proof; retained for
                      comparison only.
   - prng:     identical structure but classical PRNG seeds (baseline)
-  - dp:       per-client gradient clipping + calibrated Gaussian noise
   - unmasked: no privacy protection (accuracy ceiling)
 
 Masking law:
@@ -286,22 +285,6 @@ def generate_prng_mask(n_params, seed):
     return torch.randn(n_params, generator=g)
 
 
-def add_dp_noise(gradient_flat, epsilon, delta, max_grad_norm=1.0):
-    """Add calibrated Gaussian DP noise to gradient with clipping.
-    
-    Standard DP-SGD: clip gradient to max_grad_norm, then add noise
-    scaled to the clipped sensitivity.
-    """
-    # Clip gradient norm
-    grad_norm = torch.norm(gradient_flat)
-    if grad_norm > max_grad_norm:
-        gradient_flat = gradient_flat * (max_grad_norm / grad_norm)
-    
-    sigma = max_grad_norm * np.sqrt(2 * np.log(1.25 / delta)) / epsilon
-    noise = torch.randn_like(gradient_flat) * sigma
-    return gradient_flat + noise
-
-
 # FEDERATED LEARNING ENGINE
 
 # Communication byte model
@@ -513,7 +496,7 @@ def evaluate(model, dataset, device='cpu'):
     return correct / max(total, 1), total_loss / max(total, 1)
 
 
-_VALID_MODES = ("entangled", "gaussian-legacy", "prng", "unmasked", "dp")
+_VALID_MODES = ("entangled", "gaussian-legacy", "prng", "unmasked")
 
 
 def _validate_mode(mode):
@@ -526,11 +509,10 @@ def _validate_mode(mode):
 
 def run_federated_training(
     model_fn, client_datasets, test_dataset,
-    mode="entangled",  # "entangled" | "gaussian-legacy" | "prng" | "unmasked" | "dp"
+    mode="entangled",  # "entangled" | "gaussian-legacy" | "prng" | "unmasked"
     num_rounds=100, local_epochs=2, batch_size=32, lr=0.01,
     target_accuracy=0.90,
     quantum_key_bits=None,  # Pre-generated distilled shared bits per round
-    dp_epsilon=5.0, dp_delta=1e-5,
     device='cpu',
     verbose=True,
     seed=42,  # torch/np seed - vary across repeats for real replicates
@@ -759,13 +741,6 @@ def run_federated_training(
 
         elif mode == "unmasked":
             aggregate = torch.stack(client_updates).mean(dim=0)
-
-        elif mode == "dp":
-            noisy_updates = [
-                add_dp_noise(u, dp_epsilon, dp_delta, max_grad_norm=0.5)
-                for u in client_updates
-            ]
-            aggregate = torch.stack(noisy_updates).mean(dim=0)
 
         else:
             raise ValueError(f"Unknown mode: {mode}")

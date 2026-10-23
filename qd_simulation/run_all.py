@@ -971,12 +971,16 @@ def run_experiment_4(quick=False):
     num_repeats = max(10, FL.get('num_repeats', 10))
     dirichlet_alpha = FL.get('dirichlet_alpha', 0.5)
 
-    modes = ["entangled", "prng", "unmasked", "dp"]
+    # No DP arm. DP targets output privacy, a different threat from the
+    # one masking addresses, and at this scale (3 clients, 455 training
+    # samples, 28,866 parameters) no useful total-epsilon is reachable:
+    # sizing the Gaussian mechanism for a budget that composes over all
+    # rounds drives the model to the majority-class floor.
+    modes = ["entangled", "prng", "unmasked"]
     mode_labels = {
         "entangled": "Quantum-masked (this system)",
         "prng": "PRNG-masked (classical)",
         "unmasked": "Unmasked (insecure)",
-        "dp": "DP (epsilon=5)",
     }
 
     # Run multiple repeats for statistical significance
@@ -996,7 +1000,6 @@ def run_experiment_4(quick=False):
                 mode=mode, num_rounds=num_rounds,
                 local_epochs=FL['local_epochs'], batch_size=FL['local_batch_size'],
                 lr=FL['learning_rate'], target_accuracy=target_acc,
-                dp_epsilon=5.0 if mode == "dp" else None,
                 verbose=False,
                 seed=seed,  # paired across modes within a repeat
             )
@@ -1087,8 +1090,8 @@ def run_experiment_4(quick=False):
     # Plot: fidelity headline (left) + accuracy validation (right)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     colors = {"entangled": C['quantum'], "prng": C['prng'],
-              "unmasked": C['unmasked'], "dp": C['dp']}
-    linestyles = {"entangled": "-", "prng": "--", "unmasked": "-.", "dp": ":"}
+              "unmasked": C['unmasked']}
+    linestyles = {"entangled": "-", "prng": "--", "unmasked": "-."}
 
     for r in all_runs["entangled"]:
         ax1.semilogy(np.arange(1, len(r.agg_error_inf) + 1),
@@ -1193,21 +1196,25 @@ def run_experiment_5(quick=False):
 
     from modules.m4_federated_learning import (
         ClinicalMLP, load_clinical_data, run_multitriangle_fl,
-        define_triangle_topology, BYTES_PER_MASKED_WORD,
+        topology_from_mesh, BYTES_PER_MASKED_WORD,
     )
     from modules.m7_baselines import BYTES_PER_DH_SHARE, BYTES_PER_PRF_SEED
 
     num_rounds = 40 if not quick else 20
     target_acc = 0.90
-    n_clients = 6  # 3 triangles, allows interesting dropout patterns
-    n_triangles = 3
+    n_clients = 6
     # >= 10 seeds, dropout swept 0-40%. The old single-seed
     # design produced pure-noise orderings (0% arm scoring below 15%).
     num_seeds = 10
     dropout_rates = ([0.0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
                      if not quick else [0.0, 0.15, 0.40])
 
-    triangles, _, tree_edges = define_triangle_topology(n_clients)
+    # Delaunay mesh (Module 3) at the same seed every experiment uses, so
+    # the logical clusters coincide with the physical entangled links.
+    _mesh = analyze_mesh(n_clients, 1e5, OPERATING_POINT['secret_rate_bps'],
+                         rng=np.random.default_rng(42))
+    triangles, tree_edges = topology_from_mesh(_mesh)
+    n_triangles = len(triangles)
 
     # results[dr] = list over seeds of (res, aux); splits and torch seeds
     # are PAIRED across dropout rates (same seed list per rate).
@@ -1317,8 +1324,6 @@ def run_experiment_5(quick=False):
     ax1.errorbar(xpct, acc_means, yerr=acc_hws, fmt='o-', linewidth=2,
                  capsize=4, color=C['quantum'],
                  label=f'final accuracy\n(mean +- 95% CI, {num_seeds} seeds)')
-    ax1.axhline(y=target_acc, color='gray', linestyle=':', alpha=0.5,
-                label=f'{target_acc} target')
     ax1.set_xlabel('Per-round dropout rate (%)')
     ax1.set_ylabel(f'Final test accuracy ({num_rounds} rounds)')
     ax1.set_xlim(min(xpct) - 2.5, max(xpct) + 2.5)
@@ -1997,7 +2002,7 @@ def run_experiment_8(quick=False):
 
     from modules.m4_federated_learning import (
         ClinicalMLP, load_clinical_data, run_multitriangle_fl,
-        define_triangle_topology, topology_from_mesh, evaluate,
+        topology_from_mesh, evaluate,
     )
 
     num_rounds = 60 if not quick else 30
@@ -2010,21 +2015,16 @@ def run_experiment_8(quick=False):
     for n_clients in scales:
         print(f"\n  Scale: {n_clients} clients")
 
-        # Use Module 3 Delaunay topology for larger scales, hardcoded for small
-        if n_clients >= 6:
-            # Modeled-device rate from config - topology metrics
-            # are geometric; the mesh's latency fields use the honest rate.
-            mesh = analyze_mesh(n_clients, 1e5, OPERATING_POINT['secret_rate_bps'],
-                                rng=np.random.default_rng(42))
-            triangles, tree_edges = topology_from_mesh(mesh)
-            n_tri = len(triangles)
-            tree_depth = mesh.aggregation_depth
-            print(f"    Topology (Delaunay): {n_tri} triangles, tree depth {tree_depth}")
-        else:
-            triangles, _, tree_edges = define_triangle_topology(n_clients)
-            n_tri = len(triangles)
-            tree_depth = 0
-            print(f"    Topology (hardcoded): {n_tri} triangles, tree depth {tree_depth}")
+        # Module 3 Delaunay topology at every scale. Modeled-device rate
+        # from config - topology metrics are geometric; the mesh's
+        # latency fields use the honest rate.
+        mesh = analyze_mesh(n_clients, 1e5, OPERATING_POINT['secret_rate_bps'],
+                            rng=np.random.default_rng(42))
+        triangles, tree_edges = topology_from_mesh(mesh)
+        n_tri = len(triangles)
+        tree_depth = mesh.aggregation_depth
+        print(f"    Topology (Delaunay): {n_tri} triangles, "
+              f"tree depth {tree_depth}")
 
         for i, tri in enumerate(triangles):
             print(f"      T{i}: clients {tri}")
@@ -2092,7 +2092,6 @@ def run_experiment_8(quick=False):
     ax1.legend(fontsize=7, loc='lower right')
     ax1.grid(True, alpha=0.3)
     ax1.set_ylim(0.3, 1.0)
-    ax1.axhline(y=target_acc, color='gray', linestyle=':', alpha=0.5)
 
     ax2.set_xlabel('Training Round')
     ax2.set_ylabel('Test Loss (log scale)')
@@ -2135,7 +2134,6 @@ def run_experiment_8(quick=False):
     axes[0].set_ylabel('Final Accuracy')
     axes[0].set_title('Accuracy')
     axes[0].set_ylim(0.8, 1.05)
-    axes[0].axhline(y=target_acc, color='gray', linestyle=':', alpha=0.5, linewidth=0.6)
     label_bars(axes[0], final_accs, fmt='{:.3f}')
 
     # Rounds to target
@@ -2501,7 +2499,7 @@ def run_experiment_10(quick=False):
     print("EXPERIMENT 10: Availability under single-source failure")
     print("="*70)
 
-    from modules.m4_federated_learning import define_triangle_topology
+    from modules.m4_federated_learning import topology_from_mesh
 
     # (a) Source-level empirical check: an edge with one endpoint's
     # source dead continues from the far endpoint at ~half rate.
@@ -2538,10 +2536,12 @@ def run_experiment_10(quick=False):
     assert 0.35 <= ratio <= 0.65, (
         f"degraded-edge rate ratio {ratio} outside the ~half-rate window")
 
-    # (b) Modeled round-time impact on the 6-client / 3-triangle
-    # topology (same per-edge demand model as exps 5/8).
+    # (b) Modeled round-time impact on the 6-client Delaunay topology
+    # (same mesh and per-edge demand model as exps 5/8).
     n_clients = 6
-    triangles, _, tree_edges = define_triangle_topology(n_clients)
+    _mesh = analyze_mesh(n_clients, 1e5, OPERATING_POINT['secret_rate_bps'],
+                         rng=np.random.default_rng(42))
+    triangles, tree_edges = topology_from_mesh(_mesh)
     n_params = 28866  # ClinicalMLP - matches exps 4/5/8
     bits_per_mask = n_params * BITS_PER_PARAM
     physical_edges = {tuple(sorted((int(t[i]), int(t[j]))))
@@ -2563,11 +2563,27 @@ def run_experiment_10(quick=False):
         demand[e] = demand.get(e, 0) + bits_per_mask
 
     r = OPERATING_POINT['secret_rate_bps']
-    kill_node = 1  # shared vertex of T0 and T1 - the harshest choice
     num_rounds, kill_round = 20, 10
 
     def keywait(rates):
         return max(demand[e] / rates[e] for e in demand)
+
+    def _stalled(node):
+        """Triangles a fixed-source-per-edge design loses when `node`'s
+        source dies. That design pins each edge to its lower-indexed
+        endpoint, so only edges where `node` is the minimum go dark."""
+        dead = {e for e in demand if min(e) == node}
+        return [ti for ti, t in enumerate(triangles)
+                if any(tuple(sorted((int(t[i]), int(t[j])))) in dead
+                       for i, j in ((0, 1), (1, 2), (0, 2)))]
+
+    # Harshest single-source failure: most triangles stalled under the
+    # fixed-source design, ties broken by the longer key-wait it forces
+    # on the symmetric design.
+    kill_node = max(
+        range(n_clients),
+        key=lambda k: (len(_stalled(k)),
+                       keywait({e: (r / 2 if k in e else r) for e in demand})))
 
     rates_healthy = {e: r for e in demand}
     rates_sym = {e: (r / 2 if kill_node in e else r) for e in demand}
@@ -2576,13 +2592,12 @@ def run_experiment_10(quick=False):
     kw_before = keywait(rates_healthy)
     kw_sym = keywait(rates_sym)
     dead_edges = [e for e, v in rates_fixed.items() if v == 0.0]
-    stalled_tris = [ti for ti, t in enumerate(triangles)
-                    if any(tuple(sorted((int(t[i]), int(t[j])))) in dead_edges
-                           for i, j in ((0, 1), (1, 2), (0, 2)))]
+    stalled_tris = _stalled(kill_node)
     wall_sym = kill_round * kw_before + (num_rounds - kill_round) * kw_sym
     wall_healthy = num_rounds * kw_before
 
-    print(f"\n  (b) Modeled 6c/3t round-time impact, source at node "
+    print(f"\n  (b) Modeled 6-client / {len(triangles)}-triangle round-time "
+          f"impact, source at node "
           f"{kill_node} killed at round {kill_round}/{num_rounds}\n"
           f"      (per-edge demand from the exps-5/8 ledger model, "
           f"secret rate {r/1000:.1f} kbit/s):")
@@ -4094,14 +4109,14 @@ def make_paper_figures(summary):
 
     ax1.errorbar(rr, [e5[k]['final_acc_mean'] for k in rates],
                  yerr=[e5[k]['final_acc_ci95'] for k in rates],
-                 fmt='o-', color=C['quantum'], markersize=4, capsize=3,
-                 label='final accuracy (95% CI, 10 seeds)')
-    ax1.axhline(y=0.9, color='gray', linestyle=':', linewidth=1,
-                label='0.9 target')
+                 fmt='o-', color=C['quantum'], markersize=4, capsize=3)
     ax1.set_xlabel('Per-round dropout rate (%)')
     ax1.set_ylabel('Final test accuracy (40 rounds)')
     ax1.set_title('Accuracy under dropout', fontsize=8)
-    ax1.legend(fontsize=5.5)
+    # Same x grid as panel 2: the two panels read the same dropout
+    # sweep, so a mismatched right-hand bound invites a false contrast.
+    ax1.set_xticks([0, 10, 20, 30, 40])
+    ax1.set_xlim(-3, 43)
     ax1.grid(True, alpha=0.3)
 
     nz = [k for k in rates if float(k.rstrip('%')) > 0]
@@ -4119,6 +4134,8 @@ def make_paper_figures(summary):
     ax2.set_xlabel('Per-round dropout rate (%)')
     ax2.set_ylabel('Recovery bytes per client-round')
     ax2.set_title('Cost on the same dropout events', fontsize=8)
+    ax2.set_xticks([0, 10, 20, 30, 40])
+    ax2.set_xlim(-3, 43)
     ax2.legend(fontsize=5.5)
     ax2.grid(True, alpha=0.3, which='both')
 
@@ -4133,7 +4150,7 @@ def make_paper_figures(summary):
     ax3.axvline(x=28866, color='gray', linestyle=':', linewidth=1,
                 label='ClinicalMLP (28,866)')
     ax3.set_xlabel('Model dimension d (params)')
-    ax3.set_ylabel('Recovery bytes (1 drop, 3 survivors)')
+    ax3.set_ylabel('Recovery bytes (1 drop of 4)')
     ax3.set_title('Cost scaling with model size', fontsize=8)
     # The empty pocket between the O(d) diagonal and the flat O(1)
     # baselines: clear of both curve families at either font scale.
@@ -4142,7 +4159,7 @@ def make_paper_figures(summary):
     ax3.grid(True, alpha=0.3, which='both')
     fig.suptitle('Dropout recovery vs classical baselines', fontsize=10,
                  fontweight='bold')
-    fig.tight_layout(w_pad=2.2)
+    fig.tight_layout(w_pad=2.8)
     save_fig(fig, 'paper_dropout')
 
     # Figure: FL correctness - masking parity across modes and
@@ -4156,7 +4173,6 @@ def make_paper_figures(summary):
             'entangled': ('-', C['quantum'], 'entangled masks'),
             'prng': ('--', C['prng'], 'PRNG masks'),
             'unmasked': (':', C['unmasked'], 'unmasked'),
-            'dp': ('-.', C['dp'], 'DP (eps = 5)'),
         }
         for mode, (ls, col, lab) in mode_style.items():
             if mode not in c4:
@@ -4174,7 +4190,12 @@ def make_paper_figures(summary):
         ax1.legend(fontsize=6, loc='center right',
                    bbox_to_anchor=(0.98, 0.62))
         ax1.grid(True, alpha=0.3)
-        ax1.set_ylim(0.2, 1.02)
+        # Fit the band, don't hardcode: the limit tracks whatever modes
+        # are plotted.
+        _lo = min((np.array(c4[k]['acc_mean'])
+                   - np.array(c4[k]['acc_std'])).min()
+                  for k in mode_style if k in c4)
+        ax1.set_ylim(max(0.0, _lo - 0.04), 1.02)
     scales8 = [k for k in ('3', '6', '9', '12') if k in e8
                and isinstance(e8[k], dict) and 'acc_curve' in e8[k]]
     for k, col in zip(scales8, (C['quantum'], C['pareto'], C['accent'],
@@ -4184,8 +4205,6 @@ def make_paper_figures(summary):
                  linewidth=1.6,
                  label=f"{k} clients (depth {e8[k]['tree_depth']}, "
                        f"final {e8[k]['accuracy']:.3f})")
-    ax2.axhline(y=0.9, color='gray', linestyle=':', linewidth=1,
-                label='0.9 target')
     ax2.set_xlabel('Training round')
     ax2.set_ylabel('Test accuracy')
     ax2.set_title('Two-level hierarchy across mesh scales', fontsize=8)
@@ -4211,13 +4230,21 @@ def make_paper_figures(summary):
           + ", ".join(f"{k} {100*e9[k]['recovered_fraction']:.0f}%"
                       for k in ('classical', 'it_dealer_online',
                                 'it_dealer_courier', 'entangled')))
-    e5 = summary.get('exp5', {})
-    print("      dropout recovery (table rows): pad-reveal arms "
-          "346,392 B/dropout at ClinicalMLP vs 12 B seed-based; "
-          "accuracy holds to 20% dropout; the 40% point estimate "
-          "(0.892) sits below the 0.9 target with a 95% CI that "
-          "includes it; threshold failures rise superlinearly "
-          "(exp5/exp12)")
+    e5 = summary.get('exp5', {}).get('dropout_results', {})
+    if e5:
+        hi = max(e5, key=lambda k: float(k.rstrip('%')))
+        top, mid = e5[hi], e5.get('20%', e5[hi])
+        acc, ci = top['final_acc_mean'], top['final_acc_ci95']
+        base = e5.get('0%', {}).get('final_acc_mean', float('nan'))
+        print(f"      dropout recovery (table rows): pad-reveal arms "
+              f"{top['recovery_bytes_per_client_round']:,.0f} B per "
+              f"client-round at {hi} dropout (ClinicalMLP) vs "
+              f"{top['recovery_bytes_bonawitz_per_client_round']:.1f} B "
+              f"seed-based; accuracy {base:.3f} with no dropout, "
+              f"{mid['final_acc_mean']:.3f} at 20%, "
+              f"{acc:.3f} +- {ci:.3f} at {hi} - a drop of "
+              f"{base - acc:.3f} across the swept range; threshold "
+              f"failures rise superlinearly (exp5/exp12)")
     lev = summary['exp1'].get('levers', {})
     if lev:
         s0 = lev['secret_bps_today']

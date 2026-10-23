@@ -335,9 +335,6 @@ FL = {
     "num_repeats": 10,              # For statistical significance (mean ± std with CI)
     # Model sizes (parameter counts) for throughput sweep
     "model_sizes_sweep": [5e4, 1e5, 2e5, 5e5, 1e6, 2e6, 5e6],
-    # Differential privacy baseline
-    "dp_epsilon_sweep": [1.0, 5.0, 10.0],
-    "dp_delta": 1e-5,
     "dirichlet_alpha": 0.5,         # Non-IID Dirichlet allocation (lower = more heterogeneous)
     # Gradient inversion attack
     "attack_iterations": 3000,
