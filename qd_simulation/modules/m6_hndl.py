@@ -312,8 +312,14 @@ def retroactive_attack(transcript: List[TranscriptRound], arm,
                     unstripped_pairs.append((lo, hi))
             truth = tr.truth_quant[c]
             exact = bool(np.array_equal(residual, truth))
-            # Residual statistics: is what god-mode is left with still
-            # uniform? (bits of residual words) and how far from truth?
+            # Residual statistics. VALIDATION ONLY on the entangled
+            # arms: a residual carrying an unstripped one-time pad is
+            # uniform by theorem, so a PASS confirms nothing and a FAIL
+            # means a mask reached the transcript - an implementation
+            # bug. The test discriminates only on the classical arms,
+            # where god-mode strips everything and the residual is the
+            # gradient itself. The reported finding is the recovered
+            # fraction, not this p-value.
             res_bits = np.unpackbits(
                 residual[:4096].view(np.uint8)).astype(np.int8)
             err = np.abs(dequantize_gradient(residual).numpy()

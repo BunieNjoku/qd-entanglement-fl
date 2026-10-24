@@ -22,6 +22,10 @@ Q = OPERATING_POINT['qber']
 CODE_RATE = POST_PROC['ldpc_code_rate']
 MARGIN = POST_PROC['security_margin_bits']
 BLOCK = POST_PROC['block_size']
+# Wegman-Carter authentication, charged by both waterfalls at the
+# function default eps_auth.
+EPS_AUTH = 1e-15
+AUTH_FRAC = 2.0 * (math.log2(BLOCK) + math.log2(1.0 / EPS_AUTH)) / BLOCK
 DUTY = POST_PROC['bell_test_duty_cycle']
 BETA = 1.15
 
@@ -54,13 +58,13 @@ def test_closed_forms():
     d_tag = default_tagged_fraction()
 
     src_expect = (1 - leak - d_tag - MARGIN / BLOCK) * (1 - fer) \
-        * (1 - DUTY) * RAW
+        * (1 - AUTH_FRAC) * (1 - DUTY) * RAW
     got = src_wf(RAW, Q)['final_secure_rate']
     assert abs(got - src_expect) < 1e-6, (got, src_expect)
 
     for keep in (0.5, 0.82):
         qkd_expect = keep * (1 - h2(Q) - leak - MARGIN / BLOCK) \
-            * (1 - fer) * (1 - DUTY) * RAW
+            * (1 - fer) * (1 - AUTH_FRAC) * (1 - DUTY) * RAW
         got = qkd_wf(RAW, Q, keep)['final_secure_rate']
         assert abs(got - qkd_expect) < 1e-6, (keep, got, qkd_expect)
 

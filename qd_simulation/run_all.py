@@ -68,6 +68,7 @@ from modules.m2_post_processing import (
 from modules.m3_mesh_topology import (
     generate_campus_mesh, build_aggregation_tree,
     compute_aggregation_latency, compute_max_mesh_size,
+    MAX_MASKS_PER_EDGE_PER_ROUND,
     analyze_mesh,
 )
 
@@ -663,6 +664,28 @@ def run_experiment_1(quick=False):
     print(f"      eta_ex 1.0 at today's optics: {s_eta/1e3:.1f} kbit/s "
           f"({s_eta/s_now:.1f}x today)")
 
+    # Singles rate the coupling levers imply, per detector. The source
+    # model scales detection linearly in coupling and carries no
+    # detector deadtime or saturation term, so these are the rates a
+    # detector would have to sustain for the projected gain to be real.
+    # SNSPD deadtimes of 10-100 ns cap a channel in the tens of Mcps, so
+    # the high-coupling points sit at or past that ceiling and the
+    # linear projection is optimistic there. No derating is applied: the
+    # anchor does not report this device's maximum count rate, and
+    # inventing one would put a number in the lever table that no
+    # measurement supports.
+    _singles = {c: (QUANTUM['source_rep_rate_hz']
+                    * QUANTUM['source_brightness'] * c
+                    * QUANTUM['detector_efficiency'])
+                for c in (QUANTUM['coupling_efficiency'], 0.21, 0.40)}
+    print("    implied singles per detector (linear model, no deadtime): "
+          + ", ".join(f"coupling {c:.3f} -> {v/1e6:.1f} Mcps"
+                      for c, v in _singles.items()))
+    print("      SNSPD deadtime (10-100 ns) caps a channel in the tens "
+          "of Mcps, so the high-coupling\n      points are optimistic; "
+          "the anchor does not report this device's maximum\n      count "
+          "rate, so no derating is applied.")
+
     print("  Experiment 1 complete.")
     return {"qbers": qbers_sim, "s_values": s_values, "rates": rates,
             "levers": {
@@ -670,6 +693,12 @@ def run_experiment_1(quick=False):
                 "secret_bps_coupling_0.21": _secret_at(0.21, eta_now, fl_m),
                 "secret_bps_coupling_0.40": _secret_at(0.40, eta_now, fl_m),
                 "secret_bps_eta_ex_1.0": s_eta,
+                "implied_singles_cps": {str(k): float(v)
+                                        for k, v in _singles.items()},
+                "saturation_caveat": (
+                    "linear detection model, no deadtime or saturation "
+                    "term; SNSPD deadtime caps a channel in the tens of "
+                    "Mcps"),
             }}
 
 
@@ -811,8 +840,8 @@ def run_experiment_2(quick=False):
     # PIPELINE's output, not synthetic rng bits: simulated source at the
     # config fidelity (100 m fiber) -> reconciled frames -> Toeplitz PA at
     # the LHL-consistent compression for the measured QBER.
-    print("  [2e] NIST SP 800-22 subset battery on privacy-amplified "
-          "pipeline output...")
+    print("  [2e] Randomness battery on privacy-amplified pipeline "
+          "output (SP 800-22 subset plus autocorrelation lags)...")
     rng_pa = np.random.default_rng(42)
     src_pa = simulate_source(fidelity=QUANTUM['fidelity'],
                              n_pairs=2_000_000_000 if not quick else 1_000_000_000,
@@ -841,14 +870,22 @@ def run_experiment_2(quick=False):
           f"(LHL rate {_ent_rate:.3f}, margin "
           f"{POST_PROC['security_margin_bits']})")
     battery = randomness_battery(secure_output, alpha=0.01)
-    n_pass = sum(r['passed'] for r in battery)
+    # Report the two families separately. Only the first six statistics
+    # are SP 800-22; the autocorrelation lags are an addition, so a
+    # combined "11 of 11" would credit the standard with five tests it
+    # does not define.
+    sp800 = [r for r in battery if not r['test'].startswith('autocorrelation')]
+    extra = [r for r in battery if r['test'].startswith('autocorrelation')]
     print(f"    {'test':<28} {'p-value':>10}  verdict")
     for r in battery:
         print(f"    {r['test']:<28} {r['p_value']:>10.4f}  "
               f"{'PASS' if r['passed'] else 'FAIL'}")
-    print(f"    -> {n_pass}/{len(battery)} tests pass at α = 0.01 "
-          f"(expected false rejections for uniform input: "
-          f"≈{0.01 * len(battery):.2f})")
+    print(f"    -> SP 800-22 subset: {sum(r['passed'] for r in sp800)}"
+          f"/{len(sp800)} pass at alpha = 0.01; autocorrelation lags "
+          f"(not in SP 800-22): {sum(r['passed'] for r in extra)}"
+          f"/{len(extra)}")
+    print(f"       expected false rejections for uniform input over all "
+          f"{len(battery)} statistics: ~{0.01 * len(battery):.2f}")
 
     print("  Experiment 2 complete.")
     return {
@@ -877,36 +914,80 @@ def run_experiment_3(quick=False):
     # Operating point from config - single source of truth.
     op_rate = OPERATING_POINT['secret_rate_bps']
 
-    # 3a: Aggregation depth vs node count
-    # (Depth and triangle count are geometric - independent of key rate;
-    #  the mesh's latency fields use the anchored-device rate.)
-    print("  [3a] Aggregation depth vs node count...")
-    depths, n_triangles_list = [], []
+    # 3a: what grows with the mesh and what does not.
+    #
+    # Cells submit masked and the aggregator forms one total, so there is
+    # no depth-serial relay and tree depth carries no latency. The key
+    # demand a single physical edge must meet is capped instead: an edge
+    # of a planar triangulation borders at most two cells, and the
+    # inter-cell mask graph is a spanning tree over cells sharing a side,
+    # so at most one more. What does grow is the aggregator's classical
+    # load, one masked vector per cell per round.
+    print("  [3a] Per-edge key demand and cell count vs node count...")
+    from modules.m4_federated_learning import topology_from_mesh
+    n_place = 20
+    edge_loads, cells_mean, cells_lo, cells_hi = [], [], [], []
     for n in node_counts:
-        mesh = analyze_mesh(n, 1e5, op_rate, rng=np.random.default_rng(42))
-        depths.append(mesh.aggregation_depth)
-        n_triangles_list.append(mesh.n_triangles)
+        loads, cells = [], []
+        for s in range(n_place):
+            mesh = analyze_mesh(n, 1e5, op_rate, rng=np.random.default_rng(s))
+            tri, tree = topology_from_mesh(mesh)
+            tri = [tuple(int(x) for x in t) for t in tri]
+            load = {}
+            for t in tri:
+                for i, j in ((0, 1), (1, 2), (0, 2)):
+                    e = tuple(sorted((t[i], t[j])))
+                    load[e] = load.get(e, 0) + 1
+            for parent, child in tree:
+                sh = sorted(set(tri[int(parent)]) & set(tri[int(child)]))
+                e = (int(sh[0]), int(sh[1]))
+                load[e] = load.get(e, 0) + 1
+            loads.append(max(load.values()))
+            cells.append(mesh.n_triangles)
+        edge_loads.append((float(np.mean(loads)), int(np.min(loads)),
+                           int(np.max(loads))))
+        cells_mean.append(float(np.mean(cells)))
+        cells_lo.append(int(np.min(cells)))
+        cells_hi.append(int(np.max(cells)))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    ax1.plot(node_counts, depths, 'o-', color=C['quantum'], linewidth=2, markersize=8, label='Measured')
-    # √K reference line
-    sqrt_ref = [np.sqrt(nt) for nt in n_triangles_list]
-    ax1.plot(node_counts, sqrt_ref, '--', color=C['accent'], linewidth=1.5, label='sqrt(triangles) reference')
-    ax1.set_xlabel('Number of Nodes')
-    ax1.set_ylabel('Aggregation Tree Depth')
-    ax1.set_title('Aggregation Depth vs Network Size')
-    ax1.legend()
+    ax1.errorbar(node_counts, [e[0] for e in edge_loads],
+                 yerr=[[e[0] - e[1] for e in edge_loads],
+                       [e[2] - e[0] for e in edge_loads]],
+                 fmt='o-', color=C['quantum'], linewidth=2, markersize=7,
+                 capsize=4, label=f'measured ({n_place} placements)')
+    ax1.axhline(y=MAX_MASKS_PER_EDGE_PER_ROUND, color=C['accent'],
+                linestyle='--', linewidth=1.5,
+                label='bound: 2 cells per edge + 1 inter-cell mask')
+    ax1.set_xlabel('Number of nodes')
+    ax1.set_ylabel('Masks per round on the busiest edge')
+    ax1.set_title('Per-edge key demand does not grow', fontsize=9)
+    ax1.set_ylim(0, MAX_MASKS_PER_EDGE_PER_ROUND + 1.2)
+    ax1.legend(fontsize=6)
     ax1.grid(True, alpha=0.3)
 
-    ax2.plot(node_counts, n_triangles_list, 'o-', color=C['pareto'], linewidth=2, markersize=8)
-    ax2.set_xlabel('Number of Nodes')
-    ax2.set_ylabel('Number of Triangles')
-    ax2.set_title('Triangulation Density')
+    ax2.errorbar(node_counts, cells_mean,
+                 yerr=[[m - lo for m, lo in zip(cells_mean, cells_lo)],
+                       [hi - m for m, hi in zip(cells_mean, cells_hi)]],
+                 fmt='o-', color=C['pareto'], linewidth=2, markersize=7,
+                 capsize=4, label=f'measured ({n_place} placements)')
+    euler = [2 * n - 2 - (8.0 / 3.0) * np.log(n) for n in node_counts]
+    ax2.plot(node_counts, euler, '--', color=C['accent'], linewidth=1.5,
+             label='2n - 2 - (8/3)ln n  (Euler, Renyi-Sulanke hull)')
+    ax2.set_xlabel('Number of nodes')
+    ax2.set_ylabel('Cells (one masked vector each)')
+    ax2.set_title("Aggregator's classical load grows linearly", fontsize=9)
+    ax2.legend(fontsize=6)
     ax2.grid(True, alpha=0.3)
 
-    fig.suptitle('Delaunay mesh scaling', fontsize=10, fontweight='bold')
+    fig.suptitle('Mesh scaling under masked cell submission', fontsize=10,
+                 fontweight='bold')
     fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'exp3a_mesh_scaling')
+    print(f"    busiest-edge masks/round: "
+          f"{min(e[1] for e in edge_loads)}-{max(e[2] for e in edge_loads)} "
+          f"across {min(node_counts)}-{max(node_counts)} nodes "
+          f"({n_place} placements each)")
 
     # 3b: Max feasible nodes vs model size and round period at the
     # anchored operating point (table only; the figure said what exp6
@@ -933,7 +1014,9 @@ def run_experiment_3(quick=False):
         print(f"      {int(ms/1000):>5}K  {row}")
 
     print("  Experiment 3 complete.")
-    return {"depths": depths,
+    return {"edge_loads": edge_loads,
+            "cells_mean": cells_mean,
+            "node_counts": list(node_counts),
             "heatmap_anchored": heatmaps[0].tolist()}
 
 
@@ -997,6 +1080,9 @@ def run_experiment_4(quick=False):
             print(f"    Training [{mode}] for {num_rounds} rounds...")
             result = run_federated_training(
                 model_fn, client_data, test_data,
+                # Report the mask pool's provenance once, on the first
+                # repeat: a PRNG pool cannot carry an entangled-key claim.
+                _report_pool_source=(repeat == 0),
                 mode=mode, num_rounds=num_rounds,
                 local_epochs=FL['local_epochs'], batch_size=FL['local_batch_size'],
                 lr=FL['learning_rate'], target_accuracy=target_acc,
@@ -1209,16 +1295,25 @@ def run_experiment_5(quick=False):
     dropout_rates = ([0.0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40]
                      if not quick else [0.0, 0.15, 0.40])
 
-    # Delaunay mesh (Module 3) at the same seed every experiment uses, so
-    # the logical clusters coincide with the physical entangled links.
-    _mesh = analyze_mesh(n_clients, 1e5, OPERATING_POINT['secret_rate_bps'],
-                         rng=np.random.default_rng(42))
-    triangles, tree_edges = topology_from_mesh(_mesh)
-    n_triangles = len(triangles)
+    # Each seed gets its own campus as well as its own data split. A
+    # fixed layout would make every reported number a property of one
+    # arbitrary placement: at six nodes the Delaunay triangulation gives
+    # 4 cells in 14% of placements and 5 in 55%, and the sparse case
+    # reports the lowest reveal cost. Sweeping both leaves the result a
+    # statement about six-client campus meshes rather than about one.
+    def _mesh_for(seed_):
+        mesh_ = analyze_mesh(n_clients, 1e5,
+                             OPERATING_POINT['secret_rate_bps'],
+                             rng=np.random.default_rng(seed_))
+        tri_, tree_ = topology_from_mesh(mesh_)
+        return mesh_, tri_, tree_
 
     # results[dr] = list over seeds of (res, aux); splits and torch seeds
     # are PAIRED across dropout rates (same seed list per rate).
     results = {dr: [] for dr in dropout_rates}
+    # Whether the sweep's mask pools were distilled or PRNG-substituted;
+    # reported below so the figure's provenance is on the record.
+    aux_any_key_source = set()
     for si in range(num_seeds):
         seed = 42 + si
         client_data, test_data, input_dim = load_clinical_data(
@@ -1227,6 +1322,9 @@ def run_experiment_5(quick=False):
         model_fn = lambda: ClinicalMLP(input_dim=input_dim, hidden=128)
         if si == 0:
             n_params = sum(p.numel() for p in model_fn().parameters())
+        _mesh, triangles, tree_edges = _mesh_for(seed)
+        n_triangles = len(triangles)
+        edge_rates = _mesh.edge_secret_rates
         for dr in dropout_rates:
             res, aux = run_multitriangle_fl(
                 model_fn, client_data, test_data,
@@ -1235,9 +1333,13 @@ def run_experiment_5(quick=False):
                 batch_size=FL['local_batch_size'],
                 lr=FL['learning_rate'], target_accuracy=target_acc,
                 triangles=triangles, tree_edges=tree_edges,
+                edge_secret_rates=edge_rates,
                 dropout_rate=dr, verbose=False, seed=seed,
             )
-            results[dr].append((res, aux))
+            # Carry the placement's cell count: the threshold-failure
+            # rate is per cell-round, and the count now varies by seed.
+            results[dr].append((res, aux, n_triangles))
+            aux_any_key_source.update(aux.get("key_source", {}).values())
         print(f"  seed {seed}: " + "  ".join(
             f"{int(dr*100)}%->{results[dr][-1][0].final_accuracy:.3f}"
             for dr in dropout_rates))
@@ -1254,46 +1356,46 @@ def run_experiment_5(quick=False):
     drs = sorted(results.keys())
     stats = {}
     for dr in drs:
-        accs = [r.final_accuracy for r, _ in results[dr]]
+        accs = [r.final_accuracy for r, _, _nt in results[dr]]
         rec_pct = [100 * np.mean(a['recovery_invoked_per_round'])
-                   for _, a in results[dr]]
+                   for _, a, _nt in results[dr]]
         # HEADLINE costs of recovery:
         # bytes - reveals (+ recovery shares, identically 0 here) per
         # client per round, from the Phase-2 ledger;
         rec_bytes = [np.mean([rc.recovery_bytes() / max(rc.n_clients, 1)
                               for rc in r.comm_rounds])
-                     for r, _ in results[dr]]
+                     for r, _, _nt in results[dr]]
         # The same dropout events under the seed-based baselines' byte
         # models (exp12): the ledger charges n_params words per
         # (survivor, dropped) pair, so the pair count is exact. A
         # triangle under threshold 2 reveals only when exactly one
         # member drops (two survivors), so pairs = 2 x drop events.
         pairs = [[rc.reveal_bytes // (n_params * BYTES_PER_MASKED_WORD)
-                  for rc in r.comm_rounds] for r, _ in results[dr]]
+                  for rc in r.comm_rounds] for r, _, _nt in results[dr]]
         assert all(pc % 2 == 0 for ps in pairs for pc in ps), \
             "reveal pairs not paired: a cluster other than a triangle revealed"
         rec_bytes_bon = [np.mean([(pc // 2) * 2 * BYTES_PER_DH_SHARE
                                   / max(rc.n_clients, 1)
                                   for pc, rc in zip(ps, r.comm_rounds)])
-                         for ps, (r, _) in zip(pairs, results[dr])]
+                         for ps, (r, _, _nt) in zip(pairs, results[dr])]
         rec_bytes_fla = [np.mean([pc * BYTES_PER_PRF_SEED
                                   / max(rc.n_clients, 1)
                                   for pc, rc in zip(ps, r.comm_rounds)])
-                         for ps, (r, _) in zip(pairs, results[dr])]
+                         for ps, (r, _, _nt) in zip(pairs, results[dr])]
         # latency - modeled wire time of the recovery bytes on the
         # aggregator's access link;
         rec_wire_ms = [1000 * np.mean([rc.recovery_bytes() * 8
                                        / CLASSICAL_LINK_BPS
                                        for rc in r.comm_rounds])
-                       for r, _ in results[dr]]
+                       for r, _, _nt in results[dr]]
         # failed rounds - triangle-rounds skipped because survivors <
         # Shamir threshold (the driver zeroes that triangle's update).
         tfail_pct = [100 * sum(rc.threshold_failures
                                for rc in r.comm_rounds)
-                     / (num_rounds * n_triangles)
-                     for r, _ in results[dr]]
+                     / (num_rounds * _nt)
+                     for r, _, _nt in results[dr]]
         chi_pct = [100 * np.mean(a['distinguishable_per_round'])
-                   for _, a in results[dr]]
+                   for _, a, _nt in results[dr]]
         stats[dr] = {
             "acc": _mean_ci(accs),
             "recovery_pct": _mean_ci(rec_pct),
@@ -1402,9 +1504,12 @@ def run_experiment_5(quick=False):
                                dtype=_torch.float32) for c in _tri}
     _seeds = {c: 7000 + c for c in _tri}
     _need = 3 * _npar * BITS_PER_PARAM
+    # Small enough to distil for real, unlike the sweep pools above.
+    from modules.m4_federated_learning import distilled_pool
+    _ent_pool, _ent_src = distilled_pool(_need, np.random.default_rng(11),
+                                         "parity-baseline pool")
     _pools = [
-        ("entangled (source-model keys)",
-         np.random.default_rng(11).integers(0, 2, size=_need, dtype=np.int8),
+        (f"entangled ({_ent_src} source bits)", _ent_pool,
          "unconditional (information-theoretic)"),
         ("classical (per-round PRF pool)",
          np.random.default_rng(2026).integers(0, 2, size=_need, dtype=np.int8),
@@ -1419,6 +1524,13 @@ def run_experiment_5(quick=False):
         print(f"  {_label:>32}  {str(_res.recovery_invoked):>8}  {str(_exact):>9}  {_assump}")
     print("  -> identical mechanism and recovery in both pools; the quantum claim")
     print("    is the ASSUMPTION CLASS (unconditional freshness), not the mechanism.")
+    print(f"\n  Mask-pool provenance in the sweep above: "
+          f"{', '.join(sorted(aux_any_key_source)) or 'unknown'}."
+          "\n    Masks cancel exactly in the ring, so the aggregate, the accuracy"
+          "\n    curve and every byte and latency figure are identical whatever"
+          "\n    the bits are - verified by replaying a run against both pools."
+          "\n    Key supply itself is measured in exps 1/2/7/14 and distilled"
+          "\n    end to end in exp4.")
 
     print("  Experiment 5 complete.")
     return {"dropout_results": {f"{int(dr*100)}%": {
@@ -1484,6 +1596,16 @@ def run_experiment_11(quick=False):
                                     sum leaks a mixture; this is the
                                     honest scoping limit that motivates
                                     DP-on-top-of-masking)
+      (4) FedAvg parameter delta -> what a client actually sends. Arms
+                                    1-3 attack single-sample gradients
+                                    of a model at initialisation, which
+                                    is DLG's best case; a delta after
+                                    several local SGD epochs averages
+                                    many per-sample gradients and
+                                    composes them through the optimiser,
+                                    so arm 1 is an upper bound on
+                                    leakage rather than a measurement of
+                                    what this system exposes.
     Tabular metrics: per-feature MSE against the standardized ground
     truth, and attribute-inference accuracy (adversary predicts each
     feature's above/below-median bit from the reconstruction).
@@ -1497,7 +1619,8 @@ def run_experiment_11(quick=False):
     from modules.m4_federated_learning import (
         ClinicalMLP, load_clinical_data, quantize_gradient,
         dequantize_gradient, derive_modular_mask, apply_modular_mask,
-        _SHAMIR_PRIME)
+        train_local, _SHAMIR_PRIME,
+        shamir_field_element)
 
     n_targets = 2 if quick else 4
     n_iters = 600 if quick else 2000
@@ -1526,7 +1649,10 @@ def run_experiment_11(quick=False):
     victim_X = all_X[rng.choice(len(all_X), size=n_targets, replace=False)]
     crit = torch.nn.CrossEntropyLoss()
 
-    res = {"unmasked": [], "masked": [], "aggregate": []}
+    res = {"unmasked": [], "masked": [], "aggregate": [],
+           "fedavg_update": []}
+    # Samples the victim's local shard contributes to its own update.
+    fedavg_batch = 8
     for ti in range(n_targets):
         x = victim_X[ti:ti + 1]
         with torch.no_grad():
@@ -1577,6 +1703,28 @@ def run_experiment_11(quick=False):
                           attack_lr, seed=300 + ti)
         res["aggregate"].append(metrics(r3, x))
 
+        # (4) FEDAVG UPDATE: what a client actually puts on the wire.
+        # Arms 1-3 attack single-sample gradients of a model at
+        # initialisation, which is DLG's best case (Zhu et al. 2019 ran
+        # it on single images). A real round sends the parameter delta
+        # after several local SGD epochs over a shard, which averages
+        # many per-sample gradients and composes them through the
+        # optimiser - strictly harder to invert. Reported so the
+        # unmasked arm's success is read as an upper bound on leakage,
+        # not as what an aggregator gets in this system.
+        _vic = torch.utils.data.TensorDataset(
+            x.repeat(fedavg_batch, 1),
+            y.repeat(fedavg_batch))
+        _local = ClinicalMLP(input_dim=input_dim, hidden=128)
+        _local.load_state_dict(model.state_dict())
+        train_local(_local, _vic, FL['local_epochs'],
+                    FL['local_batch_size'], FL['learning_rate'], 'cpu')
+        _delta = [(pl.detach() - pg.detach())
+                  for pl, pg in zip(_local.parameters(), model.parameters())]
+        r4 = _tabular_dlg(model, _delta, y, input_dim, n_iters,
+                          attack_lr, seed=400 + ti)
+        res["fedavg_update"].append(metrics(r4, x))
+
     # Chance baselines: reconstruct-as-prior (all-zeros = the standardized
     # mean) for MSE, and coin-flip (0.5) for attribute inference.
     prior_mse = float((victim_X ** 2).mean())
@@ -1586,12 +1734,13 @@ def run_experiment_11(quick=False):
     print(f"  {'target':>22}  {'per-feature MSE':>16}  "
           f"{'attr-infer acc':>15}  verdict")
     verdicts = {
-        "unmasked": "ATTACK SUCCEEDS",
+        "unmasked": "ATTACK SUCCEEDS (DLG best case)",
         "masked": "ATTACK FAILS (theorem)",
         "aggregate": "PARTIAL (motivates DP)",
+        "fedavg_update": "what a client actually sends",
     }
     summary = {}
-    for tgt in ["unmasked", "masked", "aggregate"]:
+    for tgt in ["unmasked", "masked", "aggregate", "fedavg_update"]:
         mses = [m for m, _ in res[tgt]]
         ais = [a for _, a in res[tgt]]
         summary[tgt] = {"mse_mean": float(np.mean(mses)),
@@ -1864,7 +2013,12 @@ def run_experiment_7(quick=False):
         syndrome_fraction = waterfall['ec_overhead_pct'] / 100
         input_min_entropy_per_bit = max(
             0, 1 - syndrome_fraction - waterfall['tagged_fraction'])
-        # LHL: H_out >= L - 2*log2(1/ε), with 2*log2(1/ε) = 2*security_margin.
+        # LHL: H_out >= L - 2*log2(1/eps), with 2*log2(1/eps) =
+        # 2*security_margin. This is the extractor's GUARANTEE evaluated
+        # at the design parameters - a floor the output is certified to
+        # meet - not an entropy estimated from produced bits. Min-entropy
+        # is a worst-case quantity and is not estimable from a sample, so
+        # no measurement of it is reported anywhere.
         # Per output bit:
         gap_per_bit = (2 * security_margin) / max(block_size * input_min_entropy_per_bit, 1)
         per_bit_entropy = max(0, 1 - gap_per_bit)
@@ -1914,13 +2068,15 @@ def run_experiment_7(quick=False):
                 label=f'0.84-code capacity (q={cap_q:.3f})')
     ax1_b = ax1.twinx()
     ax1_b.plot(qbers, mask_entropies, 's--', linewidth=2,
-               color=C['accent'], label='Min-entropy per output bit (LHL)')
+               color=C['accent'],
+               label='LHL min-entropy floor (guarantee, not a measurement)')
     _hspan = max(mask_entropies) - min(mask_entropies)
     ax1_b.set_ylim(min(mask_entropies) - 0.10 * _hspan,
                    max(mask_entropies) + 0.10 * _hspan)
     ax1.set_xlabel('QBER')
     ax1.set_ylabel('Shared bit rate (kbit/s)', color=C['quantum'])
-    ax1_b.set_ylabel('Min-entropy per output bit', color=C['accent'])
+    ax1_b.set_ylabel('LHL min-entropy floor per output bit',
+                     color=C['accent'])
     ax1.set_xlim(qbers[0] - 0.003, qbers[-1] + 0.003)
     ax1.set_ylim(0, max(sr.max(), br.max()) * 1.18)
     if cutoff_qber is not None:
@@ -1982,6 +2138,32 @@ def run_experiment_7(quick=False):
           f"-> 1) and max-params\n    follows the collapse.")
     if cutoff_qber:
         print(f"\n  Cutoff QBER (rate < 1 kbit/s): {cutoff_qber:.3f}")
+    # Operating-point values evaluated AT the operating QBER, not read
+    # off the nearest sweep sample. The sweep grid's closest point sits
+    # at 0.0150 against an operating QBER of 0.01533, which moves the
+    # quoted maskable-model size by ~0.3%.
+    _op_wf = compute_rate_waterfall(
+        raw_rate, OPERATING_POINT['qber'], code_rate=code_rate,
+        security_margin=security_margin, block_size=block_size,
+        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'])
+    _op_conduit = _op_wf['final_secure_rate']
+    _op_bbm92 = compute_rate_waterfall_qkd(
+        raw_rate, OPERATING_POINT['qber'], keep_eff, code_rate=code_rate,
+        security_margin=security_margin, block_size=block_size,
+        bell_duty_cycle=POST_PROC['bell_test_duty_cycle'])['final_secure_rate']
+    at_op = {
+        "qber": float(OPERATING_POINT['qber']),
+        "conduit_rate_bps": float(_op_conduit),
+        "bbm92_rate_bps": float(_op_bbm92),
+        "conduit_max_params_at_60s": float(_op_conduit * 60 / BITS_PER_PARAM),
+        "bbm92_max_params_at_60s": float(_op_bbm92 * 60 / BITS_PER_PARAM),
+    }
+    print(f"    at the operating QBER {at_op['qber']*100:.3f}%: conduit "
+          f"{at_op['conduit_rate_bps']:.1f} bit/s "
+          f"({at_op['conduit_max_params_at_60s']:.0f} params at 60 s), "
+          f"BBM92-framed {at_op['bbm92_rate_bps']:.1f} bit/s "
+          f"({at_op['bbm92_max_params_at_60s']:.0f} params)")
+
     print("  Experiment 7 complete.")
     return {
         "qbers": qbers.tolist(),
@@ -1990,6 +2172,7 @@ def run_experiment_7(quick=False):
         "mask_entropy_per_bit": mask_entropies,
         "max_params_at_60s": max_params,
         "bbm92_max_params_at_60s": bbm92_max_params,
+        "at_operating_point": at_op,
         "cutoff_qber": float(cutoff_qber) if cutoff_qber else None,
     }
 
@@ -2012,53 +2195,63 @@ def run_experiment_8(quick=False):
 
     results = {}
 
+    # Each seed carries its own campus and its own data split, so a
+    # scaling curve is not a property of one arbitrary placement. The
+    # cell count and tree depth vary with the placement, so both are
+    # reported as ranges.
+    n_seeds8 = 3 if quick else 5
     for n_clients in scales:
-        print(f"\n  Scale: {n_clients} clients")
+        print(f"\n  Scale: {n_clients} clients ({n_seeds8} placements)")
+        per_seed = []
+        for si in range(n_seeds8):
+            seed = 42 + si
+            mesh = analyze_mesh(n_clients, 1e5,
+                                OPERATING_POINT['secret_rate_bps'],
+                                rng=np.random.default_rng(seed))
+            triangles, tree_edges = topology_from_mesh(mesh)
+            client_data, test_data, input_dim = load_clinical_data(
+                n_clients, rng_seed=seed, dirichlet_alpha=dirichlet_alpha)
+            model_fn = lambda: ClinicalMLP(input_dim=input_dim, hidden=128)
+            result, aux = run_multitriangle_fl(
+                model_fn, client_data, test_data,
+                num_clients=n_clients, num_rounds=num_rounds,
+                local_epochs=FL['local_epochs'],
+                batch_size=FL['local_batch_size'],
+                lr=FL['learning_rate'], target_accuracy=target_acc,
+                triangles=triangles, tree_edges=tree_edges,
+                edge_secret_rates=mesh.edge_secret_rates,
+                dropout_rate=0.0, verbose=False, seed=seed,
+            )
+            per_seed.append((result, aux, len(triangles),
+                             mesh.aggregation_depth))
+            print(f"    seed {seed}: {len(triangles)} cells, depth "
+                  f"{mesh.aggregation_depth}, final "
+                  f"{result.final_accuracy:.4f}")
 
-        # Module 3 Delaunay topology at every scale. Modeled-device rate
-        # from config - topology metrics are geometric; the mesh's
-        # latency fields use the honest rate.
-        mesh = analyze_mesh(n_clients, 1e5, OPERATING_POINT['secret_rate_bps'],
-                            rng=np.random.default_rng(42))
-        triangles, tree_edges = topology_from_mesh(mesh)
-        n_tri = len(triangles)
-        tree_depth = mesh.aggregation_depth
-        print(f"    Topology (Delaunay): {n_tri} triangles, "
-              f"tree depth {tree_depth}")
-
-        for i, tri in enumerate(triangles):
-            print(f"      T{i}: clients {tri}")
-
-        client_data, test_data, input_dim = load_clinical_data(
-            n_clients, rng_seed=42, dirichlet_alpha=dirichlet_alpha
-        )
-        model_fn = lambda: ClinicalMLP(input_dim=input_dim, hidden=128)
-
-        print(f"    Training for {num_rounds} rounds with entangled-key two-mask...")
-        result, aux = run_multitriangle_fl(
-            model_fn, client_data, test_data,
-            num_clients=n_clients, num_rounds=num_rounds,
-            local_epochs=FL['local_epochs'], batch_size=FL['local_batch_size'],
-            lr=FL['learning_rate'], target_accuracy=target_acc,
-            triangles=triangles, tree_edges=tree_edges,
-            dropout_rate=0.0,
-            verbose=True,
-        )
-
+        accs8 = [r.final_accuracy for r, _, _, _ in per_seed]
+        tris8 = [t for _, _, t, _ in per_seed]
+        deps8 = [d for _, _, _, d in per_seed]
+        # The median placement represents the scale in the curves.
+        _mid = int(np.argsort(accs8)[len(accs8) // 2])
+        result, aux, n_tri, tree_depth = per_seed[_mid]
         results[n_clients] = {
             'result': result,
             'n_triangles': n_tri,
             'tree_depth': tree_depth,
-            'triangles': triangles,
+            'triangles': None,
             'aux': aux,
+            'acc_mean': float(np.mean(accs8)),
+            'acc_std': float(np.std(accs8, ddof=1)) if len(accs8) > 1 else 0.0,
+            'n_triangles_range': [int(min(tris8)), int(max(tris8))],
+            'tree_depth_range': [int(min(deps8)), int(max(deps8))],
+            'n_seeds': n_seeds8,
         }
-        print(f"    Final accuracy: {result.final_accuracy:.4f}")
-        print(f"    Rounds to target ({target_acc}): {result.rounds_to_target}")
-        print(f"    Wall clock: {result.wall_clock_s:.1f}s")
-        print(f"    χ² implementation-check failures (validation): "
+        print(f"    accuracy {np.mean(accs8):.4f} +- "
+              f"{np.std(accs8, ddof=1) if len(accs8) > 1 else 0.0:.4f} "
+              f"over {n_seeds8} placements; cells {min(tris8)}-{max(tris8)}, "
+              f"depth {min(deps8)}-{max(deps8)}")
+        print(f"    chi2 implementation-check failures (validation): "
               f"{sum(aux['distinguishable_per_round'])}/{num_rounds}")
-        print(f"    entangled-key bits consumed (intra/inter): "
-              f"{aux['bits_intra_consumed']:,} / {aux['bits_inter_consumed']:,}")
         print_comm_summary(result, label=f"{n_clients}c")
 
     # PLOT 1: Training convergence across scales
@@ -2224,6 +2417,13 @@ def run_experiment_8(quick=False):
             'n_triangles': results[n]['n_triangles'],
             'tree_depth': results[n]['tree_depth'],
             'acc_curve': list(results[n]['result'].accuracies),
+            # Spread over placements: the cell count and tree depth are
+            # properties of the draw, not of the client count.
+            'acc_mean': results[n]['acc_mean'],
+            'acc_std': results[n]['acc_std'],
+            'n_triangles_range': results[n]['n_triangles_range'],
+            'tree_depth_range': results[n]['tree_depth_range'],
+            'n_seeds': results[n]['n_seeds'],
         } for n in scales
     }
     out['mask_time_per_level_s'] = level_times
@@ -2253,7 +2453,7 @@ def run_experiment_9(quick=False):
     from modules.m4_federated_learning import (
         ClinicalMLP, load_clinical_data, secure_aggregation_round,
         train_local, get_model_params, set_model_params,
-        get_gradient_update, _SHAMIR_PRIME)
+        get_gradient_update, _SHAMIR_PRIME, shamir_field_element)
     from modules.m6_hndl import run_transcript_round, retroactive_attack
 
     n_clients = 3
@@ -2291,7 +2491,7 @@ def run_experiment_9(quick=False):
             grads[c] = get_gradient_update(global_model, local)
 
         pool = rng.integers(0, 2, size=3 * bits_per_mask, dtype=np.int8)
-        self_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME))
+        self_seeds = {c: shamir_field_element(rng)
                       for c in range(n_clients)}
         pair_seeds = {(i, j): int(rng.integers(0, 2**31))
                       for i in range(n_clients)
@@ -2407,11 +2607,25 @@ def run_experiment_9(quick=False):
           "against the channel recorder only (the dealer\n    holds every "
           "pad);")
     print("    entangled arm: 0% - every delivered payload retains >= 1 "
-          "pairwise mask that\n    never appeared in any transcript, and "
-          "god-mode residuals remain uniform\n    (mean monobit p above; "
-          "median reconstruction error ~10^3 in gradient units\n    vs ~0 "
-          "classically). Online vs courier differ only in provisioning: "
-          "HNDL\n    immunity is a provisioning property.")
+          "pairwise mask that\n    never appeared in any transcript, so "
+          "the residual is a one-time pad and its\n    uniformity is a "
+          "theorem, not a measurement: the monobit column above is a "
+          "bug\n    detector (a FAIL would mean a mask leaked into the "
+          "transcript), and cannot\n    produce a security finding. The "
+          "load-bearing numbers are the recovered\n    fraction and the "
+          "median reconstruction error (~10^3 in gradient units vs ~0\n"
+          "    classically). Online vs courier differ only in "
+          "provisioning: HNDL immunity\n    is a provisioning property.")
+    print("\n  WHAT THIS MEASURES: the recovered fraction follows from what "
+          "each arm's\n  provisioning puts into the recorded transcript, and "
+          "is not a measurement of\n  attack difficulty. The classical arms "
+          "record material a future adversary can\n  invert, so god-mode "
+          "recovers everything; the entangled arm's pairwise bits\n  never "
+          "enter the transcript, so there is nothing there to invert. The "
+          "run is a\n  check that the implementation's transcript contains "
+          "what the design says it\n  contains - a wiring test with a "
+          "security consequence, not an empirical\n  contest. The claim it "
+          "supports is the assumption class.")
     print("\n  HONEST SCOPE: the self-mask leg rides classical channels "
           "(Shamir shares)\n  and is only computationally protected - "
           "god-mode strips it in ALL arms\n  here. The PAIRWISE leg alone "
@@ -2562,11 +2776,20 @@ def run_experiment_10(quick=False):
                     and tuple(sorted((int(a), int(b)))) in physical_edges)
         demand[e] = demand.get(e, 0) + bits_per_mask
 
-    r = OPERATING_POINT['secret_rate_bps']
+    # Each edge at its own length and its endpoints' degrees, not a flat
+    # lone-triangle rate.
+    base = {e: _mesh.edge_secret_rates.get(
+                e, OPERATING_POINT['secret_rate_bps'])
+            for e in demand}
     num_rounds, kill_round = 20, 10
 
     def keywait(rates):
         return max(demand[e] / rates[e] for e in demand)
+
+    def _rates_sym(node):
+        """A dead source halves its incident edges: the far endpoint
+        still keys them alone."""
+        return {e: (base[e] / 2 if node in e else base[e]) for e in demand}
 
     def _stalled(node):
         """Triangles a fixed-source-per-edge design loses when `node`'s
@@ -2582,12 +2805,12 @@ def run_experiment_10(quick=False):
     # on the symmetric design.
     kill_node = max(
         range(n_clients),
-        key=lambda k: (len(_stalled(k)),
-                       keywait({e: (r / 2 if k in e else r) for e in demand})))
+        key=lambda k: (len(_stalled(k)), keywait(_rates_sym(k))))
 
-    rates_healthy = {e: r for e in demand}
-    rates_sym = {e: (r / 2 if kill_node in e else r) for e in demand}
-    rates_fixed = {e: (0.0 if min(e) == kill_node else r) for e in demand}
+    rates_healthy = dict(base)
+    rates_sym = _rates_sym(kill_node)
+    rates_fixed = {e: (0.0 if min(e) == kill_node else base[e])
+                   for e in demand}
 
     kw_before = keywait(rates_healthy)
     kw_sym = keywait(rates_sym)
@@ -2599,8 +2822,10 @@ def run_experiment_10(quick=False):
     print(f"\n  (b) Modeled 6-client / {len(triangles)}-triangle round-time "
           f"impact, source at node "
           f"{kill_node} killed at round {kill_round}/{num_rounds}\n"
-          f"      (per-edge demand from the exps-5/8 ledger model, "
-          f"secret rate {r/1000:.1f} kbit/s):")
+          f"      (per-edge demand and per-edge rate from the exps-5/8 "
+          f"model; edge rates "
+          f"{min(base.values())/1000:.2f}-{max(base.values())/1000:.2f} "
+          f"kbit/s):")
     print(f"      symmetric switching (implemented): key_wait "
           f"{kw_before:.2f}s -> {kw_sym:.2f}s "
           f"(×{kw_sym/kw_before:.2f}); ALL {len(triangles)} triangles "
@@ -3340,7 +3565,11 @@ def run_experiment_14(quick=False):
     n_pairs_a = 760_000_000 if quick else 3_040_000_000    # 10 s / 40 s
     n_pairs_c = 380_000_000 if quick else 1_520_000_000    # 5 s / 20 s
     seeds_a = [0, 1] if quick else list(range(10))
-    seeds_c = [0, 1] if quick else list(range(10))
+    # An abort probability estimated from 10 trials has 0.1 resolution
+    # and a binomial interval wider than most of the effect being
+    # reported. A BBM92 run at this pair budget costs ~0.01 s, so the
+    # trial count is not the thing to economise on.
+    seeds_c = list(range(20)) if quick else list(range(200))
     duty = POST_PROC['bell_test_duty_cycle']
 
     def run_pair(seed, n_pairs):
@@ -3500,8 +3729,21 @@ def run_experiment_14(quick=False):
                 float(np.mean(accs[accepts_arr]))
                 if np.any(accepts_arr) else float('nan'))
             c_res[arm]["accepted"].append(bool(np.all(accepts_arr)))
+            _n = len(accepts_arr)
+            _k = int(np.sum(accepts_arr))
             c_res[arm]["abort_prob"].append(
                 float(1.0 - np.mean(accepts_arr)))
+            # Wilson interval on the abort probability: it stays inside
+            # [0, 1] and stays meaningful at the 0 and 1 endpoints,
+            # where a normal interval does not.
+            _p = 1.0 - _k / max(_n, 1)
+            _z = 1.959963985
+            _d = 1.0 + _z * _z / _n
+            _c = (_p + _z * _z / (2 * _n)) / _d
+            _h = (_z / _d) * np.sqrt(_p * (1 - _p) / _n
+                                     + _z * _z / (4 * _n * _n))
+            c_res[arm].setdefault("abort_ci95", []).append(
+                [float(max(0.0, _c - _h)), float(min(1.0, _c + _h))])
             c_res[arm].setdefault("accept_count", []).append(
                 int(np.sum(accepts_arr)))
 
@@ -3753,6 +3995,51 @@ def run_experiment_14(quick=False):
     figb.tight_layout()
     save_fig(figb, 'exp14b_basis_split')
 
+    # (E) Noise-attribution bracket on the abort decision.
+    #
+    # simulate_bbm92 carries a Werner state, which forces e_x = e_z. The
+    # measured quantity is the negativity, and a Werner state is not the
+    # only state reproducing it: pure dephasing on |phi+> reaches the
+    # same 2N with all of the error in X and none in Z. The conduit arm
+    # measures one fixed basis and is unaffected - config.py's argument
+    # that Werner is conservative holds there. BBM92 tests X and aborts
+    # on it, so the attribution decides the abort rate. Both endpoints
+    # are derived from the same measured 2N, not asserted.
+    from scipy.optimize import brentq as _brentq
+    from modules.m1_quantum_source import negativity_2n as _neg2n
+    _phip = np.array([1, 0, 0, 1]) / np.sqrt(2)
+    _phim = np.array([1, 0, 0, -1]) / np.sqrt(2)
+
+    def _dephased(pp):
+        return ((1 - pp) * np.outer(_phip, _phip.conj())
+                + pp * np.outer(_phim, _phim.conj()))
+
+    _two_n = 2.0 * QUANTUM['negativity'] if 'negativity' in QUANTUM else None
+    if _two_n is None:
+        _two_n = _neg2n(werner_state(QUANTUM['fidelity']))
+    _p_deph = _brentq(lambda pp: _neg2n(_dephased(pp)) - _two_n, 1e-9, 0.5)
+    _e_werner = (1 - QUANTUM['fidelity']) / 2
+    _pbs_floor = 2.0 / QUANTUM['pbs_extinction_ratio']
+    _ex_w = _e_werner + _pbs_floor
+    _ex_d = _p_deph + _pbs_floor
+    # The BBM92 arm's own X-basis test set, which is what the abort
+    # decision is made on.
+    _n_test = int(np.mean([r[0].n_test for r in a_runs])) if a_runs else 0
+    from scipy.stats import binom as _binom
+    def _abort_prob(e_true, n):
+        if n <= 0:
+            return float('nan')
+        return float(1.0 - _binom.cdf(int(q_tol * n), n, e_true))
+    print(f"\n  (E) Noise-attribution bracket on the BBM92 abort decision "
+          f"(both from the same measured 2N = {_two_n:.3f}):")
+    print(f"      Werner    : e_x = e_z = {_ex_w*100:.3f}%  "
+          f"abort probability {_abort_prob(_ex_w, _n_test)*100:5.1f}%")
+    print(f"      dephasing : e_x = {_ex_d*100:.3f}%, e_z = 0  "
+          f"abort probability {_abort_prob(_ex_d, _n_test)*100:5.1f}%")
+    print(f"      q_tol {q_tol*100:.2f}%, test set ~{_n_test:,} bits; the "
+          f"X-basis error ratio is {_p_deph/_e_werner:.3f}x")
+    print("      The conduit arm reads one fixed basis and is unaffected.")
+
     print("\n  Experiment 14 complete.")
     return {
         "arm_a": {
@@ -3865,8 +4152,8 @@ def make_paper_figures(summary):
     entropy_col = '#8A6D1A'   # darker than C['accent']: 8 pt axis text
     axb.plot(q * 100, np.array(e7['mask_entropy_per_bit'])[m], 'd--',
              color=entropy_col, linewidth=1.4, markersize=4)
-    axb.set_ylabel('Min-entropy per output bit', color=entropy_col,
-                   fontsize=8)
+    axb.set_ylabel('LHL min-entropy floor per output bit',
+                   color=entropy_col, fontsize=8)
     axb.set_ylim(0.985, 1.0005)
     ax.set_xlabel('QBER (%)')
     ax.set_ylabel('Secret rate (kbit/s)')

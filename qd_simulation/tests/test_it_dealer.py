@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from modules.m7_baselines import (  # noqa: E402
     run_entangled, run_bonawitz, run_flamingo, run_it_dealer)
 from modules.m6_hndl import run_transcript_round, retroactive_attack  # noqa: E402
-from modules.m4_federated_learning import PoolAuditor, _SHAMIR_PRIME  # noqa: E402
+from modules.m4_federated_learning import (  # noqa: E402
+    PoolAuditor, _SHAMIR_PRIME, shamir_field_element)
 
 CLUSTER = [0, 1, 2, 3]
 D = 512
@@ -81,7 +82,7 @@ def test_hndl_three_way():
     cluster = list(range(n))
     grads = {c: torch.tensor(rng.normal(0, 0.1, D), dtype=torch.float32)
              for c in cluster}
-    self_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME)) for c in cluster}
+    self_seeds = {c: shamir_field_element(rng) for c in cluster}
     pair_seeds = {(i, j): int(rng.integers(0, 2**31))
                   for i in range(n) for j in range(i + 1, n)}
     tr = {"entangled": [], "classical": [], "it_dealer_online": []}
@@ -120,7 +121,7 @@ def test_provisioner_compromise():
     cluster = list(range(n))
     grads = {c: torch.tensor(rng.normal(0, 0.1, D), dtype=torch.float32)
              for c in cluster}
-    self_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME)) for c in cluster}
+    self_seeds = {c: shamir_field_element(rng) for c in cluster}
     tr = {"it_dealer_courier": [], "entangled": []}
     for rd, drops in enumerate([set(), {2}]):
         for arm in tr:

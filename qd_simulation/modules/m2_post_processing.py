@@ -33,6 +33,7 @@ transcript recorder and removed in PA - this is what supports the
 harvest-now-decrypt-later immunity claim. There is NO eavesdropper term:
 secrecy is claimed against observers of the public transcript only.
 """
+import math
 import numpy as np
 from dataclasses import dataclass
 from scipy.sparse import csr_matrix
@@ -371,7 +372,8 @@ def tier_frame_error_rate(qber, code_rate=0.84, block_size=50000,
 def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
                            security_margin=128, block_size=50000,
                            bell_duty_cycle=0.02, frame_error_rate=None,
-                           tagged_fraction=None, assume_rate_adapted=False):
+                           tagged_fraction=None, assume_rate_adapted=False,
+                           eps_auth=1e-15):
     """Compute the complete rate waterfall from raw to final secure rate.
 
     frame_error_rate=None (default) derives the FER from the declared
@@ -425,7 +427,18 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     after_ec = raw_rate * (1 - syndrome_fraction)
     after_pa = raw_rate * secure_fraction_per_block
     after_verification = after_pa * (1 - frame_error_rate)
-    after_bell = after_verification * (1 - bell_duty_cycle)
+    # Authentication. The classical channel has to be authenticated or
+    # the protocol is open to a man in the middle, and a Wegman-Carter
+    # tag over a strongly-universal_2 family spends key: about
+    # 2*(log2 m + log2(1/eps_auth)) bits per authenticated block. At the
+    # declared block size that is a few hundred bits - small, but two
+    # orders of magnitude above the GLLP tagged fraction this waterfall
+    # already charges, so omitting it is not a rounding decision.
+    auth_bits_per_block = 2.0 * (math.log2(max(block_size, 2))
+                                 + math.log2(1.0 / eps_auth))
+    auth_fraction = min(1.0, auth_bits_per_block / max(block_size, 1))
+    after_auth = after_verification * (1 - auth_fraction)
+    after_bell = after_auth * (1 - bell_duty_cycle)
 
     pa_overhead_pct = pa_compression_fraction * 100  # GLLP tagged-fraction removal
 
@@ -442,6 +455,9 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
         "assume_rate_adapted": assume_rate_adapted,
         "after_verification": after_verification,
         "verification_overhead_pct": frame_error_rate * 100,
+        "after_auth": after_auth,
+        "auth_overhead_pct": auth_fraction * 100,
+        "auth_bits_per_block": auth_bits_per_block,
         "final_secure_rate": after_bell,
         "bell_overhead_pct": bell_duty_cycle * 100,
         "total_overhead_pct": (1 - after_bell / raw_rate) * 100 if raw_rate > 0 else 100,
@@ -451,6 +467,7 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
 def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
                                code_rate=0.84, security_margin=128,
                                block_size=50000, bell_duty_cycle=0.02,
+                               eps_auth=1e-15,
                                frame_error_rate=None,
                                assume_rate_adapted=False):
     """Shor-Preskill asymptotic key fraction under entanglement-based QKD
@@ -523,7 +540,18 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
     after_ec = after_sifting * (1 - syndrome_fraction)
     after_pa = after_sifting * secure_fraction_per_block
     after_verification = after_pa * (1 - frame_error_rate)
-    after_bell = after_verification * (1 - bell_duty_cycle)
+    # Authentication. The classical channel has to be authenticated or
+    # the protocol is open to a man in the middle, and a Wegman-Carter
+    # tag over a strongly-universal_2 family spends key: about
+    # 2*(log2 m + log2(1/eps_auth)) bits per authenticated block. At the
+    # declared block size that is a few hundred bits - small, but two
+    # orders of magnitude above the GLLP tagged fraction this waterfall
+    # already charges, so omitting it is not a rounding decision.
+    auth_bits_per_block = 2.0 * (math.log2(max(block_size, 2))
+                                 + math.log2(1.0 / eps_auth))
+    auth_fraction = min(1.0, auth_bits_per_block / max(block_size, 1))
+    after_auth = after_verification * (1 - auth_fraction)
+    after_bell = after_auth * (1 - bell_duty_cycle)
 
     return {
         "raw_coincidence_rate": raw_rate,
@@ -540,6 +568,9 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
         "assume_rate_adapted": assume_rate_adapted,
         "after_verification": after_verification,
         "verification_overhead_pct": frame_error_rate * 100,
+        "after_auth": after_auth,
+        "auth_overhead_pct": auth_fraction * 100,
+        "auth_bits_per_block": auth_bits_per_block,
         "final_secure_rate": after_bell,
         "bell_overhead_pct": bell_duty_cycle * 100,
         "total_overhead_pct": (1 - after_bell / raw_rate) * 100 if raw_rate > 0 else 100,

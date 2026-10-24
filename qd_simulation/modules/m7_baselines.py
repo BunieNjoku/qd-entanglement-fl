@@ -63,7 +63,7 @@ from typing import Dict, List, Set
 try:
     from modules.m4_federated_learning import (
         quantize_gradient, derive_modular_mask, apply_modular_mask,
-        shamir_split, shamir_reconstruct, _SHAMIR_PRIME,
+        shamir_split, shamir_reconstruct, _SHAMIR_PRIME, shamir_field_element,
         BYTES_PER_MASKED_WORD, BYTES_PER_SHAMIR_SHARE,
         BYTES_PER_SELFMASK_SEED,
     )
@@ -71,6 +71,7 @@ except ImportError:  # pragma: no cover
     from .m4_federated_learning import (
         quantize_gradient, derive_modular_mask, apply_modular_mask,
         shamir_split, shamir_reconstruct, _SHAMIR_PRIME,
+        shamir_field_element,
         BYTES_PER_MASKED_WORD, BYTES_PER_SHAMIR_SHARE,
         BYTES_PER_SELFMASK_SEED,
     )
@@ -127,7 +128,7 @@ def _common_setup(gradients, cluster, rng):
     n = len(cluster)
     n_params = gradients[cluster[0]].numel()
     quant = {c: quantize_gradient(gradients[c]) for c in cluster}
-    self_seeds = {c: int(rng.integers(0, _SHAMIR_PRIME)) for c in cluster}
+    self_seeds = {c: shamir_field_element(rng) for c in cluster}
     self_masks = {c: _prg(self_seeds[c], n_params) for c in cluster}
     # Self-mask seeds are Shamir-shared (threshold 2) in ALL arms - the
     # double-mask, charged identically so it does not bias the comparison.
@@ -222,7 +223,7 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
     # (symmetric), then PRG-expand. (We model DH agreement's RESULT - a
     # shared per-pair scalar - not the group operation; the comparison
     # axes depend on the recovery mechanism, not the DH group.)
-    dh_secret = {c: int(rng.integers(1, _SHAMIR_PRIME)) for c in cluster}
+    dh_secret = {c: max(1, shamir_field_element(rng)) for c in cluster}
     dh_shares = {c: shamir_split(dh_secret[c], n, 2,
                                  np.random.default_rng(dh_secret[c] + 7))
                  for c in cluster}
@@ -308,7 +309,7 @@ def run_flamingo(gradients, cluster, dropouts, round_idx, rng):
     longterm = {}
     for i, ci in enumerate(cluster):
         for cj in cluster[i + 1:]:
-            longterm[(ci, cj)] = int(rng.integers(1, _SHAMIR_PRIME))
+            longterm[(ci, cj)] = max(1, shamir_field_element(rng))
 
     def prf(rk, t):
         return (rk * 1103515245 + 12345 + t * 2654435761) % _SHAMIR_PRIME
