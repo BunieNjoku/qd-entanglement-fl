@@ -109,17 +109,20 @@ _OUTPUT_SUFFIX = ""
 # Captions carrying the context stripped from figure titles live in
 # results/figure_captions.md; prose replacing demoted figures lives in
 # results/replaced_by_text.md.
-# Paper tier (ICC target): four composite figures built by --paper from
-# the full-mode summary, plus exp5 as-is. The architecture figure (F1)
-# and the provenance/SOTA tables are manuscript material outside this
-# repo. Everything else is peripheral.
+# Paper tier (ICC target): five composite figures built by --paper from
+# the full-mode summary. The architecture figure and the
+# provenance/SOTA tables are manuscript material outside this repo.
+# Everything else is peripheral.
 MAIN_FIGURES = {
-    'paper_qber_envelope',
+    'paper_rate_budget',
     'paper_security',
-    'paper_finite_key',
     'paper_limits_levers',
     'paper_dropout',
-    'paper_fl_correctness',
+    # paper_fl_correctness is demoted to peripheral: its own caption
+    # marks it the demotion candidate, masking parity is a theorem whose
+    # panel draws three identical curves, and the hierarchy panel lost
+    # its depth story when aggregation stopped being depth-serial.
+    'paper_mesh_architecture',
 }
 
 
@@ -927,8 +930,9 @@ def run_experiment_3(quick=False):
     from modules.m4_federated_learning import topology_from_mesh
     n_place = 20
     edge_loads, cells_mean, cells_lo, cells_hi = [], [], [], []
+    rank_mean, rank_full = [], []
     for n in node_counts:
-        loads, cells = [], []
+        loads, cells, ranks = [], [], []
         for s in range(n_place):
             mesh = analyze_mesh(n, 1e5, op_rate, rng=np.random.default_rng(s))
             tri, tree = topology_from_mesh(mesh)
@@ -944,11 +948,26 @@ def run_experiment_3(quick=False):
                 load[e] = load.get(e, 0) + 1
             loads.append(max(load.values()))
             cells.append(mesh.n_triangles)
+            # Rank of the system the aggregator would hold if it saw the
+            # per-cell sums: rows are cells, columns clients, entry
+            # 1/membership. Rank equal to the client count means every
+            # individual update is solvable from the sums alone.
+            memb = {}
+            for t in tri:
+                for c in t:
+                    memb[c] = memb.get(c, 0) + 1
+            M = np.zeros((len(tri), n))
+            for ti, t in enumerate(tri):
+                for c in t:
+                    M[ti, c] = 1.0 / memb[c]
+            ranks.append(int(np.linalg.matrix_rank(M)))
         edge_loads.append((float(np.mean(loads)), int(np.min(loads)),
                            int(np.max(loads))))
         cells_mean.append(float(np.mean(cells)))
         cells_lo.append(int(np.min(cells)))
         cells_hi.append(int(np.max(cells)))
+        rank_mean.append(float(np.mean(ranks)))
+        rank_full.append(float(np.mean([r == n for r in ranks])))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
     ax1.errorbar(node_counts, [e[0] for e in edge_loads],
@@ -1016,6 +1035,11 @@ def run_experiment_3(quick=False):
     print("  Experiment 3 complete.")
     return {"edge_loads": edge_loads,
             "cells_mean": cells_mean,
+            "cells_lo": cells_lo,
+            "cells_hi": cells_hi,
+            "leak_rank_mean": rank_mean,
+            "leak_rank_full_fraction": rank_full,
+            "n_placements": n_place,
             "node_counts": list(node_counts),
             "heatmap_anchored": heatmaps[0].tolist()}
 
@@ -1533,7 +1557,13 @@ def run_experiment_5(quick=False):
           "\n    end to end in exp4.")
 
     print("  Experiment 5 complete.")
-    return {"dropout_results": {f"{int(dr*100)}%": {
+    return {
+        # Where the sweep's mask bits came from. Masks cancel exactly, so
+        # no quantity below depends on this, but a figure captioned as
+        # entangled-key should be able to check.
+        "mask_pool_source": sorted(aux_any_key_source),
+        "n_seeds": num_seeds,
+        "dropout_results": {f"{int(dr*100)}%": {
         "final_acc_mean": float(stats[dr]["acc"][0]),
         "final_acc_std": float(stats[dr]["acc"][1]),
         "final_acc_ci95": float(stats[dr]["acc"][2]),
@@ -1777,10 +1807,13 @@ def run_experiment_11(quick=False):
         "aggregate leakage should sit between unmasked and masked"
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-    order = ["unmasked", "aggregate", "masked"]
-    labels = ["unmasked\ngradient", "plaintext\naggregate",
-              "modular-masked\npayload"]
-    cols = [C['unmasked'], C['dp'], C['quantum']]
+    # The FedAvg delta is what a client actually sends; without it the
+    # unmasked bar reads as this system's exposure rather than as DLG's
+    # best case on a single-sample gradient of an untrained model.
+    order = ["unmasked", "fedavg_update", "aggregate", "masked"]
+    labels = ["unmasked\ngradient", "FedAvg delta\n(what is sent)",
+              "plaintext\naggregate", "modular-masked\npayload"]
+    cols = [C['unmasked'], C['pareto'], C['dp'], C['quantum']]
     ax1.bar(labels, [summary[t]["mse_mean"] for t in order],
             yerr=[summary[t]["mse_std"] for t in order], capsize=4,
             color=cols)
@@ -1809,7 +1842,6 @@ def run_experiment_11(quick=False):
     print("  Experiment 11 complete.")
     return {"targets": summary, "prior_mse": prior_mse,
             "n_targets": n_targets, "n_iters": n_iters}
-
 
 
 # EXPERIMENT 6: RATE-CONSTRAINED THROUGHPUT
@@ -4068,9 +4100,26 @@ def run_experiment_14(quick=False):
             "fixed_eve_acc": c_res['fixed-basis']['acc_mean'],
             "bbm92_e_x": c_res['bbm92']['err_mean'],
             "bbm92_abort_prob": c_res['bbm92']['abort_prob'],
+            "bbm92_abort_ci95": c_res['bbm92'].get('abort_ci95', []),
             "bbm92_acc_accepted": c_res['bbm92']['acc_accepted'],
             "analytic_f_star": f_star,
             "first_swept_abort_f": first_detected,
+        },
+        # Noise-attribution bracket on the abort decision. Both ends come
+        # from the same measured negativity: a Werner state and a
+        # dephased |phi+> reach it with the error distributed differently
+        # across the two bases, and BBM92 aborts on the X basis.
+        "noise_attribution": {
+            "two_n": float(_two_n),
+            "werner_e_x": float(_ex_w),
+            "werner_e_z": float(_ex_w),
+            "dephasing_e_x": float(_ex_d),
+            "dephasing_e_z": 0.0,
+            "x_error_ratio": float(_p_deph / _e_werner),
+            "q_tol": float(q_tol),
+            "n_test": int(_n_test),
+            "werner_abort_prob": float(_abort_prob(_ex_w, _n_test)),
+            "dephasing_abort_prob": float(_abort_prob(_ex_d, _n_test)),
         },
         "surcharge_convergence": d_stats,
         "surcharge_model": {
@@ -4116,14 +4165,16 @@ def make_paper_figures(summary):
     print("="*70)
     op = OPERATING_POINT
 
-    # Figure: secret-key supply and mask min-entropy vs QBER, with the
-    # supply converted to maskable model size. Panel (a): both
-    # framings' rates fall to zero at the declared code's capacity
-    # while the per-bit min-entropy varies little; the operating point
-    # sits 0.47 points under the BBM92 abort threshold. Panel (b): the
-    # same envelope as maskable model size at 60 s rounds.
-    print("  [A] Figure: QBER envelope (supply, entropy floor, model "
-          "size)...")
+    # Figure: what sets the key supply. Panel (a): both framings'
+    # rates fall to zero at the declared code's capacity while the
+    # per-bit min-entropy varies little; the operating point sits 0.47
+    # points under the BBM92 abort threshold. Panel (b): the same
+    # envelope as maskable model size at 60 s rounds. Panel (c): the
+    # finite-key surcharge against accumulated source time, executing
+    # seeds against the deterministic model. Panel (d): the interior
+    # basis-split optimum the asymptotic habit misses.
+    print("  [A] Figure: rate budget (supply, model size, finite-key "
+          "cliff, basis split)...")
     e7 = summary['exp7']
     q_all = np.array(e7['qbers'])
     # Both supplies are identically zero past the code capacity
@@ -4132,7 +4183,8 @@ def make_paper_figures(summary):
     # display stops just past capacity.
     m = q_all <= 0.031
     q = q_all[m]
-    fig, (ax, axp) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
+    fig, ((ax, axp), (ax1, ax2)) = plt.subplots(
+        2, 2, figsize=VIZ['figsize_grid'])
     ax.plot(q * 100, np.array(e7['shared_rates_bps'])[m] / 1e3, 'o-',
             color=C['quantum'], linewidth=1.8, markersize=4,
             label='trusted-conduit supply')
@@ -4157,7 +4209,7 @@ def make_paper_figures(summary):
     axb.set_ylim(0.985, 1.0005)
     ax.set_xlabel('QBER (%)')
     ax.set_ylabel('Secret rate (kbit/s)')
-    ax.set_title('Secret rate and mask min-entropy', fontsize=9)
+    ax.set_title('(a) Secret rate and mask min-entropy', fontsize=9)
     ax.legend(fontsize=5.5, loc='lower left')
     ax.grid(True, alpha=0.3)
 
@@ -4173,14 +4225,79 @@ def make_paper_figures(summary):
                 linewidth=1.2)
     axp.set_xlabel('QBER (%)')
     axp.set_ylabel('Max maskable model (K params, 60 s round)')
-    axp.set_title('Max maskable model size\n(150K and 1M models '
+    axp.set_title('(b) Max maskable model size\n(150K and 1M models '
                   'off scale)', fontsize=8)
     axp.legend(fontsize=6)
     axp.grid(True, alpha=0.3)
-    fig.suptitle('Key supply and mask entropy vs QBER', fontsize=10,
-                 fontweight='bold')
-    fig.tight_layout(w_pad=2.8)
-    save_fig(fig, 'paper_qber_envelope')
+
+    conv = summary['exp14']['surcharge_convergence']
+    model = summary['exp14']['surcharge_model']
+    pz = summary['exp14']['p_z_tradeoff']
+    pair_rate = QUANTUM['source_rep_rate_hz'] * QUANTUM['source_brightness']
+
+    ax1.plot(np.array(model['pairs']) / pair_rate, model['ratio'], '-',
+             color=C['dark'], linewidth=1.6,
+             label='deterministic finite-key model')
+    secs = [d['pairs'] / pair_rate for d in conv]
+    med = [d['median'] for d in conv]
+    ax1.errorbar(secs, med,
+                 yerr=[[m - d['min'] for m, d in zip(med, conv)],
+                       [d['max'] - m for m, d in zip(med, conv)]],
+                 fmt='s', color=C['pareto'], markersize=5, capsize=4,
+                 zorder=5, elinewidth=1.4,
+                 label=f"executing (median, range, "
+                       f"{conv[0]['n_seeds']} seeds)")
+    ax1.axhline(y=model['floor_ratio'], color=C['unmasked'],
+                linestyle='--', linewidth=1.4,
+                label=f"implemented-accounting floor "
+                      f"({model['floor_ratio']:.2f}x)")
+    ax1.axhline(y=model['asymptotic_ratio'], color=C['accent'],
+                linestyle=':', linewidth=1.2,
+                label=f"infinite-key accounting reference "
+                      f"({model['asymptotic_ratio']:.2f}x)")
+    z = conv[0]
+    if z.get('n_zero_cert', 0):
+        ax1.annotate(f"{z['n_zero_cert']}/{z['n_seeds']} seeds: zero key",
+                     xy=(secs[0], med[0]),
+                     xytext=(secs[0] * 0.16, med[0] * 0.3), fontsize=6,
+                     color=C['unmasked'],
+                     arrowprops=dict(arrowstyle='-', lw=0.7, color='gray'))
+    ax1.set_xscale('log')
+    ax1.set_yscale('log')
+    # Top headroom holds the legend clear of the first point's whisker.
+    ax1.set_ylim(1, 800)
+    ax1.set_xlabel('Accumulated source time (s)')
+    ax1.set_ylabel('Fixed-basis / BBM92 rate ratio')
+    ax1.set_title('(c) Certification cliff and convergence', fontsize=9)
+    ax1.legend(fontsize=6, loc='upper right')
+    ax1.grid(True, alpha=0.3, which='both')
+
+    ax2.plot(pz['p_z'], np.array(pz['asymptotic_model_bits']) / 1e3, ':',
+             color=C['dark'], linewidth=1.6, label='mu = 0 limit at q_tol')
+    ax2.errorbar(pz['p_z'], np.array(pz['secure_bits']) / 1e3,
+                 yerr=np.array(pz['secure_bits_std']) / 1e3, fmt='o-',
+                 color=C['pareto'], markersize=4,
+                 label='executing (TLGR finite-key)')
+    i_opt = int(np.argmax(pz['secure_bits']))
+    i_cfg = int(np.argmin(np.abs(np.array(pz['p_z']) - BBM92['p_z'])))
+    ax2.axvline(x=BBM92['p_z'], color=C['accent'], linestyle='--',
+                linewidth=1.2,
+                label=f"config p_z = {BBM92['p_z']} "
+                      f"({pz['secure_bits'][i_cfg]/1e3:.0f} kbit)")
+    ax2.plot(pz['p_z'][i_opt], pz['secure_bits'][i_opt] / 1e3, 'o',
+             color=C['dark'], markersize=6,
+             label=f"finite-key optimum (p_z = {pz['p_z'][i_opt]:.2f}, "
+                   f"{pz['secure_bits'][i_opt]/1e3:.0f} kbit)")
+    ax2.set_ylim(bottom=0)
+    ax2.set_xlabel('Z-basis probability p_z')
+    ax2.set_ylabel('Secure kbits per 40 s run')
+    ax2.set_title('(d) Basis-split optimum under finite key', fontsize=9)
+    ax2.legend(fontsize=6)
+    ax2.grid(True, alpha=0.3)
+    fig.suptitle('Key supply and finite-key cost at the anchored '
+                 'operating point', fontsize=10, fontweight='bold')
+    fig.tight_layout(w_pad=2.8, h_pad=2.0)
+    save_fig(fig, 'paper_rate_budget')
 
     # Figure: security comparison - retroactive adversaries across the
     # four provisioning arms; live tap across the two protocol
@@ -4238,9 +4355,33 @@ def make_paper_figures(summary):
     ax2b.plot(f_sw * 100, e14['bbm92_abort_prob'], '^--',
               color=C['pareto'], linewidth=1.2, markersize=4,
               label='BBM92 abort probability')
+    # Abort with no adversary at all. simulate_bbm92 carries a Werner
+    # state, which puts equal error in both bases; the same measured
+    # negativity is also reached by dephasing, which puts all of it in
+    # X - the basis BBM92 aborts on. Both points sit at f = 0, so the
+    # panel's detection claim is read against the arm's behaviour when
+    # there is nothing to detect.
+    # The x axis is logarithmic in the tapped fraction, so f = 0 has no
+    # position on it; the two no-adversary levels are drawn as reference
+    # lines instead.
+    _na = summary['exp14'].get('noise_attribution')
+    if _na:
+        # A colour not otherwise in this panel: quantum and unmasked
+        # already carry e_x and the abort threshold, and reusing either
+        # would make a no-adversary level read as one of them.
+        _na_col = '#7B4EA3'
+        ax2b.axhline(y=_na['werner_abort_prob'], color=_na_col,
+                     linestyle=(0, (6, 3)), linewidth=1.2,
+                     label=f"no adversary, Werner noise "
+                           f"({100*_na['werner_abort_prob']:.0f}%)")
+        ax2b.axhline(y=_na['dephasing_abort_prob'], color=_na_col,
+                     linestyle=(0, (1, 1.6)), linewidth=1.6,
+                     label=f"no adversary, dephasing "
+                           f"({100*_na['dephasing_abort_prob']:.0f}%)")
     ax2b.set_ylabel('Probability', fontsize=8)
     ax2b.set_ylim(-0.05, 1.05)
-    ax2b.legend(fontsize=6, loc='center right')
+    ax2b.legend(fontsize=5.5, loc='center right',
+                bbox_to_anchor=(1.0, 0.40))
     ax2.set_xlabel('Intercepted fraction f of fiber photons (%)')
     ax2.set_ylabel('Error rate (%)')
     ax2.set_xscale('symlog', linthresh=1.0)
@@ -4254,78 +4395,6 @@ def make_paper_figures(summary):
     fig.tight_layout(w_pad=2.8)
     save_fig(fig, 'paper_security')
 
-    # Figure: finite-key effects - certification cliff vs the
-    # deterministic model, and the interior basis-split optimum.
-    print("  [C] Figure: finite-key effects (cliff + basis optimum)...")
-    conv = summary['exp14']['surcharge_convergence']
-    model = summary['exp14']['surcharge_model']
-    pz = summary['exp14']['p_z_tradeoff']
-    pair_rate = QUANTUM['source_rep_rate_hz'] * QUANTUM['source_brightness']
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=VIZ['figsize_wide'])
-
-    ax1.plot(np.array(model['pairs']) / pair_rate, model['ratio'], '-',
-             color=C['dark'], linewidth=1.6,
-             label='deterministic finite-key model')
-    secs = [d['pairs'] / pair_rate for d in conv]
-    med = [d['median'] for d in conv]
-    ax1.errorbar(secs, med,
-                 yerr=[[m - d['min'] for m, d in zip(med, conv)],
-                       [d['max'] - m for m, d in zip(med, conv)]],
-                 fmt='s', color=C['pareto'], markersize=5, capsize=4,
-                 zorder=5, elinewidth=1.4,
-                 label=f"executing (median, range, "
-                       f"{conv[0]['n_seeds']} seeds)")
-    ax1.axhline(y=model['floor_ratio'], color=C['unmasked'],
-                linestyle='--', linewidth=1.4,
-                label=f"implemented-accounting floor "
-                      f"({model['floor_ratio']:.2f}x)")
-    ax1.axhline(y=model['asymptotic_ratio'], color=C['accent'],
-                linestyle=':', linewidth=1.2,
-                label=f"infinite-key accounting reference "
-                      f"({model['asymptotic_ratio']:.2f}x)")
-    z = conv[0]
-    if z.get('n_zero_cert', 0):
-        ax1.annotate(f"{z['n_zero_cert']}/{z['n_seeds']} seeds: zero key",
-                     xy=(secs[0], med[0]),
-                     xytext=(secs[0] * 0.16, med[0] * 0.3), fontsize=6,
-                     color=C['unmasked'],
-                     arrowprops=dict(arrowstyle='-', lw=0.7, color='gray'))
-    ax1.set_xscale('log')
-    ax1.set_yscale('log')
-    # Top headroom holds the legend clear of the first point's whisker.
-    ax1.set_ylim(1, 800)
-    ax1.set_xlabel('Accumulated source time (s)')
-    ax1.set_ylabel('Fixed-basis / BBM92 rate ratio')
-    ax1.set_title('Certification cliff and convergence', fontsize=9)
-    ax1.legend(fontsize=6, loc='upper right')
-    ax1.grid(True, alpha=0.3, which='both')
-
-    ax2.plot(pz['p_z'], np.array(pz['asymptotic_model_bits']) / 1e3, ':',
-             color=C['dark'], linewidth=1.6, label='mu = 0 limit at q_tol')
-    ax2.errorbar(pz['p_z'], np.array(pz['secure_bits']) / 1e3,
-                 yerr=np.array(pz['secure_bits_std']) / 1e3, fmt='o-',
-                 color=C['pareto'], markersize=4,
-                 label='executing (TLGR finite-key)')
-    i_opt = int(np.argmax(pz['secure_bits']))
-    i_cfg = int(np.argmin(np.abs(np.array(pz['p_z']) - BBM92['p_z'])))
-    ax2.axvline(x=BBM92['p_z'], color=C['accent'], linestyle='--',
-                linewidth=1.2,
-                label=f"config p_z = {BBM92['p_z']} "
-                      f"({pz['secure_bits'][i_cfg]/1e3:.0f} kbit)")
-    ax2.plot(pz['p_z'][i_opt], pz['secure_bits'][i_opt] / 1e3, 'o',
-             color=C['dark'], markersize=6,
-             label=f"finite-key optimum (p_z = {pz['p_z'][i_opt]:.2f}, "
-                   f"{pz['secure_bits'][i_opt]/1e3:.0f} kbit)")
-    ax2.set_ylim(bottom=0)
-    ax2.set_xlabel('Z-basis probability p_z')
-    ax2.set_ylabel('Secure kbits per 40 s run')
-    ax2.set_title('Basis-split optimum under finite key', fontsize=9)
-    ax2.legend(fontsize=6)
-    ax2.grid(True, alpha=0.3)
-    fig.suptitle('Finite-key effects at the anchored operating point',
-                 fontsize=10, fontweight='bold')
-    fig.tight_layout(w_pad=2.8)
-    save_fig(fig, 'paper_finite_key')
 
     # Figure: rate limits and levers - window choices vs the
     # time-resolved operating point; today's hardware vs the roadmap.
@@ -4488,10 +4557,21 @@ def make_paper_figures(summary):
     for k, col in zip(scales8, (C['quantum'], C['pareto'], C['accent'],
                                 C['dark'])):
         curve = e8[k]['acc_curve']
+        # The curve is the median placement; the label carries the mesh
+        # ranges, because the cell count and depth are properties of the
+        # draw rather than of the client count.
+        _tr = e8[k].get('tree_depth_range')
+        _cr = e8[k].get('n_triangles_range')
+        _mean = e8[k].get('acc_mean', e8[k]['accuracy'])
+        _std = e8[k].get('acc_std', 0.0)
+        _depth = (f"depth {_tr[0]}-{_tr[1]}" if _tr and _tr[0] != _tr[1]
+                  else f"depth {e8[k]['tree_depth']}")
+        _cells = (f"{_cr[0]}-{_cr[1]} cells" if _cr and _cr[0] != _cr[1]
+                  else f"{e8[k]['n_triangles']} cells")
         ax2.plot(np.arange(1, len(curve) + 1), curve, '-', color=col,
                  linewidth=1.6,
-                 label=f"{k} clients (depth {e8[k]['tree_depth']}, "
-                       f"final {e8[k]['accuracy']:.3f})")
+                 label=f"{k} clients ({_cells}, {_depth}, "
+                       f"final {_mean:.3f} +- {_std:.3f})")
     ax2.set_xlabel('Training round')
     ax2.set_ylabel('Test accuracy')
     ax2.set_title('Two-level hierarchy across mesh scales', fontsize=8)
@@ -4501,6 +4581,76 @@ def make_paper_figures(summary):
                  fontsize=10, fontweight='bold')
     fig.tight_layout(w_pad=2.5)
     save_fig(fig, 'paper_fl_correctness')
+
+    # Figure: the mesh architecture - what the aggregator sees, and what
+    # the mesh costs a single fibre link.
+    #
+    # Replaces the FL-correctness figure in the paper set. Masking
+    # exactness is a theorem and its panel drew three curves on top of
+    # each other; convergence across scales stopped carrying the depth
+    # story once aggregation ceased to be depth-serial. These two
+    # results are the ones the construction turns on.
+    e3 = summary.get('exp3')
+    if e3 and 'leak_rank_mean' in e3:
+        print("  [Mesh] Figure: mesh architecture (per-edge load, "
+              "aggregator view)...")
+        nodes3 = e3['node_counts']
+        loads3 = e3['edge_loads']
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.16, 3.0))
+
+        ax1.errorbar(nodes3, [l[0] for l in loads3],
+                     yerr=[[l[0] - l[1] for l in loads3],
+                           [l[2] - l[0] for l in loads3]],
+                     fmt='o-', color=C['quantum'], markersize=5,
+                     capsize=4, linewidth=1.8,
+                     label=f"measured ({e3['n_placements']} placements)")
+        ax1.axhline(y=MAX_MASKS_PER_EDGE_PER_ROUND, color=C['accent'],
+                    linestyle='--', linewidth=1.4,
+                    label='bound: 2 cells per edge + 1 inter-cell mask')
+        ax1.set_xlabel('Clients')
+        ax1.set_ylabel('Masks per round, busiest edge')
+        ax1.set_title('Per-edge key demand does not grow with the mesh',
+                      fontsize=8)
+        ax1.set_ylim(0, MAX_MASKS_PER_EDGE_PER_ROUND + 1.3)
+        ax1.legend(fontsize=6, loc='lower right')
+        ax1.grid(True, alpha=0.3)
+
+        ax2.plot(nodes3, e3['cells_mean'], 's--', color=C['unmasked'],
+                 markersize=4, linewidth=1.5,
+                 label='cell sums exposed by per-cell unmasking')
+        ax2.plot(nodes3, [1] * len(nodes3), 'o-', color=C['quantum'],
+                 markersize=5, linewidth=2,
+                 label='values the aggregator observes (this work)')
+        ax2.set_xlabel('Clients')
+        ax2.set_ylabel('Values visible to the aggregator')
+        ax2.set_yscale('log')
+        ax2.set_title('Masking through to the total', fontsize=8)
+        ax2.grid(True, alpha=0.3, which='both')
+        ax2b = ax2.twinx()
+        ax2b.plot(nodes3, [100 * f for f in e3['leak_rank_full_fraction']],
+                  '^:', color=C['pareto'], markersize=4, linewidth=1.3,
+                  label='placements where every update is solvable')
+        ax2b.set_ylabel('Placements fully solvable (%)', fontsize=8,
+                        color=C['pareto'])
+        ax2b.set_ylim(-5, 105)
+        _h1, _l1 = ax2.get_legend_handles_labels()
+        _h2, _l2 = ax2b.get_legend_handles_labels()
+        # The data climbs left to right, so the clear pocket is the band
+        # above the flat line and below the rising curves on the right.
+        ax2.legend(_h1 + _h2, _l1 + _l2, fontsize=5.5,
+                   loc='lower right', bbox_to_anchor=(1.0, 0.08))
+        fig.suptitle('Mesh architecture: per-edge cost and aggregator view',
+                     fontsize=10, fontweight='bold')
+        fig.tight_layout(w_pad=2.6)
+        save_fig(fig, 'paper_mesh_architecture')
+        _ff = e3['leak_rank_full_fraction']
+        print(f"      busiest edge carries "
+              f"{min(l[1] for l in loads3)}-{max(l[2] for l in loads3)} "
+              f"masks/round across {min(nodes3)}-{max(nodes3)} clients; "
+              f"per-cell unmasking would expose "
+              f"{e3['cells_mean'][0]:.0f}-{e3['cells_mean'][-1]:.0f} sums, "
+              f"fully solvable in {100*_ff[-1]:.0f}% of placements at "
+              f"{nodes3[-1]} clients")
 
     # Table and prose material (no plots: each is carried losslessly by
     # a sentence or table row).
@@ -4543,8 +4693,8 @@ def make_paper_figures(summary):
     r13 = summary['exp13']['rate_ratios']
     print("      framing ratios (prose): "
           + ", ".join(f"{k} {v:.2f}x" for k, v in r13.items()))
-    print("  Paper pass complete: 6 result figures + architecture "
-          "drawing + provenance and cost/trust tables.")
+    print(f"  Paper pass complete: {len(MAIN_FIGURES)} result figures + "
+          "architecture drawing + provenance and cost/trust tables.")
 
 
 # EXPERIMENT 15: ACCEPTANCE-WINDOW OPTIMIZATION

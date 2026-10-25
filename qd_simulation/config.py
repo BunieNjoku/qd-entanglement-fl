@@ -2,7 +2,8 @@
 Entanglement-Based Shared Randomness for FL - Configuration.
 
 Parameters anchored to published experimental data where possible.
-See system_description.md for source citations.
+Source citations are given inline at each block; the hardware anchors
+are listed in the Module 1 header below.
 """
 import os
 import numpy as np
@@ -14,11 +15,28 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 # MODULE 1: QUANTUM SOURCE PARAMETERS
 #
 # Anchor: the rack-based QD-CamNetz entangled photon pair source
-# (Zena et al., arXiv:2604.02024 - "Zena 2026"). Where the rack paper
-# does not report a quantity, sister-device measurements from the same
-# group and excitation protocol are used and marked as such:
-# Hopfmann et al., PRB 103, 075413 (2021) - "Hopfmann 2021" - and
-# Langer et al., APL Photonics 10, 066117 (2025) - "Langer 2025".
+# (Zena et al., "A Rack-Integrated and Modular GaAs Quantum Dot Source
+# of Highly Entangled Photon Pairs", Adv. Quantum Technol. 9(10), 2026,
+# doi 10.1002/qute.70510; preprint arXiv:2604.02024 carries an earlier
+# title - "Zena 2026"). Every measured value below comes from it.
+#
+# The same group's modular fiber-coupled source architecture, 780HP
+# fiber to monolithic microlenses on GaAs dots, is Zena et al.,
+# "A fiber-based fully modular entangled-photon source architecture
+# designed for scalable future quantum networks", Proc. SPIE 14143,
+# Photonics for Quantum 2026, 141430C, doi 10.1117/12.3108756 -
+# edited by Reimer, Rotenberg and LeBlanc - "Zena 2026 (SPIE)". It is
+# the architecture this configuration assumes; it supplies none of the
+# numbers below, and its reported quantities are not comparable term by
+# term (it quotes a peak entanglement FIDELITY of 97.0(3)% in an 8 ps
+# window and a detected rate of 2.13(3) MHz over four SNSPD channels,
+# against the rack paper's negativity and single-arm rates).
+#
+# Where the rack paper does not report a quantity, sister-device
+# measurements from the same group and excitation protocol are used and
+# marked as such: Hopfmann et al., PRB 103, 075413 (2021) -
+# "Hopfmann 2021" - and Langer et al., APL Photonics 10, 066117 (2025)
+# - "Langer 2025".
 # Source and detection parameters are measured; the two-node fiber link
 # and everything downstream remain modeled.
 
@@ -351,6 +369,7 @@ VIZ = {
     # Use double-column width for most plots; single for compact ones
     "figsize": (7.16, 4.5),            # Double-column default
     "figsize_wide": (7.16, 3.5),       # Double-column, shorter (side-by-side subplots)
+    "figsize_grid": (7.16, 6.6),       # Double-column, two rows of subplots
     "figsize_single": (3.5, 3.0),      # Single-column
     "dpi": 300,                         # Publication quality
     "colors": {

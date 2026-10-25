@@ -188,7 +188,7 @@ def apply_modular_mask(quant_grad, mask, sign=+1):
 
 # SHAMIR SECRET SHARING (for self-mask recovery)
 #
-# (t, n) threshold sharing over GF(2^31 - 1) (Mersenne prime). Used to
+# (t, n) threshold sharing over GF(2^127 - 1) (Mersenne prime). Used to
 # protect each client's self-mask seed so survivors can reconstruct it
 # if the client drops; honest-but-curious aggregator with < t shares
 # learns nothing about the secret.
@@ -1397,7 +1397,23 @@ def run_multitriangle_fl(
         _chi2_distinguishable; indistinguishability is a theorem)
     """
     if triangles is None or tree_edges is None:
-        triangles, _, tree_edges = define_triangle_topology(num_clients)
+        # Generate the mesh rather than fall back to a hand-written
+        # table. The tables encode topologies the Delaunay construction
+        # does not produce - one joins two cells at a single vertex -
+        # so a silent fallback would reintroduce them in any caller that
+        # forgets to pass a topology.
+        try:
+            from modules.m3_mesh_topology import analyze_mesh
+            from config import OPERATING_POINT
+        except ImportError:
+            from .m3_mesh_topology import analyze_mesh
+            from ..config import OPERATING_POINT
+        _m = analyze_mesh(num_clients, 1e5,
+                          OPERATING_POINT['secret_rate_bps'],
+                          rng=np.random.default_rng(seed))
+        triangles, tree_edges = topology_from_mesh(_m)
+        if edge_secret_rates is None:
+            edge_secret_rates = _m.edge_secret_rates
     num_triangles = len(triangles)
     # All pairwise links that physically exist (triangle sides) - the only
     # pairs with distillation hardware and hence key pools. Used to keep
