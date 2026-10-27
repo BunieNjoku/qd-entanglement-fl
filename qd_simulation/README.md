@@ -122,6 +122,28 @@ Results land in `results/`:
   (`--exp N`) merge into the existing summary rather than replacing
   it.
 
+## Tests
+
+Plain-python asserts, no test framework; each file runs standalone:
+
+```bash
+python tests/test_noise_models.py
+```
+
+- `test_anchored_source.py` - anchored source parameters and the FSS
+  precession window model (m1)
+- `test_noise_models.py` - exp1a noise models (m1) and the
+  finite-blocklength FER model (m2)
+- `test_qkd_waterfall.py` - exp13 QKD-framed rate waterfall (m2)
+- `test_bbm92.py` - exp14 executing BBM92 arm (m1, m2)
+- `test_cell_sum_privacy.py` - inter-cell masking in
+  run_multitriangle_fl (m4)
+- `test_tree_mask_keying.py` - inter-triangle tree-mask key
+  assignment (m4)
+- `test_mesh_edge_load.py` - per-edge load bounds of the mesh
+  scaling model (m3, m4)
+- `test_it_dealer.py` - IT-dealer baseline arm (m7, m6)
+
 ## Hardware Requirements
 
 CPU, 16 GB RAM, ~2 GB disk. No GPU required.
