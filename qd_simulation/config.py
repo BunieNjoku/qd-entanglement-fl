@@ -137,9 +137,9 @@ QUANTUM = {
     "analytic_qber_birefringence_allowance": 0.0,
     "fiber_birefringence_rad_per_km_per_C": 0.01,  # Compensated SMF (pol. controller)
     "temperature_variation_C": 2.0,  # lab climate 18(2) C (Zena 2026)
-    # CHSH measurement angles (radians) - optimal for |Φ+⟩
-    "chsh_angles_alice": [0, np.pi/4],           # 0°, 45°
-    "chsh_angles_bob": [np.pi/8, 3*np.pi/8],     # 22.5°, 67.5°
+    # CHSH measurement angles (radians) - optimal for |Phi+>
+    "chsh_angles_alice": [0, np.pi/4],           # 0 deg, 45 deg
+    "chsh_angles_bob": [np.pi/8, 3*np.pi/8],     # 22.5 deg, 67.5 deg
 }
 
 # MODULE 2: POST-PROCESSING PARAMETERS
@@ -163,7 +163,7 @@ POST_PROC = {
     # FPGA latency estimation (Assumption C)
     "fpga_ldpc_throughput_mbps": 100,     # Conservative estimate
     "fpga_toeplitz_clock_mhz": 300,
-    "fpga_latency_safety_factor": 2.0,    # 2× margin
+    "fpga_latency_safety_factor": 2.0,    # 2x margin
     # Conduit-mode entanglement-witness duty cycle, derived from measured
     # quantities instead of asserted: one 4-setting CHSH check at the
     # rack system's 60 s/setting tomography integration (Zena 2026,
@@ -179,7 +179,7 @@ POST_PROC = {
 
 # QKD-FRAMED COMPARISON ARM (exp13)
 # Same physics as OPERATING_POINT; only the post-processing framing
-# differs. Comparison-only - never feeds headline numbers.
+# differs. Comparison-only - never feeds the reported rate budget.
 QKD_FRAMING = {
     # Basis keep-fractions p^2 + (1-p)^2 for BBM92-class sifting
     # (Lo, Chau & Ardehali, J. Cryptology 2005).
@@ -339,7 +339,7 @@ OPERATING_POINT = _derive_operating_point()
 # MODULE 3: MESH TOPOLOGY PARAMETERS
 MESH = {
     "node_counts_sweep": [3, 6, 9, 12, 18, 24, 30, 40, 50],
-    "campus_size_m": 2000,          # 2km × 2km campus
+    "campus_size_m": 2000,          # 2km x 2km campus
 }
 
 # MODULE 4: FEDERATED LEARNING PARAMETERS
@@ -350,7 +350,7 @@ FL = {
     "local_epochs": 2,              # Local training epochs per round
     "local_batch_size": 32,
     "learning_rate": 0.01,
-    "num_repeats": 10,              # For statistical significance (mean ± std with CI)
+    "num_repeats": 10,              # For statistical significance (mean +- std with CI)
     # Model sizes (parameter counts) for throughput sweep
     "model_sizes_sweep": [5e4, 1e5, 2e5, 5e5, 1e6, 2e6, 5e6],
     "dirichlet_alpha": 0.5,         # Non-IID Dirichlet allocation (lower = more heterogeneous)
@@ -369,7 +369,7 @@ VIZ = {
     # Use double-column width for most plots; single for compact ones
     "figsize": (7.16, 4.5),            # Double-column default
     "figsize_wide": (7.16, 3.5),       # Double-column, shorter (side-by-side subplots)
-    "figsize_grid": (7.16, 6.6),       # Double-column, two rows of subplots
+    "figsize_grid": (7.16, 5.2),        # Double-column, one row of three subplots
     "figsize_single": (3.5, 3.0),      # Single-column
     "dpi": 300,                         # Publication quality
     "colors": {

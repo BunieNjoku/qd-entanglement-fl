@@ -34,6 +34,15 @@ computer breaking DH / channel encryption / PRFs after the fact):
       100%. IT-secure MASKING with computationally-secured PROVISIONING
       is still HNDL-exposed - the hole moves one layer down.
 
+  pqc arm - pairwise masks PRG-expanded from seeds agreed under a
+      lattice KEM (ML-KEM / FIPS 203) instead of Diffie-Hellman. The
+      transcript is byte-identical in shape to the classical arm; the
+      difference is that a quantum recorder does not derive the seeds.
+      Its zero is contingent on lattice hardness, where the entangled
+      arm's zero holds against an adversary that breaks every
+      computational assumption. Included so the comparison against the
+      answer a deployer would actually reach for is on the figure.
+
   it_dealer_courier arm - the same dealer pads delivered out of band
       (courier / HSM install). No pad ever crosses a recorded channel,
       so the transcript is byte-identical in shape to the entangled
@@ -57,8 +66,8 @@ computationally protected - god-mode strips every self-mask in this
 experiment. The pairwise leg ALONE carries the HNDL claim. EC syndromes
 (~0.20 bits/secret bit) also appear in the recorded transcript; the
 masks are sliced from post-PA output, which the Leftover Hash Lemma
-makes ε-close to uniform GIVEN the syndrome leakage - recorded
-syndromes do not help the adversary beyond the ε accounted in PA.
+makes eps-close to uniform GIVEN the syndrome leakage - recorded
+syndromes do not help the adversary beyond the eps accounted in PA.
 
 Every wire object here is produced by the SAME primitives as the live
 protocol (quantize_gradient, derive_modular_mask, apply_modular_mask,
@@ -228,7 +237,8 @@ def run_transcript_round(round_idx, gradients, cluster, dropouts, arm,
         disclosed_seeds={c: int(self_seeds[c]) % _SHAMIR_PRIME
                          for c in survivors},
         revealed_pair_bits=revealed,
-        pair_mask_seeds=dict(pair_mask_seeds) if arm == "classical" else None,
+        pair_mask_seeds=(dict(pair_mask_seeds)
+                         if arm in ("classical", "pqc") else None),
         # The dealer's per-round pad distribution is ON THE WIRE (under
         # computational encryption) - the recorder keeps the ciphertexts.
         dealer_pad_bits=(dict(pair_bits) if arm == "it_dealer_online"
@@ -291,6 +301,14 @@ def retroactive_attack(transcript: List[TranscriptRound], arm,
                 mask = None
                 if arm == "classical":
                     mask = _prg_mask(tr.pair_mask_seeds[(lo, hi)], n_params)
+                elif arm == "pqc":
+                    # Seeds are in the transcript as KEM ciphertexts and
+                    # stay closed: Shor breaks the discrete log the
+                    # classical arm rests on, not the lattice problem.
+                    # Self-mask seeds still fall, as in every arm, which
+                    # is why one surviving pairwise mask is what carries
+                    # the zero here.
+                    mask = None
                 elif arm == "it_dealer_online":
                     # God-mode decrypts the recorded pad ciphertexts:
                     # every pairwise pad is in the transcript.

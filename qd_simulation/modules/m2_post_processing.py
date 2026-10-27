@@ -16,12 +16,12 @@ epsilon-close to uniform if input min-entropy exceeds output length +
 2*log(1/epsilon).
 
 Shared-bit rate:
-  R_shared = R_raw × [1 - max(beta*H(q), 1-R_code) - D_tag - margin/N]
-                   × (1 - FER) × (1 - bell_duty),
+  R_shared = R_raw x [1 - max(beta*H(q), 1-R_code) - D_tag - margin/N]
+                   x (1 - FER) x (1 - bell_duty),
 where the reconciliation leakage is the LARGER of the declared fixed code's
 syndrome fraction (1 - R_code: a rate-0.84 LDPC leaks 16% of every block
 regardless of QBER - which is what fast_ec_simulate actually charges) and
-the rate-adaptive envelope beta*H(q) with beta ≈ 1.15 (the leakage of an
+the rate-adaptive envelope beta*H(q) with beta ~ 1.15 (the leakage of an
 efficiency-beta code family tuned to q, needed once q exceeds the fixed
 code's design point). The crossover sits at the code's design QBER (~2%
 for rate 0.84). This never claims less leakage than the implemented code
@@ -83,7 +83,7 @@ def generate_ldpc_parity_check(n_bits, code_rate, rng=None):
         rng: Random generator
     
     Returns:
-        H: Sparse parity check matrix (m × n)
+        H: Sparse parity check matrix (m x n)
     """
     if rng is None:
         rng = np.random.default_rng(0)
@@ -110,7 +110,7 @@ def bp_decode(H, syndrome, channel_llr, max_iter=50):
     """Belief propagation decoder for binary LDPC over BSC.
     
     Args:
-        H: Sparse parity check matrix (m × n)
+        H: Sparse parity check matrix (m x n)
         syndrome: Target syndrome vector (m,)
         channel_llr: Channel log-likelihood ratios (n,)
         max_iter: Maximum BP iterations
@@ -330,11 +330,9 @@ def tier_frame_error_rate(qber, code_rate=0.84, block_size=50000,
 
     with n the block length and V the conditional-entropy variance
     (the Slepian-Wolf dispersion for a BSC-correlated source). This
-    replaces the hardcoded 0.5/10/90% tiers this function previously
-    asserted. The function name is kept: it remains the SINGLE source
-    of FER for fast_ec_simulate, both rate waterfalls, bbm92_distill,
-    and the BP validator, so rate budgets can never disagree with the
-    block-level EC model.
+    function is the SINGLE source of FER for fast_ec_simulate, both
+    rate waterfalls, bbm92_distill, and the BP validator, so rate
+    budgets can never disagree with the block-level EC model.
 
     SENSITIVITY (stated because it is decisive at 2% QBER): with
     beta_dec = 1.10 the effective design QBER of the rate-0.84 code is
@@ -381,8 +379,9 @@ def compute_rate_waterfall(coincidence_rate_hz, qber, code_rate=0.84,
     waterfall consistent with the block-level EC model at every QBER.
 
     assume_rate_adapted=True computes the HYPOTHETICAL rate-adapted-family
-    envelope instead: leakage β·h(q) and design-band FER 0.005 - for
-    explicitly-labeled comparison curves only, never for headline numbers
+    envelope instead: leakage beta*h(q) and design-band FER 0.005 - for
+    explicitly-labeled comparison curves only, never for the reported
+    rate budget
     (the repo implements one fixed rate-0.84 code).
 
     Returns dict with each stage's rate and overhead.
@@ -469,7 +468,8 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
                                block_size=50000, bell_duty_cycle=0.02,
                                eps_auth=1e-15,
                                frame_error_rate=None,
-                               assume_rate_adapted=False):
+                               assume_rate_adapted=False,
+                               phase_error=None):
     """Shor-Preskill asymptotic key fraction under entanglement-based QKD
     framing of the SAME physical layer the source-model waterfall consumes:
 
@@ -477,7 +477,10 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
 
     then the shared FER-model and duty post-factors. e_ph = e_bit, the
     standard symmetric-channel assumption (exp13 prints the caveat about
-    m1's noise model not being purely depolarizing).
+    m1's noise model not being purely depolarizing). phase_error, when
+    given, prices privacy amplification separately while reconciliation
+    stays on qber: under dephasing the key basis sits at the extinction
+    floor and all of the decoherence lands in the X basis.
 
     NO tagged-fraction charge, deliberately: tagging is the
     prepare-and-measure treatment of multi-photon pulses (GLLP 2004). For
@@ -501,7 +504,8 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
     source arm with a fixed-code QKD arm would inflate the ratio below
     the ~2% crossover.
 
-    Comparison-only; never feeds headline numbers. Returns the same dict
+    Comparison-only; never feeds the reported rate budget. Returns the
+    same dict
     shape as compute_rate_waterfall with 'tagged_fraction' fixed at 0.0,
     plus 'eve_bound_fraction' and 'sifting_keep'.
     
@@ -532,7 +536,8 @@ def compute_rate_waterfall_qkd(coincidence_rate_hz, qber, sifting_keep,
             frame_error_rate = tier_frame_error_rate(qber, code_rate,
                                                      block_size=block_size)
 
-    eve_bound_fraction = h_q  # e_ph = e_bit
+    eve_bound_fraction = (h_q if phase_error is None
+                          else binary_entropy(phase_error))
     secure_fraction_per_block = max(0, 1 - eve_bound_fraction
                                     - syndrome_fraction
                                     - security_margin / block_size)
@@ -715,7 +720,7 @@ def bbm92_distill(key_bits_alice, key_bits_bob, e_x_observed, n_test,
 def toeplitz_hash(bits, output_length, seed=None, rng=None):
     """Privacy amplification via Toeplitz matrix-vector multiplication.
 
-    A Toeplitz matrix T of size (m × n) is defined by (n + m - 1) independent
+    A Toeplitz matrix T of size (m x n) is defined by (n + m - 1) independent
     random bits: the first row (length n) and the remaining (m-1) entries of
     the first column. Row i is: [col[i], row[0], row[1], ..., row[n-2]]
     shifted appropriately.
@@ -741,7 +746,7 @@ def toeplitz_hash(bits, output_length, seed=None, rng=None):
     #               first col = toeplitz_seed[m-1 : :-1] (reversed prefix)
 
     # y_i = sum_j seed[(m-1-i)+j] * x_j mod 2 is a correlation - compute
-    # it with one FFT convolution instead of an O(m·n) Python loop (the
+    # it with one FFT convolution instead of an O(m*n) Python loop (the
     # SP 800-22 battery hashes ~4e5-bit inputs, ). Integer
     # counts are exact in float64 up to 2^53; verified bit-identical to
     # the direct row-by-row product for the same toeplitz_seed.
@@ -775,13 +780,13 @@ def validate_pa_output(secure_bits, n_samples=5):
 # NIST SP 800-22 SUBSET BATTERY
 #
 # The load-bearing quantum-layer property is that PA output is close to
-# uniform. This battery implements the SP 800-22 subset the work order names
+# uniform. This battery implements an SP 800-22 subset
 # (monobit, block-frequency, runs, longest-run-of-ones, serial) plus an
 # autocorrelation test, each returning its standard p-value. Reference:
 # NIST SP 800-22 Rev. 1a (2010), sections 2.1-2.4, 2.11.
 
 def nist_monobit(bits):
-    """SP 800-22 §2.1 frequency (monobit) test. Returns p-value."""
+    """SP 800-22 Sec. 2.1 frequency (monobit) test. Returns p-value."""
     from scipy.special import erfc
     b = np.asarray(bits, dtype=np.int64)
     n = len(b)
@@ -790,7 +795,7 @@ def nist_monobit(bits):
 
 
 def nist_block_frequency(bits, M=128):
-    """SP 800-22 §2.2 block-frequency test with block size M."""
+    """SP 800-22 Sec. 2.2 block-frequency test with block size M."""
     from scipy.special import gammaincc
     b = np.asarray(bits, dtype=np.int64)
     N = len(b) // M
@@ -800,7 +805,7 @@ def nist_block_frequency(bits, M=128):
 
 
 def nist_runs(bits):
-    """SP 800-22 §2.3 runs test. Returns p-value (0.0 if the monobit
+    """SP 800-22 Sec. 2.3 runs test. Returns p-value (0.0 if the monobit
     prerequisite |pi - 1/2| >= 2/sqrt(n) fails, per the spec)."""
     from scipy.special import erfc
     b = np.asarray(bits, dtype=np.int64)
@@ -815,7 +820,7 @@ def nist_runs(bits):
 
 
 def nist_longest_run(bits):
-    """SP 800-22 §2.4 longest-run-of-ones test. Block size auto-selected
+    """SP 800-22 Sec. 2.4 longest-run-of-ones test. Block size auto-selected
     from n per the spec (M = 8 / 128 / 10^4)."""
     from scipy.special import gammaincc
     b = np.asarray(bits, dtype=np.int64)
@@ -853,7 +858,7 @@ def nist_longest_run(bits):
 
 
 def _serial_psi_sq(b, m):
-    """psi^2_m statistic over the cyclically-extended sequence (§2.11)."""
+    """psi^2_m statistic over the cyclically-extended sequence (Sec. 2.11)."""
     if m == 0:
         return 0.0
     n = len(b)
@@ -866,7 +871,7 @@ def _serial_psi_sq(b, m):
 
 
 def nist_serial(bits, m=8):
-    """SP 800-22 §2.11 serial test. Returns (p_value1, p_value2)."""
+    """SP 800-22 Sec. 2.11 serial test. Returns (p_value1, p_value2)."""
     from scipy.special import gammaincc
     b = np.asarray(bits, dtype=np.int64)
     psi_m = _serial_psi_sq(b, m)
@@ -922,8 +927,8 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000,
     """Cross-check the fast statistical EC FER model against a real BP
     decoder on a toy random LDPC.
 
-    SCOPE: this is a decoder SPOT CHECK, not a capacity claim, and it
-    is reported honestly rather than asserted as a pass. The code here
+    SCOPE: this is a decoder SPOT CHECK, not a capacity claim. The
+    code here
     is a crude column-weight-3 random LDPC at rate 0.84 - a 3-regular
     high-rate code has a LOW BSC threshold, far below a 5G-NR-grade
     capacity-approaching code. Measured behavior (10 blocks/point,
@@ -938,7 +943,7 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000,
     wrong.
 
     Uses a SMALL block (default 1000) decoupled from the rate-model's
-    50k-bit blocks: BP on the full block in Python is O(iters·edges) and
+    50k-bit blocks: BP on the full block in Python is O(iters*edges) and
     would take minutes; the spot check needs only enough bits to exhibit
     the threshold behavior.
 
@@ -978,7 +983,7 @@ def validate_bp_against_statistical(qber_values=None, block_size=1000,
             # received bit). That is wrong for syndrome decoding of the
             # error pattern: it randomized the priors and the decoder
             # recovered errors at chance (~50%) even with 2 errors in 500
-            # bits, producing FER≈1.00 at every QBER. With the uniform
+            # bits, producing FER~1.00 at every QBER. With the uniform
             # prior the decoder decodes the design band correctly.
             channel_llr = np.full(block_size, np.log((1 - qber) / max(qber, 1e-10)))
             decoded, bp_success = bp_decode(H, syndrome, channel_llr, max_iter=50)
