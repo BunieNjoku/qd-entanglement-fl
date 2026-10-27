@@ -44,10 +44,10 @@ class SourceResult:
 
 
 def werner_state(fidelity):
-    """Construct the 4×4 Werner state density matrix.
-    ρ = F|Φ+⟩⟨Φ+| + (1-F)/4 × I₄
+    """Construct the 4x4 Werner state density matrix.
+    rho = F|Phi+><Phi+| + (1-F)/4 x I4
     """
-    phi_plus = np.array([1, 0, 0, 1]) / np.sqrt(2)  # |HH⟩ + |VV⟩
+    phi_plus = np.array([1, 0, 0, 1]) / np.sqrt(2)  # |HH> + |VV>
     rho_bell = np.outer(phi_plus, phi_plus.conj())
     rho_mixed = np.eye(4) / 4
     return fidelity * rho_bell + (1 - fidelity) * rho_mixed
@@ -81,8 +81,8 @@ def compute_chsh_s(rho):
     A hardware implementation must estimate S from the Bell-test duty-cycle
     sample, with finite-statistics uncertainty.
     """
-    a_angles = [0, np.pi / 4]                    # 0°, 45°
-    b_angles = [np.pi / 8, 3 * np.pi / 8]        # 22.5°, 67.5°
+    a_angles = [0, np.pi / 4]                    # 0 deg, 45 deg
+    b_angles = [np.pi / 8, 3 * np.pi / 8]        # 22.5 deg, 67.5 deg
 
     def correlator(a, b):
         p_same = 0
@@ -192,7 +192,7 @@ def simulate_source(
                 (fiber_length_m / 1000) * temperature_variation_C)
     birefringence_angle = rng.normal(0, bire_std) if bire_std > 0 else 0
 
-    # Fixed measurement basis (both nodes at 0° + birefringence offset)
+    # Fixed measurement basis (both nodes at 0 deg + birefringence offset)
     angle_alice = 0.0
     angle_bob = birefringence_angle  # Imperfect compensation
 

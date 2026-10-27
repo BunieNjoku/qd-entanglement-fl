@@ -2,7 +2,7 @@
 Module 7: Faithful classical secure-aggregation baselines.
 
 Implements the two classical protocols the secure-aggregation literature
-compares against, at the level of fidelity that determines the honest
+compares against, at the level of fidelity that determines the
 comparison axes (per-client bytes, aggregator recovery compute, dropout
 recovery cost, assumption class, HNDL exposure). All three protocols -
 this system and the two baselines - share the SAME Bonawitz-style

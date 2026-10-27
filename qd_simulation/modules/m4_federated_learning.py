@@ -140,7 +140,7 @@ def load_clinical_data(num_clients=3, rng_seed=42, dirichlet_alpha=0.5):
 # cancel exactly because the same bits are derived deterministically at
 # both endpoints from the shared bit string.
 
-QUANT_SCALE = 1 << 20  # 20-bit fractional precision; gradients clipped to ±2^11
+QUANT_SCALE = 1 << 20  # 20-bit fractional precision; gradients clipped to +-2^11
 
 def quantize_gradient(grad_tensor, scale=QUANT_SCALE):
     """Map a float tensor to int32 (modular ring Z_{2^32}) via fixed-point."""
@@ -340,7 +340,7 @@ class RoundComm:
                         leg exists), so it cannot withhold a payload on
                         the strength of an outcome not yet known.
       shares            per-round Shamir distribution - happens BEFORE
-                        dropout, so all n members send n−1 shares of their
+                        dropout, so all n members send n-1 shares of their
                         fresh self-mask seed
       selfmask          survivors' own seed disclosures
       recovery_shares   identically 0 under this simulation's pre-payload
@@ -348,10 +348,10 @@ class RoundComm:
                         sum, so Shamir reconstruction runs as VALIDATION
                         only (asserted, never charged as wire traffic -
                         protocol step 6). The field exists for the
-                        Phase-4 baselines' post-payload drop timing,
+                        m7 baselines' post-payload drop timing,
                         which does transmit recovery shares.
       reveals           each survivor reveals its full pairwise bit-string
-                        with each dropped partner: n_params×4 B per
+                        with each dropped partner: n_paramsx4 B per
                         (survivor, dropped) pair - THE byte cost of
                         reveal-based recovery
       inter_triangle    masked triangle aggregates on tree edges
@@ -386,11 +386,11 @@ class RoundComm:
     Scope: key-DISTILLATION classical traffic is excluded
     from this FL-layer ledger by design.
     Magnitude at the operating point: reconciliation syndromes cost
-    ≈ 0.20 bits ≈ 0.025 B per secret bit ((1−R_code)/yield = 0.16/0.809
-    bits of syndrome per secret bit), ≈ 23 KB per edge per round at the ~29K-param
+    ~ 0.20 bits ~ 0.025 B per secret bit ((1-R_code)/yield = 0.16/0.809
+    bits of syndrome per secret bit), ~ 23 KB per edge per round at the ~29K-param
     clinical model; PA (Toeplitz) seed traffic depends on the seed-reuse
-    policy and is flagged to the Phase-3 HNDL transcript work. The
-    Phase-4 comparison charges the classical baselines' key-agreement
+    policy and is covered by the m6 HNDL transcript analysis. The
+    exp12 comparison charges the classical baselines' key-agreement
     bytes under the same FL-layer scoping so the columns stay symmetric.
     """
     round_idx: int = 0
@@ -881,7 +881,7 @@ def run_federated_training(
             # Non-entangled modes: payload + downlink only. The prng mode
             # as implemented PRE-SHARES symmetric seeds (no per-round share
             # traffic), so its accounting here is NOT a faithful classical
-            # secure-aggregation baseline - the Phase-4 Bonawitz-DH and
+            # secure-aggregation baseline - the m7 Bonawitz-DH and
             # Flamingo-PRF baselines carry the faithful byte models.
             rc = RoundComm(
                 round_idx=round_idx, n_clients=num_clients,
@@ -1058,7 +1058,7 @@ def secure_aggregation_round(
           The seed is Shamir-shared (t-of-n) across the cluster so
           survivors can reconstruct it if the client drops.
       (4) Each client sends one share of its OWN self-mask seed to each of
-          its n−1 cluster peers (the n(n−1) × BYTES_PER_SHAMIR_SHARE wire
+          its n-1 cluster peers (the n(n-1) x BYTES_PER_SHAMIR_SHARE wire
           charge models exactly these messages), then - after the live-set
           announcement - transmits its masked payload.
       (5) Aggregator sums the masked payloads (modular addition).
@@ -1072,7 +1072,7 @@ def secure_aggregation_round(
               >= threshold survivors' shares to reconstruct the dropped
               self-mask seed; this simulation VALIDATES reconstruction
               (asserted below, not charged as protocol traffic) without
-              exercising that timing - the Phase-4 baselines do.
+              exercising that timing - the m7 baselines do.
             - Each survivor discloses its own self-mask SEED (4 B; the
               mask is PRG-expanded from it - the computationally protected
               leg) so the aggregator can remove surviving self-masks.
@@ -1186,7 +1186,7 @@ def secure_aggregation_round(
             # so this reconstruction is not protocol-necessary and its
             # share traffic is NOT charged. It is retained to assert the
             # Shamir machinery works (load-bearing in the general Bonawitz
-            # timing, exercised by the Phase-4 baselines).
+            # timing, exercised by the m7 baselines).
             shares = []
             for survivor_idx, s in enumerate(survivors):
                 if len(shares) >= threshold:
@@ -1244,7 +1244,7 @@ def secure_aggregation_round(
         # Zero under this simulation's pre-payload drop timing: the
         # dropped self-mask never entered the sum, so seed reconstruction
         # is validation, not protocol. Recovery costs reveals
-        # only. The Phase-4 baselines, which exercise post-payload drops,
+        # only. The m7 baselines, which exercise post-payload drops,
         # charge their reconstruction shares.
         "recovery_share_bytes": 0,
         "reveal_bytes": (len(dropouts) * len(survivors)
@@ -1797,11 +1797,10 @@ def run_multitriangle_fl_legacy(
     triangles=None, tree_edges=None,
     device='cpu', verbose=True,
 ):
-    """LEGACY hierarchical driver - superseded by run_multitriangle_fl.
-
-    Retained for reference only; no callers. The modern driver adds modular
-    OTP masking, pre-sized distilled-key pools, the two-mask design, and
-    per-round dropout sampling.
+    """Legacy hierarchical driver; run_multitriangle_fl is the maintained
+    driver and adds modular OTP masking, pre-sized distilled-key pools,
+    the two-mask design, and per-round dropout sampling. No callers;
+    retained for reference.
 
     Run federated learning with multi-triangle hierarchical aggregation.
 

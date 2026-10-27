@@ -1,5 +1,5 @@
-"""Tests for the exp1a noise-model robustness additions (m1) and the
-finite-blocklength FER model (m2).
+"""Tests for the m1 exp1a noise models and the m2 finite-blocklength
+FER model.
 
 Plain-python asserts, no test framework (the repo has none). Run:
 
