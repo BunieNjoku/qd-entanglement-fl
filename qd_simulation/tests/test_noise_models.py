@@ -48,9 +48,8 @@ def test_ad_breaks_basis_symmetry_werner_keeps_it():
         amplitude_damping_gamma_for_fidelity(f))
     e_z = qber_in_basis(rho_ad, 0.0)
     e_x = qber_in_basis(rho_ad, np.pi / 4)
-    # closed forms: e_z = g/2 exactly; e_x = (1-s)^2/(4(1+s^2)/2)
-    # branch + (g/2)(1/2) from the damped |10> branch ~ g/4, so the
-    # X-basis rate is about HALF the Z-basis rate.
+    # e_z = g/2 exactly; e_x is about g/4, so the X-basis rate is
+    # about half the Z-basis rate.
     assert e_x < e_z, (e_z, e_x)
     assert abs(e_x / e_z - 0.5) < 0.02, e_x / e_z
 

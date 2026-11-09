@@ -1,59 +1,13 @@
 """
-Module 7: Faithful classical secure-aggregation baselines.
+Module 7: Classical secure-aggregation baselines.
 
-Implements the two classical protocols the secure-aggregation literature
-compares against, at the level of fidelity that determines the
-comparison axes (per-client bytes, aggregator recovery compute, dropout
-recovery cost, assumption class, HNDL exposure). All three protocols -
-this system and the two baselines - share the SAME Bonawitz-style
-modular masking over Z_2^32, the SAME payload/self-mask wire format, and
-the SAME FL-layer byte scoping (m4's BYTES_PER_* constants), so the
-columns are matched. They differ ONLY in the pairwise-mask SOURCE and
-the DROPOUT-RECOVERY mechanism:
-
-  entangled (this system)
-      pairwise mask = single-use source-model distilled bits (a true
-      one-time pad; no compact seed). Dropout recovery on the pairwise
-      leg: each survivor REVEALS its full pairwise bit-string with the
-      dropped client (n_params x 4 B) - there is no seed to send, which
-      is exactly the cost of unconditional freshness. Assumption class:
-      unconditional. HNDL: the pairwise leg is immune (bits never transit
-      a channel; reveals are single-use).
-
-  bonawitz (SecAgg, Bonawitz et al. CCS 2017)
-      pairwise mask = PRG expansion of a per-execution ephemeral
-      Diffie-Hellman shared secret s_{i,j} = DH(sk_i, pk_j). Dropout
-      recovery: threshold survivors Shamir-reconstruct the DROPPED
-      client's DH secret key (one scalar), and the aggregator RECOMPUTES
-      that client's pairwise masks with each survivor (PRG expansion).
-      Recovery bytes are tiny (shares of one scalar) but the aggregator
-      pays compute, and freshness/HNDL rest on DH + PRG being unbroken.
-      Assumption class: computational.
-
-  flamingo (Ma et al., IEEE S&P 2023)
-      pairwise mask = PRG expansion of a per-round PRF seed
-      h_{i,j,t} = PRF(r_{i,j}, t) from a long-term pairwise secret.
-      Dropout recovery: survivors REVEAL the per-round PRF seed (one
-      scalar) for the dropped partner; the aggregator PRG-expands and
-      cancels. Same reveal-based logic as this system, but the revealed
-      object is a computational SEED (4 B) not the mask itself, so
-      recovery bytes are tiny - at the price of computational freshness
-      (a future break of the PRF/long-term secret reopens the transcript,
-      cf. exp9). Assumption class: computational.
-
-DROP MODEL (identical across all three, the standard Bonawitz model):
-a dropped client's payload does NOT reach the aggregator; survivors'
-payloads do. Pairwise masks between two survivors cancel; the pairwise
-mask between a survivor and a dropped client is uncancelled and must be
-removed by the protocol's recovery mechanism. Each survivor's self-mask
-is removed via a Shamir-reconstructed seed (the Bonawitz double-mask,
-reconstructed from a threshold of OTHER survivors' shares - charged
-identically in all three arms so it does not bias the comparison).
-
-Each round is really executed and the recovered aggregate is asserted
-equal to the plaintext sum of the survivors' quantized gradients, so a
-byte/compute record can never silently diverge from a protocol that does
-not actually reconstruct the correct value.
+Bonawitz SecAgg (DH-seeded PRG masks, Shamir recovery of a dropped
+client's DH secret), Flamingo (per-round PRF seeds, seed reveal) and an
+IT dealer (provisioned one-time pads, online or courier delivery), run
+beside this system's entangled arm. All arms share m4's modular masking,
+wire format and byte scoping and differ only in pairwise-mask source and
+dropout recovery. Each round is executed and the recovered aggregate is
+asserted equal to the plaintext survivor sum.
 """
 import time
 import numpy as np
@@ -76,12 +30,13 @@ except ImportError:  # pragma: no cover
         BYTES_PER_SELFMASK_SEED,
     )
 
-# Wire sizes for the recovered objects that differ across protocols.
-BYTES_PER_DH_SHARE = BYTES_PER_SHAMIR_SHARE  # share of a dropped client's
-#                                              DH secret scalar (Bonawitz)
-BYTES_PER_PRF_SEED = 4   # per-round PRF pairwise seed revealed (Flamingo)
-BYTES_PER_REVEAL_WORD = BYTES_PER_MASKED_WORD  # one revealed pairwise word
-#                                                (this system): n_params of them
+# Wire sizes of the recovered objects that differ across protocols.
+# Bonawitz: one share of a dropped client's DH secret scalar.
+BYTES_PER_DH_SHARE = BYTES_PER_SHAMIR_SHARE
+# Flamingo: the per-round PRF pairwise seed revealed by a survivor.
+BYTES_PER_PRF_SEED = 4
+# This system: one revealed pairwise mask word, n_params of them.
+BYTES_PER_REVEAL_WORD = BYTES_PER_MASKED_WORD
 
 
 def _prg(seed, n_params):
@@ -107,10 +62,9 @@ class BaselineCost:
     aggregator_recovery_s: float = 0.0   # measured recovery wall-clock
     assumption_class: str = ""      # e.g. "unconditional" | "computational"
     hndl_immune_pairwise_leg: bool = False
-    # Per-round pairwise-key setup traffic the protocol pays IN ADDITION
-    # to the shared self-mask machinery (Bonawitz: per-execution DH share
-    # redistribution is already in share_bytes; the dealer arm's pad
-    # distribution goes here). 0 where setup is amortized or local.
+    # Per-round pairwise-key setup traffic beyond the shared self-mask
+    # machinery (the dealer arm's pad distribution; Bonawitz's DH share
+    # redistribution is already in share_bytes). 0 when amortized or local.
     dealer_setup_bytes: int = 0
     # Who must be trusted for the pairwise-mask leg to hold.
     trust_surface: str = ""
@@ -130,8 +84,8 @@ def _common_setup(gradients, cluster, rng):
     quant = {c: quantize_gradient(gradients[c]) for c in cluster}
     self_seeds = {c: shamir_field_element(rng) for c in cluster}
     self_masks = {c: _prg(self_seeds[c], n_params) for c in cluster}
-    # Self-mask seeds are Shamir-shared (threshold 2) in ALL arms - the
-    # double-mask, charged identically so it does not bias the comparison.
+    # Self-mask seeds are Shamir-shared (threshold 2) in all arms: the
+    # double mask, charged identically so it does not bias the comparison.
     shares = {c: shamir_split(self_seeds[c], n, 2,
                               np.random.default_rng(self_seeds[c] + 1))
               for c in cluster}
@@ -181,8 +135,8 @@ def run_entangled(gradients, cluster, dropouts, distilled_pool, rng):
         p = apply_modular_mask(p, self_masks[c], sign=+1)
         agg = (agg + p).astype(np.uint32)
 
-    # Recovery: each survivor REVEALS full pairwise bits with each dropped
-    # partner; aggregator subtracts directly (no PRG expansion).
+    # Recovery: each survivor reveals its full pairwise bits with each
+    # dropped partner; the aggregator subtracts directly, no PRG expansion.
     t0 = time.perf_counter()
     recovery_bytes = 0
     for d in dropouts:
@@ -218,11 +172,8 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
     dropouts = set(dropouts)
     survivors = [c for c in cluster if c not in dropouts]
 
-    # Per-execution ephemeral DH: model each client's secret scalar and
-    # the pairwise shared secret as a deterministic function of the two
-    # (symmetric), then PRG-expand. (We model DH agreement's RESULT - a
-    # shared per-pair scalar - not the group operation; the comparison
-    # axes depend on the recovery mechanism, not the DH group.)
+    # Models the result of DH agreement (a symmetric per-pair scalar),
+    # not the group operation.
     dh_secret = {c: max(1, shamir_field_element(rng)) for c in cluster}
     dh_shares = {c: shamir_split(dh_secret[c], n, 2,
                                  np.random.default_rng(dh_secret[c] + 7))
@@ -250,9 +201,9 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
         agg = (agg + p).astype(np.uint32)
 
     # Recovery: reconstruct each dropped client's DH secret from a
-    # threshold of survivors' shares (scalar), then RECOMPUTE and cancel
-    # its pairwise masks with each survivor (PRG expansion = aggregator
-    # compute).
+    # threshold of survivors' shares, then recompute and cancel its
+    # pairwise masks with each survivor. The PRG expansions are
+    # aggregator compute.
     t0 = time.perf_counter()
     recovery_bytes = 0
     prg_expansions = 0
@@ -271,13 +222,8 @@ def run_bonawitz(gradients, cluster, dropouts, rng):
     rec_s = time.perf_counter() - t0
 
     agg = _finish(cluster, dropouts, quant, self_masks, agg)
-    # Bonawitz uses PER-EXECUTION ephemeral DH; in a
-    # multi-round FL run each round is an execution, so each round
-    # redistributes n(n-1) Shamir shares of the fresh DH secrets IN
-    # ADDITION to the self-mask seed shares. Charging both is faithful -
-    # this per-round DH-setup share traffic is exactly the cost Flamingo
-    # was designed to avoid with its long-term-secret + PRF ratchet, and
-    # NOT counting it would undercount (flatter) Bonawitz.
+    # Per-execution ephemeral DH: each round redistributes n(n-1) Shamir
+    # shares of the fresh DH secrets in addition to the self-mask shares.
     cost = BaselineCost(
         protocol="bonawitz", n_clients=n, n_params=n_params,
         n_dropped=len(dropouts),
@@ -304,8 +250,9 @@ def run_flamingo(gradients, cluster, dropouts, round_idx, rng):
     survivors = [c for c in cluster if c not in dropouts]
 
     # Long-term pairwise secret r_{i,j}; per-round seed h = PRF(r, t).
-    # PRF modeled as a keyed hash into the scalar field (the comparison
-    # depends on the reveal being a per-round SEED, not on the PRF family).
+    # The PRF is modeled as a keyed hash into the scalar field; the
+    # comparison depends on the reveal being a per-round seed, not on
+    # the PRF family.
     longterm = {}
     for i, ci in enumerate(cluster):
         for cj in cluster[i + 1:]:
@@ -331,8 +278,8 @@ def run_flamingo(gradients, cluster, dropouts, round_idx, rng):
         p = apply_modular_mask(p, self_masks[c], sign=+1)
         agg = (agg + p).astype(np.uint32)
 
-    # Recovery: each survivor REVEALS the per-round PRF seed (scalar) for
-    # the dropped partner; aggregator PRG-expands and cancels.
+    # Recovery: each survivor reveals the per-round PRF seed for the
+    # dropped partner; the aggregator PRG-expands and cancels.
     t0 = time.perf_counter()
     recovery_bytes = 0
     prg_expansions = 0
@@ -364,34 +311,11 @@ def run_flamingo(gradients, cluster, dropouts, round_idx, rng):
 
 def run_it_dealer(gradients, cluster, dropouts, dealer_pool, rng,
                   provisioning="online"):
-    """Classical IT-dealer baseline: an offline
-    trusted dealer provisions each client pair with uniform one-time
-    pads; round mechanics are then IDENTICAL to run_entangled by
-    construction (same helpers, same single-use OTP discipline, same
-    reveal-based O(d) dropout recovery - the dealer is offline at round
-    time, so recovery cannot ask it for help). This is the strongest
-    classical objection made executable: information-theoretic masking
-    with NO quantum hardware. What differs is provenance and trust:
-
-      provisioning="online"  - pads distributed over recorded classical
-          channels under computational encryption (TLS). Charged
-          n(n-1) * d * 4 B per round (each pad is sent to BOTH
-          endpoints). A transcript recorder that later breaks the
-          encryption recovers every pad -> every gradient (exp9's
-          it_dealer_online arm). IT-secure masking, computationally
-          secured provisioning: the HNDL hole moves one layer down.
-
-      provisioning="courier" - pads pre-provisioned out of band
-          (courier / HSM install). 0 channel bytes per round; the
-          amortized per-visit batch and the storage-exposure window it
-          creates are reported by exp12, not charged here. No channel
-          transcript exists to break, but the dealer generated and held
-          every pad, and future rounds' pads sit in storage between
-          visits: dealer or storage compromise is total.
-
-    NOT a delegation to run_entangled: that function's cost labels
-    (assumption_class="unconditional", hndl_immune_pairwise_leg=True)
-    are hardcoded for the entangled arm and would mislabel this one.
+    """IT-dealer baseline: an offline trusted dealer provisions each pair
+    with one-time pads; round mechanics match run_entangled. "online"
+    charges n(n-1)*d*4 B of pad distribution per round over recorded
+    channels; "courier" charges 0 channel bytes (pads delivered out of
+    band). Separate from run_entangled because the cost labels differ.
     """
     assert provisioning in ("online", "courier"), provisioning
     cluster, n, n_params, quant, self_seeds, self_masks, shares = \
@@ -399,8 +323,8 @@ def run_it_dealer(gradients, cluster, dropouts, dealer_pool, rng,
     dropouts = set(dropouts)
     survivors = [c for c in cluster if c not in dropouts]
 
-    # Pairwise pads sliced from the dealer pool - same OTP mechanics and
-    # canonical (min,max) keying as the entangled arm.
+    # Pairwise pads sliced from the dealer pool: same OTP mechanics and
+    # canonical (min, max) keying as the entangled arm.
     pair_bits, pair_masks, off = {}, {}, 0
     bpm = n_params * 32
     for i, ci in enumerate(cluster):
@@ -422,8 +346,8 @@ def run_it_dealer(gradients, cluster, dropouts, dealer_pool, rng,
         p = apply_modular_mask(p, self_masks[c], sign=+1)
         agg = (agg + p).astype(np.uint32)
 
-    # Recovery: identical reveal mechanism to the entangled arm - a pad
-    # has no compact seed either.
+    # Recovery: the entangled arm's reveal mechanism; a pad has no
+    # compact seed either.
     t0 = time.perf_counter()
     recovery_bytes = 0
     for d in dropouts:
@@ -436,7 +360,7 @@ def run_it_dealer(gradients, cluster, dropouts, dealer_pool, rng,
 
     agg = _finish(cluster, dropouts, quant, self_masks, agg)
 
-    # Each of the n(n-1)/2 pads is sent to BOTH endpoints: n(n-1)*d*4 B.
+    # Each of the n(n-1)/2 pads is sent to both endpoints: n(n-1)*d*4 B.
     setup = n * (n - 1) * n_params * 4 if provisioning == "online" else 0
     cost = BaselineCost(
         protocol=f"it_dealer_{provisioning}", n_clients=n, n_params=n_params,

@@ -17,11 +17,8 @@ from modules.m1_quantum_source import simulate_bbm92  # noqa: E402
 from modules.m2_post_processing import (  # noqa: E402
     bbm92_distill, tlgr_deviation, binary_entropy, toeplitz_hash)
 
-# Emitted-pair budget: 20 s of source time at the anchored emission rate
-# (1 GHz clock x 0.076 excitation efficiency = 76M pairs/s). The anchored
-# per-pair coincidence probability is ~5.6e-5, so this yields ~8.5e4
-# detected coincidences - comparable statistical power to the pre-anchor
-# suite.
+# Emitted-pair budget: 20 s of source time at 76M pairs/s, about 8.5e4
+# detected coincidences.
 N_PAIRS = 1_520_000_000
 CODE_RATE = POST_PROC['ldpc_code_rate']
 BLOCK = POST_PROC['block_size']
@@ -133,10 +130,8 @@ def test_distill_key_length_and_agreement():
     given the same seed exchange).
 
     Runs at an elevated Bell weight so the observed test-set error sits
-    well below q_tol: the arithmetic under test is independent of the
-    operating point, and at the anchored point (e_x ~ 0.0153 vs
-    q_tol = 0.02) small test sets abort by fluctuation - that behavior
-    is covered by exp14's abort-probability panel, not this test."""
+    well below q_tol; at the anchored point small test sets abort by
+    fluctuation, which exp14 covers."""
     r = run(p_z=0.9, seed=8, fidelity=0.99)
     d = bbm92_distill(r.key_bits_alice, r.key_bits_bob, r.e_x_observed,
                       r.n_test, q_tol=BBM92['q_tol'],

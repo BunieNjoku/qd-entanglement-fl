@@ -1,15 +1,6 @@
-"""Tests for inter-cell masking in run_multitriangle_fl.
-
-Overlapping cells make the per-cell sums a linear system in the
-individual client updates: with enough cells the system has full rank
-and every update is solvable from the sums alone, with no collusion and
-no broken mask. The aggregator must therefore never observe a cell sum,
-only the total in which the inter-cell masks cancel.
-
-These tests check the construction that prevents it: masks on the edges
-of a spanning tree over the cell dual, applied with opposite signs at
-the two endpoints, so every submitted cell vector is uniform and the
-masks vanish from the sum.
+"""Tests for inter-cell masking in run_multitriangle_fl: unmasked cell
+sums form a full-rank system in the client updates, and tree masks on
+the cell dual cancel in the total while covering every cell.
 
 Plain-python asserts, no test framework (the repo has none). Run:
 

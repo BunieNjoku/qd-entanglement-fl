@@ -139,14 +139,9 @@ def build_aggregation_tree(triangles, root_idx=0):
     return tree, depth
 
 
-# Masks a single physical edge must supply per round. An edge of a
-# planar triangulation borders at most two triangles, contributing at
-# most two intra-cell masks. The inter-cell mask graph is a spanning
-# tree of the cell dual and two adjacent cells share exactly one side,
-# so a given edge carries at most one inter-cell mask. The bound is
-# therefore three, is attained on interior edges whose dual edge is in
-# the spanning tree, and does not grow with the mesh. Asserted over
-# generated meshes in tests/test_mesh_edge_load.py.
+# Masks one physical edge supplies per round: at most two intra-cell
+# (an edge borders at most two triangles) plus one inter-cell (spanning
+# tree of the dual). Checked in tests/test_mesh_edge_load.py.
 MAX_MASKS_PER_EDGE_PER_ROUND = 3
 
 
@@ -154,15 +149,8 @@ def compute_aggregation_latency(
     n_triangles, gradient_bits, secure_key_rate_bps,
     fpga_latency_s=0.005
 ):
-    """Round latency of one masked aggregation.
-
-    Cells submit their masked sums together and the aggregator forms one
-    total, so aggregation is a single communication round whatever the
-    dual's shape; tree depth sets which cells share a mask, not how many
-    times a value is relayed.
-
-    Key wait is set by the busiest physical edge, which supplies at most
-    MAX_MASKS_PER_EDGE_PER_ROUND masks per round at any mesh size.
+    """Round latency of one masked aggregation: key wait on the busiest
+    edge plus FPGA latency plus one communication round.
 
     Args:
         n_triangles: Number of cells in the mesh.
@@ -192,18 +180,9 @@ def compute_aggregation_latency(
 def per_edge_secret_rates(positions, links, degrees):
     """Secret-key rate of every physical edge, at its own length and load.
 
-    Both endpoints host a source and each splits its pairs across the
-    edges incident to it, so an edge (i, j) of length L receives
-    R(L)/deg(i) from one end and R(L)/deg(j) from the other, where R is
-    the unmultiplexed source-link coincidence rate. In a lone triangle
-    both degrees are 2 and this returns R(L), which is the
-    single-rate value config.OPERATING_POINT carries; in a mesh the
-    well-connected nodes split further and their edges run slower.
-
-    QBER is length-independent in the analytic model
-    (m1.compute_qber_analytical depends on Bell weight, PBS extinction
-    and the birefringence allowance, not on loss), so only the raw rate
-    varies across edges.
+    Edge (i, j) of length L receives R(L)/deg(i) + R(L)/deg(j), with R
+    the unmultiplexed source-link coincidence rate. QBER is
+    length-independent in the analytic model.
 
     Args:
         positions: (n, 2) node coordinates in metres.
@@ -248,18 +227,9 @@ def per_edge_secret_rates(positions, links, degrees):
 def nodes_for_cell_count(n_cells):
     """Invert the planar-triangulation cell count to a node count.
 
-    Euler gives K = 2n - 2 - h exactly for a triangulation of n points
-    with h on the convex hull. For uniform points in a convex k-gon the
-    hull size is E[h] = (2k/3) ln n + O(1) (Renyi and Sulanke, Z.
-    Wahrscheinlichkeitstheorie 2, 75 (1963)); the campus is a square, so
-    k = 4 and E[h] = (8/3) ln n. That law, with no fitted parameter,
-    tracks this generator's meshes to RMS 0.25 vertices from n = 6 to
-    n = 200 and beats a two-parameter power law - checked in
-    tests/test_mesh_edge_load.py.
-
-    Since h grows logarithmically it is o(n), so K -> 2n asymptotically;
-    at the sizes reported here the hull term still matters, so solve
-    K = 2n - 2 - (8/3) ln n numerically rather than taking K/2.
+    Euler: K = 2n - 2 - h with h hull vertices; E[h] = (8/3) ln n for
+    uniform points in a square (Renyi and Sulanke 1963). Solved
+    numerically because the hull term matters at these sizes.
     """
     if n_cells < 1:
         return 0
@@ -278,18 +248,10 @@ def compute_max_mesh_size(
     model_params, training_round_s, secure_key_rate_bps, bits_per_param=None,
     fpga_latency_s=0.005
 ):
-    """Largest mesh whose round fits the training period.
-
-    Under masked cell submission the key demand on a physical edge is
-    capped at MAX_MASKS_PER_EDGE_PER_ROUND whatever the mesh size, so
-    entangled-key supply sets a floor on the round time but does not
-    bound the mesh. What bounds it is the aggregator's single classical
-    access port, which must carry one masked vector per cell per round.
-
-    bits_per_param defaults to config.BITS_PER_PARAM (32: the int32
-    modular masking ring the implementation actually uses; 16-bit
-    BF16-style accounting is not implementable against
-    QUANT_SCALE = 2^20 - see config.py).
+    """Largest mesh whose round fits the training period. Key supply
+    sets a floor on the round time; the aggregator's classical access
+    port (one masked vector per cell) bounds the mesh. bits_per_param
+    defaults to config.BITS_PER_PARAM.
 
     Returns:
         max_triangles: Largest cell count whose round fits, 0 if the
@@ -310,14 +272,14 @@ def compute_max_mesh_size(
     if gradient_bits <= 0 or training_round_s <= 0:
         return 0, 0
 
-    # Floor: the busiest edge's masks must distil inside the round, and
-    # this does not improve with a smaller mesh.
+    # The busiest edge's masks must distil inside the round; a smaller
+    # mesh does not lower this floor.
     key_floor = (MAX_MASKS_PER_EDGE_PER_ROUND * gradient_bits
                  / max(secure_key_rate_bps, 1))
     budget = training_round_s - key_floor - fpga_latency_s
     if budget <= 0:
-        # Infeasible at any size. Report 0 rather than a mesh that
-        # cannot finish a round.
+        # Infeasible at any size; report 0 rather than a mesh that cannot
+        # finish a round.
         return 0, 0
 
     max_triangles = int(budget * CLASSICAL_LINK_BPS / gradient_bits)
@@ -335,10 +297,7 @@ def analyze_mesh(n_nodes, model_params, secure_key_rate_bps,
     positions, triangles, graph = generate_campus_mesh(n_nodes, campus_size_m, rng)
     tree, depth = build_aggregation_tree(triangles)
 
-    # Per-edge rates: a node splits its source across every incident
-    # edge, and each edge runs at its own length, so a flat rate taken
-    # from a lone 500 m triangle overstates a mesh's well-connected
-    # links several-fold.
+    # Per-edge rates at each edge's own length and endpoint degrees.
     links = sorted({tuple(sorted((int(t[i]), int(t[j]))))
                     for t in triangles for i, j in ((0, 1), (1, 2), (0, 2))})
     degrees = {}
@@ -352,7 +311,7 @@ def analyze_mesh(n_nodes, model_params, secure_key_rate_bps,
         from config import BITS_PER_PARAM
     except ImportError:
         from ..config import BITS_PER_PARAM
-    gradient_bits = model_params * BITS_PER_PARAM  # int32 modular masking ring
+    gradient_bits = model_params * BITS_PER_PARAM
     per_level, total_time = compute_aggregation_latency(
         len(triangles), gradient_bits, secure_key_rate_bps
     )

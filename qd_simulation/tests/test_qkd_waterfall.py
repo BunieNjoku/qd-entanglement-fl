@@ -50,9 +50,9 @@ def qkd_wf(raw, q, keep, **kw):
 
 
 def test_closed_forms():
-    """Design test 1: both arms against independently computed closed
-    forms, at two sifting keeps (a keep=1-only check is blind to
-    misplaced sifting factors)."""
+    """Both arms against independently computed closed forms at two
+    sifting keeps (a keep=1-only check misses misplaced sifting
+    factors)."""
     leak = max(BETA * h2(Q), 1 - CODE_RATE)
     fer = tier_frame_error_rate(Q, CODE_RATE)
     d_tag = default_tagged_fraction()
@@ -83,9 +83,8 @@ def test_reduction_identity():
 
 
 def test_monotonicity_and_ratio_floor():
-    """Design test 2: QKD rate strictly increasing in sifting keep,
-    strictly decreasing in QBER; ratio >= 1 across the configured
-    sweep range."""
+    """QKD rate strictly increasing in sifting keep, strictly decreasing
+    in QBER; ratio >= 1 across the sweep range."""
     rates = [qkd_wf(RAW, Q, keep)['final_secure_rate']
              for keep in (0.3, 0.5, 0.82, 1.0)]
     assert all(b > a for a, b in zip(rates, rates[1:])), rates
@@ -109,10 +108,8 @@ def test_monotonicity_and_ratio_floor():
 
 
 def test_no_tagging_path():
-    """Design test 3: the QKD waterfall has no tagged-fraction input at
-    all (entanglement-based analysis has none), reports tagged_fraction
-    0.0, and the SOURCE waterfall does respond to tagging - the
-    deliberate per-arm asymmetry, pinned."""
+    """The QKD waterfall has no tagged-fraction input and reports
+    tagged_fraction 0.0; the source waterfall does respond to tagging."""
     params = inspect.signature(compute_rate_waterfall_qkd).parameters
     assert 'tagged_fraction' not in params, list(params)
     assert qkd_wf(RAW, Q, 0.82)['tagged_fraction'] == 0.0
@@ -123,10 +120,8 @@ def test_no_tagging_path():
 
 
 def test_matched_ec_model():
-    """Design test 3b: at every sweep point, both arms charge identical
-    leak_EC and FER - in the fixed-code model and in the rate-adapted
-    envelope alike. Mixing EC models across the arms would bias the
-    sweep ratio; this pins it out."""
+    """At every sweep point both arms charge identical leak_EC and FER,
+    in the fixed-code model and the rate-adapted envelope alike."""
     for adapted in (False, True):
         for qq in np.linspace(0.005, 0.06, 12):
             s = src_wf(RAW, qq, assume_rate_adapted=adapted)
@@ -136,9 +131,8 @@ def test_matched_ec_model():
 
 
 def test_multi_photon_guard():
-    """Design test 3, config-plumbing form: mutating the multi-pair
-    probability moves the SOURCE arm's default-tagged waterfall and
-    cannot move the QKD arm (which has no tagging path at all)."""
+    """Mutating the multi-pair probability moves the source arm's
+    default-tagged waterfall and not the QKD arm's."""
     orig = QUANTUM['multi_photon_prob']
     try:
         base_src = src_wf(RAW, Q)['final_secure_rate']
@@ -151,15 +145,13 @@ def test_multi_photon_guard():
 
 
 def test_phase_error_symmetry():
-    """e_ph = e_bit is VERIFIED, not assumed, under m1's noise model:
-    the Werner component is basis-isotropic and a birefringence rotation
-    errs the Z and X measurement bases equally, so e_X = e_Z exactly.
-    Pins the exp13 caveat's 'verified' claim."""
+    """e_ph = e_bit under m1's noise model: the Werner component is
+    basis-isotropic and a birefringence rotation errs the Z and X bases
+    equally, so e_X = e_Z exactly."""
     from modules.m1_quantum_source import werner_state
 
     def qber_in_basis(rho, angle):
-        # Projectors for both endpoints measuring at `angle` and
-        # `angle`+90deg; QBER = P(outcomes differ).
+        # Both endpoints measure at `angle`; QBER = P(outcomes differ).
         def proj(a):
             v = np.array([math.cos(a), math.sin(a)])
             return np.outer(v, v)

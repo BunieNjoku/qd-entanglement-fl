@@ -32,8 +32,8 @@ def _pool(rng, n_pairs=6, d=D):
 
 
 def test_aggregate_equality_all_arms():
-    """Design test 4a: all five arms recover the identical aggregate, with
-    and without dropout."""
+    """All five arms recover the identical aggregate, with and without
+    dropout."""
     rng = np.random.default_rng(7)
     grads = _grads(rng)
     for drops in (set(), {2}):
@@ -52,9 +52,9 @@ def test_aggregate_equality_all_arms():
 
 
 def test_dealer_bytes_closed_forms():
-    """Design test 4b: online setup bytes = n(n-1)*d*4 (each pad reaches
-    BOTH endpoints), courier setup = 0 channel bytes/round; recovery
-    bytes identical to the entangled arm's (same reveal mechanism)."""
+    """Online setup bytes = n(n-1)*d*4 (each pad reaches both endpoints),
+    courier setup = 0 channel bytes per round; recovery bytes equal the
+    entangled arm's."""
     rng = np.random.default_rng(7)
     grads = _grads(rng)
     n = len(CLUSTER)
@@ -70,13 +70,13 @@ def test_dealer_bytes_closed_forms():
     assert cc.dealer_setup_bytes == 0
     assert co.recovery_bytes == ce.recovery_bytes == cc.recovery_bytes
     assert co.hndl_immune_pairwise_leg is False
-    assert cc.hndl_immune_pairwise_leg is True  # vs a CHANNEL recorder only
+    assert cc.hndl_immune_pairwise_leg is True  # against a channel recorder
     assert ce.dealer_setup_bytes == 0
 
 
 def test_hndl_three_way():
-    """Design test 5: mini transcript run - classical and online-dealer
-    arms 100% retro-recovered, entangled arm 0%."""
+    """Mini transcript run: classical and online-dealer arms 100%
+    retro-recovered, entangled arm 0%."""
     rng = np.random.default_rng(11)
     n = 3
     cluster = list(range(n))
@@ -113,9 +113,8 @@ def test_hndl_three_way():
 
 
 def test_provisioner_compromise():
-    """The second adversary (recorder + dealer archive) opens BOTH
-    dealer arms - courier included - and still nothing in the
-    entangled arm, which has no provisioning third party."""
+    """The second adversary (recorder plus dealer archive) opens both
+    dealer arms, courier included, and nothing in the entangled arm."""
     rng = np.random.default_rng(23)
     n = 3
     cluster = list(range(n))
@@ -143,9 +142,8 @@ def test_provisioner_compromise():
 
 
 def test_determinism():
-    """Design test 6: a fixed-seed five-arm run is identical across
-    repeats - aggregates and byte counts (wall-clock fields excluded:
-    host-dependent)."""
+    """A fixed-seed five-arm run is identical across repeats in
+    aggregates and byte counts (wall-clock fields excluded)."""
     def once():
         rng = np.random.default_rng(7)
         grads = _grads(rng)
@@ -173,9 +171,8 @@ def test_determinism():
 
 
 def test_pool_auditor_on_dealer_pool():
-    """Design test 7: the dealer pool obeys the same single-use OTP audit
-    as the distilled pool - per-pair per-round slices are disjoint, and
-    reusing any slice raises."""
+    """The dealer pool obeys the same single-use audit as the distilled
+    pool: slices are disjoint and reusing any slice raises."""
     n_pairs, rounds = 6, 3
     auditor = PoolAuditor("dealer", n_pairs * BPM * rounds)
     off = 0

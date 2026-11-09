@@ -1,10 +1,6 @@
-"""Tests for the two structural facts the mesh scaling model rests on.
-
-Masked cell submission puts at most three masks per round on any one
-physical edge, whatever the mesh size, so entangled-key supply sets a
-floor on the round time but does not bound the mesh. And the cell count
-follows Euler with a logarithmic hull term, which is what lets a cell
-budget be turned back into a node count.
+"""Tests for the mesh scaling model: at most three masks per edge per
+round at any mesh size, and the Euler cell count with its logarithmic
+hull term.
 
 Plain-python asserts, no test framework (the repo has none). Run:
 

@@ -2,38 +2,14 @@
 Module 4: Federated learning with entanglement-derived masked aggregation
 (pairwise one-time masks from source-model key distillation).
 
-Implements FedAvg with two-mask Bonawitz pairwise masking (Bonawitz et al.
-2017). Pairwise masks are derived from per-round entanglement-based shared
-random bits (Module 1 source -> Module 2 reconciliation + PA). Self-masks
-are drawn from local high-quality randomness and Shamir-shared across the
-cluster for dropout recovery.
+FedAvg with two-mask Bonawitz pairwise masking (Bonawitz et al. 2017):
+modular one-time-pad masks on int32-quantized gradients, pairwise masks
+from distilled shared bits, self-masks Shamir-shared for dropout
+recovery. Survivors reveal single-use pairwise bits with dropped clients.
 
-Modes:
-  - entangled:       pairwise masks from shared Bell-pair bits (source-model
-                     distilled keys); self-mask Shamir-shared.
-  - gaussian-legacy: float Gaussian masks - NO Bonawitz proof; retained for
-                     comparison only.
-  - prng:     identical structure but classical PRNG seeds (baseline)
-  - unmasked: no privacy protection (accuracy ceiling)
-
-Masking law:
-  Modular OTP on int32-quantized gradients. Each pairwise mask is uniform
-  over Z_{2^32} derived directly from shared bits; aggregation is modular
-  addition. This is the construction under which Bonawitz's privacy proof
-  applies. Float Gaussian masks (legacy) are retained only for comparison
-  with prior literature and DO NOT inherit the Bonawitz privacy guarantee.
-
-Dropout recovery:
-  Entanglement-derived pairwise bits are single-use per round. If client j
-  drops, surviving clients may safely reveal their pairwise bits with j to
-  the aggregator (no future rounds compromised). Self-masks are
-  reconstructed via Shamir threshold over the surviving set; the pairwise
-  leg needs no Shamir machinery. The same reveal-based per-round recovery
-  exists classically with computational per-round seeds (Flamingo; Ma,
-  Woods, Angel, Polychroniadou & Rabin, IEEE S&P 2023). The differentiator
-  here is that freshness is UNCONDITIONAL: revealed bits are
-  information-theoretically independent of every other round - no PRF/DH
-  assumption, no key-erasure or forward-secrecy reliance.
+Modes: entangled (distilled pairwise bits), gaussian-legacy (float
+masks, comparison only, no privacy proof), prng (classical seeds),
+unmasked.
 """
 import numpy as np
 import torch
@@ -48,8 +24,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import time
 
-
-# MODELS
 
 class ClinicalMLP(nn.Module):
     """Small MLP for tabular clinical data. ~50K parameters."""
@@ -68,8 +42,6 @@ class ClinicalMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
-# DATASETS
 
 def load_clinical_data(num_clients=3, rng_seed=42, dirichlet_alpha=0.5):
     """Load sklearn breast cancer dataset, split non-IID across clients.
@@ -104,11 +76,10 @@ def load_clinical_data(num_clients=3, rng_seed=42, dirichlet_alpha=0.5):
         for c, chunk in enumerate(np.split(class_indices, splits)):
             client_indices[c].extend(chunk.tolist())
 
-    # Guard (found by exp5's 10-seed sweep, ): at some seeds the
-    # cumsum split boundaries round so that a client ends up EMPTY - the
-    # empty list became a float64 array (IndexError) and an empty client is
-    # a degenerate FL participant. Move one sample from the largest client;
-    # no-op at seeds where every client is non-empty.
+    # At some seeds the cumsum split boundaries round so that a client
+    # receives no samples; the empty list then becomes a float64 array
+    # and indexing fails. Move one sample from the largest client; a no-op
+    # when every client is non-empty.
     for c in range(num_clients):
         if len(client_indices[c]) == 0:
             donor = max(range(num_clients),
@@ -128,17 +99,8 @@ def load_clinical_data(num_clients=3, rng_seed=42, dirichlet_alpha=0.5):
     return client_datasets, test_dataset, X_train.shape[1]
 
 
-# MODULAR OTP MASKING (Bonawitz-compatible)
-#
-# Bonawitz 2017's privacy proof requires masks uniform over the gradient
-# group. We quantize gradients to int32 (Q-format, see QUANT_SCALE) and
-# perform masking in Z_{2^32} via uint32 modular addition. Shared bits
-# from the distilled pool are sliced directly into uint32 mask words.
-#
-# Modular wraparound is intentional and correct: the masked aggregate is
-# computed in the same ring and dequantized after summation. Per-pair masks
-# cancel exactly because the same bits are derived deterministically at
-# both endpoints from the shared bit string.
+# Modular OTP masking: gradients quantized to int32 and masked in
+# Z_{2^32} by uint32 addition; wraparound is intentional.
 
 QUANT_SCALE = 1 << 20  # 20-bit fractional precision; gradients clipped to +-2^11
 
@@ -165,11 +127,8 @@ def bits_to_uint32(bits):
 def derive_modular_mask(n_params, shared_bits):
     """Derive a uint32 mask of length n_params from shared distilled bits.
 
-    Each parameter consumes 32 bits -> one uint32 mask word. The mask is
-    uniform over Z_{2^32} when the shared bits are uniform (Leftover Hash
-    Lemma after Toeplitz PA). Bonawitz's privacy proof applies directly.
-
-    Raises ValueError if insufficient bits - caller must size the pool.
+    Each parameter consumes 32 bits. Raises ValueError if there are too
+    few bits; the caller sizes the pool.
     """
     bits_needed = n_params * 32
     if len(shared_bits) < bits_needed:
@@ -186,27 +145,15 @@ def apply_modular_mask(quant_grad, mask, sign=+1):
     return (quant_grad - mask).astype(np.uint32)
 
 
-# SHAMIR SECRET SHARING (for self-mask recovery)
-#
-# (t, n) threshold sharing over GF(2^127 - 1) (Mersenne prime). Used to
-# protect each client's self-mask seed so survivors can reconstruct it
-# if the client drops; honest-but-curious aggregator with < t shares
-# learns nothing about the secret.
-
-# Mersenne prime. 2^31 - 1 leaves a self-mask seed brute-forceable in
-# 2^31 PRG expansions, which is not a security level - the leg would be
-# protected in name only. 2^127 - 1 puts it beyond exhaustive search.
-# All Shamir arithmetic here is Python integer modular arithmetic, so
-# the field size costs nothing but share width.
+# Shamir (t, n) sharing of self-mask seeds over GF(2^127 - 1); the
+# 127-bit field keeps a seed beyond exhaustive search.
 _SHAMIR_PRIME = (1 << 127) - 1
 
 def shamir_field_element(rng):
     """Uniform draw from the Shamir field.
 
-    numpy's integers() is bounded by int64, so a 127-bit field has to be
-    sampled from raw bytes. Rejection-free: the modulus loses at most
-    2^-1 bits of uniformity at this width, far below any term in the
-    security accounting.
+    Sampled from raw bytes because numpy's integers() is bounded by
+    int64; the modulo bias at this width is negligible.
     """
     nbytes = (_SHAMIR_PRIME.bit_length() + 7) // 8
     return int.from_bytes(bytes(rng.bytes(nbytes)), 'big') % _SHAMIR_PRIME
@@ -242,28 +189,9 @@ def shamir_reconstruct(shares):
 
 
 def generate_gaussian_mask_legacy(n_params, shared_key_bits):
-    """LEGACY - float Gaussian masks; NO Bonawitz privacy proof attaches.
-
-    Retained only for historical comparison (Experiment 5b appendix).
-    Use derive_modular_mask() for the proof-carrying modular construction.
-
-    Generates a mask directly from quantum-derived key bits.
-
-    Converts shared random bits to Gaussian-distributed mask values using the
-    Box-Muller transform on uniform variates derived from the key material.
-    This uses the quantum bits directly - not as a PRNG seed - preserving
-    the high-entropy guarantee from the key-distillation (PA) layer.
-
-    If insufficient bits are available, the remaining mask entries are zero
-    (in a real deployment, the round would block until enough key material
-    accumulates).
-
-    Args:
-        n_params: Number of gradient parameters to mask.
-        shared_key_bits: np.ndarray of {0,1} bits from post-processed quantum keys.
-
-    Returns:
-        mask: torch.Tensor of shape (n_params,) with Gaussian-distributed values.
+    """Legacy float Gaussian masks via Box-Muller on 16-bit uniforms from
+    the key bits. No privacy proof applies; comparison only. Missing
+    bits are zero-padded.
     """
     # Each Gaussian sample needs 2 uniform variates (Box-Muller).
     # Each uniform variate is constructed from 16 bits -> resolution 1/65536.
@@ -273,7 +201,7 @@ def generate_gaussian_mask_legacy(n_params, shared_key_bits):
 
     key_bits = shared_key_bits
     if len(key_bits) < bits_needed:
-        # Pad - in practice this means the key rate limits round speed
+        # Pad; in practice the key rate limits round speed
         key_bits = np.concatenate([
             key_bits,
             np.zeros(bits_needed - len(key_bits), dtype=np.int8)
@@ -287,7 +215,7 @@ def generate_gaussian_mask_legacy(n_params, shared_key_bits):
     u_int = (bits_block.astype(np.float64) * powers).sum(axis=2)  # (n_params, 2)
     u = (u_int + 0.5) / 65536.0  # Avoid exact 0 and 1
 
-    # Box-Muller transform: (u1, u2) -> Gaussian
+    # Box-Muller transform
     r = np.sqrt(-2.0 * np.log(u[:, 0]))
     theta = 2.0 * np.pi * u[:, 1]
     gaussian = r * np.cos(theta)
@@ -302,96 +230,30 @@ def generate_prng_mask(n_params, seed):
     return torch.randn(n_params, generator=g)
 
 
-# FEDERATED LEARNING ENGINE
-
-# Communication byte model
-# Documented wire-format assumptions behind every bytes/client/round
-# figure. Reviews audit these against the protocol steps in
-# secure_aggregation_round; change them only together with the protocol.
+# Communication byte model; change together with the protocol steps in
+# secure_aggregation_round.
 BYTES_PER_MASKED_WORD = 4    # one uint32 word of masked payload
 BYTES_PER_MODEL_WORD = 4     # one float32 word of broadcast global model
-BYTES_PER_SHAMIR_SHARE = 18  # 16 B value in the 127-bit Mersenne prime
-                             # field (_SHAMIR_PRIME = 2^127 - 1) + 2 B
-                             # share index
-BYTES_ABORT_NOTICE = 4       # live-set/abort announcement to each surviving
-                             # member of a threshold-failed cluster. Drops
-                             # are detected by non-arrival, so this notice
-                             # follows payload collection: the survivor has
-                             # already sent, and its payload IS charged.
-BYTES_PER_SELFMASK_SEED = 16  # survivor's self-mask disclosure: the seed
-                             # (< _SHAMIR_PRIME). The self-mask is
-                             # PRG-expanded from this seed - which is
-                             # exactly why the self-mask leg is only
-                             # computationally protected (see the channel
-                             # assumption in RoundComm's docstring);
-                             # the pairwise leg carries the HNDL claim.
+BYTES_PER_SHAMIR_SHARE = 18  # 16 B field value plus 2 B share index
+BYTES_ABORT_NOTICE = 4       # live-set/abort notice per survivor
+BYTES_PER_SELFMASK_SEED = 16  # survivor's self-mask seed disclosure
 
 
 @dataclass
 class RoundComm:
     """Per-round communication and latency accounting.
 
-    Uplink phases (client -> aggregator), bytes summed over clients:
-      payload           masked int32 gradients from every client that
-                        sent. Dropped clients never send. Survivors of a
-                        threshold-failed cluster DO send and are charged:
-                        a client masks against all its partners before
-                        anyone knows who dropped (that is why the reveal
-                        leg exists), so it cannot withhold a payload on
-                        the strength of an outcome not yet known.
-      shares            per-round Shamir distribution - happens BEFORE
-                        dropout, so all n members send n-1 shares of their
-                        fresh self-mask seed
-      selfmask          survivors' own seed disclosures
-      recovery_shares   identically 0 under this simulation's pre-payload
-                        drop timing: a dropped self-mask never enters the
-                        sum, so Shamir reconstruction runs as VALIDATION
-                        only (asserted, never charged as wire traffic -
-                        protocol step 6). The field exists for the
-                        m7 baselines' post-payload drop timing,
-                        which does transmit recovery shares.
-      reveals           each survivor reveals its full pairwise bit-string
-                        with each dropped partner: n_paramsx4 B per
-                        (survivor, dropped) pair - THE byte cost of
-                        reveal-based recovery
-      inter_triangle    masked triangle aggregates on tree edges
-    Downlink: global-model broadcast to every client, plus a
-    BYTES_ABORT_NOTICE live-set/abort notice to each surviving member of
-    a threshold-failed cluster. The notice is inherent to the Bonawitz
-    round structure and follows payload collection, since dropouts are
-    detected by non-arrival.
+    Uplink bytes, summed over clients: payload (masked gradients from
+    every client that sent, including survivors of a threshold-failed
+    cluster), shares (per-round Shamir distribution, n-1 per member),
+    selfmask (survivors' seed disclosures), recovery_shares (0 under this
+    simulation's pre-payload drop timing), reveals (n_params x 4 B per
+    survivor-dropped pair), inter_triangle (masked cell aggregates).
+    Downlink: model broadcast plus abort notices.
 
-    Latency decomposition: key_wait_s is MODELED from the config operating
-    point - the SLOWEST physical edge's pool-fill time,
-    max(key_bits_per_edge) / secret_rate (edges distill concurrently on
-    dedicated per-edge optics, but a physical edge serving multiple
-    logical demands - two triangles, or a triangle plus a tree mask -
-    fills correspondingly slower; conservative single-distillation-plane
-    model, even though m5's per-membership QD provisioning could
-    parallelize shared edges). comm_s is MODELED from
-    config.CLASSICAL_LINK_BPS; the others are measured wall-clock.
-
-    Network model, stated once: FL bytes serialize through
-    the aggregator's single CLASSICAL_LINK_BPS access port; quantum key
-    distillation runs on per-physical-edge dedicated optics in parallel -
-    two different resources, hence the different concurrency treatments.
-
-    Channel assumption: Shamir shares and seed disclosures
-    are assumed to transit CONFIDENTIAL pairwise channels (Bonawitz's
-    setting); channel-encryption overhead is not charged. Without that
-    confidentiality, any threshold-many recorded shares reconstruct a
-    seed - degrading the self-mask leg from computationally-protected to
-    broken. The pairwise (HNDL-carrying) leg is unaffected either way.
-
-    Scope: key-DISTILLATION classical traffic is excluded
-    from this FL-layer ledger by design.
-    Magnitude at the operating point: reconciliation syndromes cost
-    ~ 0.20 bits ~ 0.025 B per secret bit ((1-R_code)/yield = 0.16/0.809
-    bits of syndrome per secret bit), ~ 23 KB per edge per round at the ~29K-param
-    clinical model; PA (Toeplitz) seed traffic depends on the seed-reuse
-    policy and is covered by the m6 HNDL transcript analysis. The
-    exp12 comparison charges the classical baselines' key-agreement
-    bytes under the same FL-layer scoping so the columns stay symmetric.
+    key_wait_s and comm_s are modeled (slowest edge's pool-fill time;
+    CLASSICAL_LINK_BPS); the other latency fields are measured.
+    Key-distillation classical traffic is outside this ledger.
     """
     round_idx: int = 0
     n_clients: int = 0
@@ -406,9 +268,9 @@ class RoundComm:
     key_bits_inter: int = 0
     key_bits_per_edge: Dict = field(default_factory=dict)
     threshold_failures: int = 0
-    # Heaviest client's payload multiplicity (triangle memberships): the
-    # per-client figures below are MEANS over heterogeneously loaded
-    # clients; the heaviest client sends this many payloads per round.
+    # Heaviest client's payload multiplicity (triangle memberships). The
+    # per-client figures are means over unevenly loaded clients; the
+    # heaviest client sends this many payloads per round.
     max_payload_multiplicity: int = 1
     aggregator_time_s: float = 0.0
     key_wait_s: float = 0.0
@@ -443,12 +305,9 @@ class FLResult:
     n_params: int
     quantum_bits_consumed: List[int] = field(default_factory=list)
     comm_rounds: List = field(default_factory=list)  # RoundComm per round
-    # Aggregate-fidelity instrumentation (entangled mode; ):
-    # per round, (a) count of uint32 words where the masked pipeline's
-    # integer aggregate differs from the direct quantized sum - the
-    # masking-exactness theorem says every entry must be 0 - and (b) the
-    # float64 sup-norm error of the dequantized mean aggregate vs the
-    # exact float mean, bounded by the 2^-20 truncation bound.
+    # Entangled mode, per round: mismatched uint32 words against the
+    # direct quantized sum (must be 0) and the sup-norm error of the
+    # dequantized mean against the float mean (bound 2^-20).
     agg_exact_mismatches: List[int] = field(default_factory=list)
     agg_error_inf: List[float] = field(default_factory=list)
 
@@ -515,7 +374,7 @@ _VALID_MODES = ("entangled", "gaussian-legacy", "prng", "unmasked")
 
 
 def _validate_mode(mode):
-    """Fail loudly on unknown mode names - no silent fallthrough, no aliasing."""
+    """Reject unknown mode names."""
     if mode not in _VALID_MODES:
         raise ValueError(
             f"Unknown mode {mode!r}. Valid modes: {', '.join(_VALID_MODES)}.")
@@ -527,32 +386,15 @@ def _validate_mode(mode):
 # more pairs than the mean yield needs.
 _SOURCE_HEADROOM = 1.5
 
-# Runtime budget on one distilled pool. This is an engineering limit,
-# not a physical one: the source-plus-distillation chain runs at about
-# 3.2 Mbit/s here (measured over 5 Mbit and 20 Mbit draws, linear in
-# bits), so 200 Mbit is roughly a minute of generation. Demands above
-# it fall back to PRNG bits, and every caller is told which it got -
-# a pool that is not distilled cannot carry an entangled-key claim, so
-# the substitution is reported rather than hidden. Single-cell runs
-# (exp4) sit under the budget and use real distilled key; the
-# multi-cell sweeps do not, and say so.
+# Runtime budget on one distilled pool (about a minute of generation at
+# ~3.2 Mbit/s). Larger demands fall back to PRNG bits and report it.
 DISTILLED_POOL_MAX_BITS = 200_000_000
 
 
 def distilled_pool(n_bits, rng, label="pool", force_prng=False):
-    """Draw `n_bits` of distilled key from the source and post-processing
-    chain, rather than from a PRNG.
-
-    Only a coincidence yields a raw bit and the waterfall then spends
-    part of that on reconciliation, privacy amplification and the Bell
-    duty, so the emitted-pair request is the bit demand divided by both
-    factors. The result is Toeplitz-extracted: the Leftover Hash Lemma
-    bound in m2 applies to the extractor output, not to reconciled bits.
-
-    Returns (bits, source) where source is "distilled" or "prng". A
-    demand above DISTILLED_POOL_MAX_BITS returns PRNG bits labelled as
-    such: padding silently would leave the pool unable to carry an
-    entangled-key claim while still looking like one.
+    """Draw `n_bits` of Toeplitz-extracted key from the source and
+    post-processing chain. Returns (bits, source) with source "distilled"
+    or "prng"; demands above DISTILLED_POOL_MAX_BITS return PRNG bits.
     """
     if n_bits <= 0:
         # A single-cell mesh has no inter-cell masks to key.
@@ -573,13 +415,8 @@ def distilled_pool(n_bits, rng, label="pool", force_prng=False):
     p_coincidence = OPERATING_POINT['raw_edge_rate_hz'] / max(emitted_per_s, 1.0)
     yield_frac = (OPERATING_POINT['secret_rate_bps']
                   / max(OPERATING_POINT['raw_edge_rate_hz'], 1.0))
-    # Distil in chunks. simulate_source allocates several float64
-    # arrays as long as the coincidence count, so asking it for a whole
-    # pool at once costs gigabytes - 300 million coincidences peaked at
-    # 6 GB and was enough to exhaust application memory across a sweep.
-    # Chunking also matches how a deployment runs: the source feeds
-    # reconciliation and privacy amplification continuously, in blocks,
-    # rather than accumulating a pool and extracting once.
+    # Distil in chunks: simulate_source's memory scales with the
+    # coincidence count, and a whole pool at once costs gigabytes.
     try:
         from config import POST_PROC
     except ImportError:
@@ -657,19 +494,17 @@ def run_federated_training(
         num_rounds: Number of training rounds.
         quantum_key_bits: If provided, use these bits for quantum masks.
         seed: seeds torch (model init, DataLoader order) and the driver's
-            numpy generator. Passing the SAME seed to different modes
-            gives paired runs (identical init/split/shuffling), which is
-            what exp4's paired statistics require.
+            numpy generator. Passing the same seed to different modes
+            gives paired runs (identical init, split and shuffling),
+            which exp4's paired statistics require.
 
     Returns:
         FLResult with training metrics.
     """
     mode = _validate_mode(mode)
     num_clients = len(client_datasets)
-    # Seed torch BEFORE the first model_fn(): the initial global model and
-    # DataLoader shuffling otherwise inherit whatever global state the
-    # process had, making training metrics irreproducible across suite
-    # compositions and standalone runs.
+    # Seed torch before the first model_fn() so model init and
+    # DataLoader order are reproducible.
     torch.manual_seed(seed)
     global_model = model_fn()
     n_params = sum(p.numel() for p in global_model.parameters())
@@ -681,17 +516,15 @@ def run_federated_training(
     start_time = time.time()
     rng = np.random.default_rng(seed)
 
-    # Pre-generate PRNG seeds for PRNG mode - symmetric: seed(a,b) == seed(b,a)
+    # Pre-generate PRNG seeds for PRNG mode, symmetric: seed(a,b) == seed(b,a)
     prng_seeds = rng.integers(0, 2**31, size=(num_rounds, num_clients, num_clients))
     for r in range(num_rounds):
         for i in range(num_clients):
             for j in range(i+1, num_clients):
                 prng_seeds[r, j, i] = prng_seeds[r, i, j]
 
-    # Pre-generate quantum key material for quantum mode.
-    # In a real deployment these bits come from the key-distillation layer
-    # (Module 1 source -> Module 2 EC+PA). Here we simulate the key pool with
-    # bits drawn from the quantum source simulation, maintaining the pipeline.
+    # Pre-generate the key pool for the masked modes by running the
+    # simulated source through reconciliation and privacy amplification.
     bits_per_mask = n_params * 32
     n_pairs = num_clients * (num_clients - 1) // 2  # pairwise links
     total_bits_needed = num_rounds * n_pairs * bits_per_mask
@@ -712,14 +545,12 @@ def run_federated_training(
             if verbose or _report_pool_source:
                 print(f"      pairwise mask pool: {_pool_src}")
 
-    # Pool-reuse hard audit on the security-bearing modular
-    # OTP path. The legacy Gaussian path is not covered by the Bonawitz
-    # proof and is excluded by scope.
+    # Pool-reuse audit on the modular OTP path only.
     pool_audit = (PoolAuditor("pairwise", len(quantum_pool))
                   if mode == "entangled" else None)
 
-    # Communication accounting; modeled-latency inputs
-    # from the config single source of truth (lazy import, m5-style).
+    # Communication accounting. Modeled-latency inputs come from config;
+    # the lazy import avoids an import cycle.
     comm_rounds = []
     try:
         from config import (OPERATING_POINT as _OP,
@@ -748,8 +579,9 @@ def run_federated_training(
         mask_start = time.time()
 
         if mode == "entangled":
-            # Modular OTP masking on int32-quantized gradients via secure_aggregation_round.
-            # Pool is pre-sized -> wrap-around assertion cannot fire.
+            # Modular OTP masking on int32-quantized gradients via
+            # secure_aggregation_round. The pool is pre-sized, so the
+            # wrap-around assertion cannot fire.
             round_off = round_idx * n_pairs * bits_per_mask
             pair_pool = _slice_pool(quantum_pool, round_off,
                                     n_pairs * bits_per_mask)
@@ -770,12 +602,12 @@ def run_federated_training(
             aggregate = agg_res.aggregate / num_clients
             quantum_bits_consumed.append(agg_res.bits_consumed_pairwise)
 
-            # Aggregate-fidelity instrumentation
-            # (a) Masking exactness at the INTEGER level: the unmasked
+            # Aggregate-fidelity instrumentation.
+            # (a) Masking exactness at the integer level: the unmasked
             #     modular sum from the masked pipeline must equal the
-            #     direct quantized sum word-for-word (theorem - pairwise
-            #     masks cancel exactly in Z_2^32). Zero float rounding in
-            #     this comparison.
+            #     direct quantized sum word for word, since pairwise
+            #     masks cancel exactly in Z_2^32. No float rounding
+            #     enters this comparison.
             _direct_q = np.zeros(n_params, dtype=np.uint32)
             for _c in range(num_clients):
                 _direct_q = (_direct_q
@@ -796,8 +628,8 @@ def run_federated_training(
                 float((_deq64 - _direct64).abs().max()))
 
         elif mode == "gaussian-legacy":
-            # Legacy: Box-Muller Gaussian masks. Retained for comparison only;
-            # NOT covered by Bonawitz's privacy proof. Use mode="entangled" instead.
+            # Legacy Box-Muller Gaussian masks, comparison only; not
+            # covered by Bonawitz's privacy proof.
             pair_masks = {}
             round_bits_used = 0
             pair_idx = 0
@@ -866,9 +698,9 @@ def run_federated_training(
                 key_bits_intra=sum(cc["key_bits_per_edge"].values()),
                 aggregator_time_s=cc["aggregator_time_s"],
             )
-            # Slowest-edge pool-fill; single triangle -> all
-            # edges carry exactly bits_per_mask, so this equals the old
-            # per-edge formula here, but stays correct if topologies grow.
+            # Slowest-edge pool-fill. In a single triangle every edge
+            # carries exactly bits_per_mask; the max form stays correct
+            # for larger topologies.
             rc.key_wait_s = (max(rc.key_bits_per_edge.values())
                              / _secret_rate_bps
                              if rc.key_bits_per_edge else 0.0)
@@ -878,11 +710,11 @@ def run_federated_training(
                                - rc.aggregator_time_s
                                - cc["instrumentation_time_s"])
         else:
-            # Non-entangled modes: payload + downlink only. The prng mode
-            # as implemented PRE-SHARES symmetric seeds (no per-round share
-            # traffic), so its accounting here is NOT a faithful classical
-            # secure-aggregation baseline - the m7 Bonawitz-DH and
-            # Flamingo-PRF baselines carry the faithful byte models.
+            # Non-entangled modes: payload and downlink only. The prng
+            # mode pre-shares symmetric seeds with no per-round share
+            # traffic, so it is not a classical secure-aggregation
+            # baseline; the m7 Bonawitz and Flamingo arms carry those
+            # byte models.
             rc = RoundComm(
                 round_idx=round_idx, n_clients=num_clients,
                 payload_bytes=(num_clients * n_params
@@ -913,8 +745,8 @@ def run_federated_training(
 
     wall_clock = time.time() - start_time
 
-    # Pool-reuse hard audit: every pairwise-mask slice of the
-    # run must be disjoint and account for exactly the ledgered burn.
+    # Pool-reuse audit: every pairwise-mask slice of the run must be
+    # disjoint and sum to exactly the ledgered consumption.
     if mode == "entangled" and pool_audit is not None:
         assert pool_audit.bits_consumed == sum(quantum_bits_consumed), (
             f"pool audit mismatch: {pool_audit.bits_consumed} audited != "
@@ -939,8 +771,6 @@ def run_federated_training(
     )
 
 
-# TWO-MASK AGGREGATION ROUND (modular OTP, dropout-aware; entangled-key pool)
-
 @dataclass
 class AggregateResult:
     """Output of one two-mask aggregation round."""
@@ -952,21 +782,20 @@ class AggregateResult:
     recovery_invoked: bool
     eavesdrop_distinguishable: bool  # honest-but-curious aggregator gain
     comm: Dict = field(default_factory=dict)  # per-phase bytes + agg time
-    # Integer-domain modular sum AFTER unmasking - lets callers verify
-    # masking exactness (masked pipeline == direct quantized sum, word
-    # for word) without float rounding in the comparison.
+    # Integer-domain modular sum after unmasking, so callers can check
+    # masking exactness against the direct quantized sum without float
+    # rounding.
     aggregate_quantized: object = None  # np.uint32 array
 
 
 def _slice_pool(pool, offset, n_bits, auditor=None, base_offset=0):
     """Slice n_bits from pool starting at offset. Raises if exhausted.
 
-    When `auditor` is given, the ABSOLUTE range
+    When `auditor` is given, the absolute range
     [base_offset + offset, base_offset + offset + n_bits) is registered
-    with it, and any overlap with a previously consumed range raises -
-    the pool-reuse hard audit. base_offset locates a
-    sub-pool view (e.g. one cluster's slice) inside its parent pool so
-    all consumption is audited in parent-absolute coordinates.
+    with it and any overlap with a previously consumed range raises.
+    base_offset locates a sub-pool view (one cluster's slice) inside its
+    parent pool so all consumption is audited in parent coordinates.
     """
     if offset + n_bits > len(pool):
         raise ValueError(
@@ -979,14 +808,13 @@ def _slice_pool(pool, offset, n_bits, auditor=None, base_offset=0):
 
 
 class PoolAuditor:
-    """Hard audit that no distilled-key pool offset is consumed twice
-    across a full run.
+    """Audit that no distilled-key pool offset is consumed twice across
+    a run.
 
-    OTP integrity is binary: a single reused mask bit voids the
-    information-theoretic claim, so overlap is a hard ValueError, not a
-    warning. Consumed [start, end) intervals are kept sorted; each
-    consume() is checked against both neighbors (O(log n) locate +
-    O(n) insert - trivial at simulation scale).
+    A single reused mask bit voids the information-theoretic claim, so
+    overlap raises ValueError. Consumed [start, end) intervals are kept
+    sorted and each consume() is checked against both neighbors
+    (O(log n) locate, O(n) insert).
 
     Discarded-but-reserved material (a threshold-failed cluster's slice)
     is also registered: single-use discipline burns it, so any later
@@ -1050,47 +878,18 @@ def secure_aggregation_round(
     distilled keys); the round itself is mask-source-agnostic.
 
     Protocol:
-      (1) Each client quantizes its gradient to int32 (modular ring Z_{2^32}).
-      (2) For each unordered pair (i, j) in the cluster, both endpoints
-          derive the same uint32 mask from shared distilled bits. Client i adds
-          mask, client j subtracts mask. Pairwise sum cancels.
-      (3) Each client adds a self-mask drawn from local QRNG (seed s_i).
-          The seed is Shamir-shared (t-of-n) across the cluster so
-          survivors can reconstruct it if the client drops.
-      (4) Each client sends one share of its OWN self-mask seed to each of
-          its n-1 cluster peers (the n(n-1) x BYTES_PER_SHAMIR_SHARE wire
-          charge models exactly these messages), then - after the live-set
-          announcement - transmits its masked payload.
-      (5) Aggregator sums the masked payloads (modular addition).
-      (6) Dropout handling under THIS simulation's drop timing (dropouts
-          occur AFTER share distribution, BEFORE payload transmission):
-            - A dropped client's payload - and with it its self-mask -
-              never entered the sum, so NO self-mask reconstruction is
-              protocol-necessary here. The Shamir machinery is still
-              distributed every round because the general Bonawitz timing
-              (a client dropping AFTER its payload was sent) requires
-              >= threshold survivors' shares to reconstruct the dropped
-              self-mask seed; this simulation VALIDATES reconstruction
-              (asserted below, not charged as protocol traffic) without
-              exercising that timing - the m7 baselines do.
-            - Each survivor discloses its own self-mask SEED (4 B; the
-              mask is PRG-expanded from it - the computationally protected
-              leg) so the aggregator can remove surviving self-masks.
-            - For the dropped client's pairwise residue: each survivor
-              reveals the pairwise bits it shared with the dropped client.
-              Safe because bits are per-round-fresh and single-use -
-              unconditionally so (cf. Flamingo, IEEE S&P 2023, where the
-              same reveal logic rests on computational per-round PRF seeds).
-      (7) Aggregator dequantizes the sum, returns aggregate.
+      (1) Quantize gradients to int32 (Z_{2^32}).
+      (2) Pairwise uint32 masks from shared bits; i adds, j subtracts.
+      (3) Self-mask from a local seed, Shamir-shared t-of-n.
+      (4) Each client sends n-1 seed shares, then its masked payload.
+      (5) Aggregator sums payloads modulo 2^32.
+      (6) Dropouts occur after share distribution and before payload
+          transmission. Survivors disclose their self-mask seeds and
+          reveal their pairwise bits with each dropped client; the
+          dropped seed reconstruction is asserted but not charged.
+      (7) Dequantize the sum.
 
-    Honest-but-curious aggregator check - VALIDATION, not a security
-    result: under uniform modular masks, payload
-    indistinguishability from uniform is a THEOREM (one-time pad over
-    Z_{2^32}); the chi-squared trial on the lowest byte is therefore an
-    implementation-bug detector - it can only fire if the mask pipeline
-    is broken (non-uniform bits, reuse, wrong modular arithmetic). A
-    False result confirms the implementation matches the theorem; it
-    adds no security beyond it.
+    The chi-squared distinguisher is an implementation check only.
     """
     if aggregator_rng is None:
         aggregator_rng = np.random.default_rng(0)
@@ -1136,7 +935,7 @@ def secure_aggregation_round(
     for c in cluster_clients:
         seed = int(local_rng_seeds[c]) % _SHAMIR_PRIME
         local_rng = np.random.default_rng(seed)
-        # local QRNG generates n_params uint32s directly
+        # self-mask: n_params uint32 words from the local generator
         self_masks[c] = local_rng.integers(0, 1 << 32, size=n_params, dtype=np.uint64).astype(np.uint32)
         # Shamir split the seed into one share per cluster member
         seed_shares[c] = shamir_split(seed, n_cluster, threshold,
@@ -1166,10 +965,8 @@ def secure_aggregation_round(
         agg = (agg + pl).astype(np.uint32)
     _t_agg1 = time.perf_counter()
 
-    # Honest-but-curious distinguisher trial - VALIDATION (implementation-
-    # bug detector; indistinguishability itself is a theorem, see the
-    # docstring). Instrumentation, not protocol - timed separately so it
-    # lands in NO latency bucket.
+    # Distinguisher trial: instrumentation, timed separately and excluded
+    # from every latency bucket.
     _t_chi0 = time.perf_counter()
     sample = masked_payloads[survivors[0]]
     distinguishable = _chi2_distinguishable(sample, aggregator_rng)
@@ -1181,19 +978,13 @@ def secure_aggregation_round(
     recovery_invoked = bool(dropouts)
     for c in cluster_clients:
         if c in dropouts:
-            # VALIDATION ONLY: under this simulation's drop
-            # timing the dropped client's self-mask never entered the sum,
-            # so this reconstruction is not protocol-necessary and its
-            # share traffic is NOT charged. It is retained to assert the
-            # Shamir machinery works (load-bearing in the general Bonawitz
-            # timing, exercised by the m7 baselines).
+            # Validation only: the dropped self-mask never entered the
+            # sum, so this reconstruction is asserted, not charged.
             shares = []
             for survivor_idx, s in enumerate(survivors):
                 if len(shares) >= threshold:
                     break
-                # In real protocol, survivor s sends seed_shares[c][s_pos]
-                # - here we model that survivor s holds the share at
-                # position (s_pos+1) corresponding to its position.
+                # Survivor s holds the share at its own cluster position.
                 pos = cluster_clients.index(s)
                 shares.append(seed_shares[c][pos])
             reconstructed_seed = shamir_reconstruct(shares)
@@ -1201,51 +992,37 @@ def secure_aggregation_round(
                 "Shamir reconstruction failed - protocol bug"
             local_rng = np.random.default_rng(reconstructed_seed)
             dropped_self_mask = local_rng.integers(0, 1 << 32, size=n_params, dtype=np.uint64).astype(np.uint32)
-            # Note: dropped client's pairwise masks are still in `agg` from
-            # the +mask contributions of its surviving partners. We undo
-            # those by replaying the appropriate sign from survivors.
-            # Since survivors already applied sign(survivor, dropped) to their
-            # payload, the dropped client's contribution is missing. The
-            # surviving sum contains an extra mask term per pair.
-            # Survivors reveal pairwise bits with dropped (safe: per-round-fresh)
-            # -> aggregator subtracts their mask to neutralize the residual.
+            # Each surviving partner s added sign(s, c) * mask to its
+            # payload and the dropped client never sent the cancelling
+            # term. Survivors reveal their pairwise bits with c (single
+            # use, so safe) and the aggregator removes each residue with
+            # the opposite sign.
             for s in survivors:
                 lo, hi = (s, c) if s < c else (c, s)
                 resid = pair_masks[(lo, hi)]
-                # Surviving partner s contributed sign(s, c)*resid to agg.
-                # We subtract that sign-respecting contribution.
                 if s < c:
                     agg = (agg - resid).astype(np.uint32)
                 else:
                     agg = (agg + resid).astype(np.uint32)
-            # Dropped client's self-mask never entered agg (it didn't send).
-            # No subtraction needed for self-mask of dropped client.
+            # The dropped client's self-mask never entered agg.
         else:
             # Surviving client's self-mask must be removed.
             agg = (agg - self_masks[c]).astype(np.uint32)
             bits_self += n_params * 32
 
-    # Step 7: Dequantize the modular sum.
-    # Note: agg is sum of int32-quantized gradients in Z_{2^32}. Treat as
-    # signed int32 for dequantization. Modular wraparound is theoretically
-    # possible if many gradients sum to magnitudes > 2^31; in practice
-    # gradient updates are small.
+    # Step 7: Dequantize the modular sum, reading agg as signed int32.
+    # Wraparound would need the summed magnitudes to exceed 2^31, far
+    # above the clipped gradient range.
     aggregate = dequantize_gradient(agg)
     _t_agg3 = time.perf_counter()
 
-    # Communication accounting for this cluster round.
-    # Wire model documented at the BYTES_PER_* constants; phase semantics
-    # at RoundComm. The distinguisher trial between _t_agg1 and _t_agg2 is
-    # instrumentation, not protocol, and is excluded from aggregator time.
+    # Communication accounting for this cluster round (see RoundComm).
     comm = {
         "payload_bytes": len(survivors) * n_params * BYTES_PER_MASKED_WORD,
         "share_bytes": n_cluster * (n_cluster - 1) * BYTES_PER_SHAMIR_SHARE,
         "selfmask_bytes": len(survivors) * BYTES_PER_SELFMASK_SEED,
-        # Zero under this simulation's pre-payload drop timing: the
-        # dropped self-mask never entered the sum, so seed reconstruction
-        # is validation, not protocol. Recovery costs reveals
-        # only. The m7 baselines, which exercise post-payload drops,
-        # charge their reconstruction shares.
+        # Zero under pre-payload drop timing; the m7 baselines charge
+        # reconstruction shares.
         "recovery_share_bytes": 0,
         "reveal_bytes": (len(dropouts) * len(survivors)
                          * n_params * BYTES_PER_MASKED_WORD),
@@ -1271,12 +1048,9 @@ def secure_aggregation_round(
 def _chi2_distinguishable(payload_uint32, rng, alpha=0.001):
     """Chi-squared test: is payload's lowest-byte distribution uniform?
 
-    VALIDATION ONLY. Under modular OTP with uniform masks,
-    indistinguishability is a theorem, so this test cannot produce a
-    security finding - a True return means the implementation is broken
-    (non-uniform mask bits, pool reuse, or wrong modular arithmetic),
-    nothing more. Returns True if the null "payload is uniform" is
-    rejected at significance alpha.
+    Implementation check only: True means the mask pipeline is broken.
+    Returns True if the null "payload is uniform" is rejected at
+    significance alpha.
     """
     from scipy.stats import chisquare
     low_byte = (payload_uint32 & 0xFF).astype(np.int64)
@@ -1290,7 +1064,7 @@ def _chi2_distinguishable(payload_uint32, rng, alpha=0.001):
 
 def define_triangle_topology(num_clients):
     """Define triangle topologies for different client counts.
-    
+
     Each triangle has exactly 3 clients. Triangles may share edges (clients).
     Returns:
         triangles: List of (i, j, k) client index tuples.
@@ -1301,7 +1075,7 @@ def define_triangle_topology(num_clients):
         triangles = [(0, 1, 2)]
         shared_edges = []
         tree_edges = []
-    
+
     elif num_clients == 6:
         # 4 unique nodes forming 2 overlapping triangles + 2 extra nodes in a 3rd triangle
         # T1: [0,1,2], T2: [1,2,3], T3: [3,4,5]
@@ -1309,7 +1083,7 @@ def define_triangle_topology(num_clients):
         triangles = [(0, 1, 2), (1, 2, 3), (3, 4, 5)]
         shared_edges = [((0, 1), (1, 2)), ((1, 2), (3,))]
         tree_edges = [(0, 1), (1, 2)]  # T0 is root, T1 child, T2 grandchild
-    
+
     elif num_clients == 9:
         # 4 triangles in a vertex-sharing chain covering all 9 clients
         # T0: (0,1,2), T1: (2,3,4), T2: (4,5,6), T3: (6,7,8)
@@ -1317,7 +1091,7 @@ def define_triangle_topology(num_clients):
         triangles = [(0, 1, 2), (2, 3, 4), (4, 5, 6), (6, 7, 8)]
         shared_edges = [((0,), (2,)), ((1,), (4,)), ((2,), (6,))]
         tree_edges = [(0, 1), (1, 2), (2, 3)]
-    
+
     elif num_clients == 12:
         # 4 triangles in a mesh
         triangles = [
@@ -1338,15 +1112,12 @@ def define_triangle_topology(num_clients):
         # Chain tree
         tree_edges = [(i, i+1) for i in range(len(triangles)-1)]
         shared_edges = []
-    
+
     return triangles, shared_edges, tree_edges
 
 
 def topology_from_mesh(mesh_result):
-    """Extract triangle topology and aggregation tree from a Module 3 MeshResult.
-
-    Bridges the physical campus topology (Delaunay) to the FL aggregation layer,
-    ensuring the logical triangle assignments match the physical entangled links.
+    """Triangle topology and aggregation tree from a Module 3 MeshResult.
 
     Args:
         mesh_result: MeshResult from m3_mesh_topology.analyze_mesh().
@@ -1384,24 +1155,20 @@ def run_multitriangle_fl(
     device='cpu', verbose=True,
     seed=42,  # torch/np seed - vary across repeats for real replicates
 ):
-    """two-mask hierarchical FL with two-mask design and dropout recovery.
+    """Hierarchical two-mask FL over a triangle mesh with dropout recovery.
 
     Differences from the legacy driver (`run_multitriangle_fl_legacy`):
       - Modular OTP masking on int32-quantized gradients (Bonawitz proof applies)
-      - Pairwise masks derived from pre-sized distilled-key bit pool - wrap-around impossible
-      - Inter-triangle masks ALSO from distilled bits (not classical PRNG)
-      - Two-mask design: self-mask Shamir-shared for dropout recovery
+      - Pairwise masks from a pre-sized distilled-key pool, so no wrap-around
+      - Inter-triangle masks also from distilled bits, not a classical PRNG
+      - Self-mask Shamir-shared for dropout recovery
       - Per-round dropouts sampled at `dropout_rate`
       - Honest-but-curious aggregator distinguisher reported per round
-        (validation-only implementation-bug detector - see
-        _chi2_distinguishable; indistinguishability is a theorem)
+        (validation only, see _chi2_distinguishable)
     """
     if triangles is None or tree_edges is None:
-        # Generate the mesh rather than fall back to a hand-written
-        # table. The tables encode topologies the Delaunay construction
-        # does not produce - one joins two cells at a single vertex -
-        # so a silent fallback would reintroduce them in any caller that
-        # forgets to pass a topology.
+        # Generate the mesh; the hand-written tables encode topologies the
+        # Delaunay construction does not produce.
         try:
             from modules.m3_mesh_topology import analyze_mesh
             from config import OPERATING_POINT
@@ -1415,16 +1182,13 @@ def run_multitriangle_fl(
         if edge_secret_rates is None:
             edge_secret_rates = _m.edge_secret_rates
     num_triangles = len(triangles)
-    # All pairwise links that physically exist (triangle sides) - the only
-    # pairs with distillation hardware and hence key pools. Used to keep
-    # tree-mask key assignment on real links.
+    # All physical pairwise links (triangle sides), the only pairs with
+    # distillation hardware and hence key pools. Keeps tree-mask key
+    # assignment on real links.
     physical_edges = {tuple(sorted((int(t[i]), int(t[j]))))
                       for t in triangles for i, j in ((0, 1), (1, 2), (0, 2))}
 
-    # Seed torch BEFORE the first model_fn(): the initial global model and
-    # DataLoader shuffling otherwise inherit whatever global state the
-    # process had, making training metrics irreproducible across suite
-    # compositions and standalone runs.
+    # Seed torch before the first model_fn() (see run_federated_training).
     torch.manual_seed(seed)
     global_model = model_fn()
     n_params = sum(p.numel() for p in global_model.parameters())
@@ -1443,17 +1207,14 @@ def run_multitriangle_fl(
         edge_secret_rates = {}
 
     # Pre-allocate distilled-key pools. _slice_pool's bound check prevents
-    # wrap-around; the PoolAuditors below hard-fail if any offset is ever
-    # consumed twice across the whole run.
+    # wrap-around; the PoolAuditors raise if any offset is consumed twice.
     bits_per_mask = n_params * 32
     size_intra, size_inter = size_pools(triangles, tree_edges,
                                         num_rounds, n_params)
     key_source = {'intra': 'caller-supplied', 'inter': 'caller-supplied'}
-    # Decide provenance once for the whole run. Distilling only the leg
-    # that happens to fit the budget would leave a run whose two mask
-    # legs came from different sources, which is harder to describe than
-    # it is worth: the legs are interchangeable for every quantity this
-    # driver reports.
+    # Decide provenance once for the whole run, so both mask legs come
+    # from the same source; the legs are interchangeable for every
+    # quantity this driver reports.
     need = (size_intra if pool_intra is None else 0) + \
            (size_inter if pool_inter is None else 0)
     over_budget = need > DISTILLED_POOL_MAX_BITS
@@ -1478,9 +1239,8 @@ def run_multitriangle_fl(
     start_time = time.time()
     intra_off, inter_off = 0, 0
 
-    # Communication accounting. Modeled-latency inputs
-    # come from the config single source of truth; lazy import keeps m4
-    # free of import-order coupling with config.
+    # Communication accounting. Modeled-latency inputs come from config;
+    # the lazy import avoids an import cycle.
     comm_rounds = []
     try:
         from config import OPERATING_POINT, CLASSICAL_LINK_BPS
@@ -1518,14 +1278,9 @@ def run_multitriangle_fl(
 
         # Step 3: Intra-triangle secure_aggregation_round per cluster
         triangle_aggs = []
-        # Weight actually carried into the aggregate. Each client's
-        # update is pre-scaled by 1/(cells it belongs to), so a client
-        # contributes a total weight of 1 when all its cells succeed.
-        # A cell that falls below threshold contributes nothing, and its
-        # members' shares of that cell go with it - so the divisor has
-        # to be the weight that arrived, not the number of clients that
-        # did not drop. Counting non-dropped clients instead shrinks
-        # every update in proportion to how much was lost.
+        # Weight carried into the aggregate: updates are pre-scaled by
+        # 1/(cell memberships), and a cell below threshold contributes
+        # nothing, so the divisor is the weight that arrived.
         included_weight = 0.0
         round_distinguishable = False
         any_recovery = False
@@ -1542,34 +1297,21 @@ def run_multitriangle_fl(
             local_seeds = {c: shamir_field_element(rng) for c in cluster}
             tri_dropouts = {c for c in cluster if c in round_dropouts}
             survivors_count = len(cluster) - len(tri_dropouts)
-            # Skip if fewer survivors than Shamir threshold - cannot recover
-            # dropped clients' self-masks. Triangle contributes zero this round.
+            # Below the Shamir threshold the dropped clients' self-masks
+            # cannot be recovered; the triangle contributes zero this round.
             if survivors_count < 2:
                 triangle_aggs.append(torch.zeros(n_params))
-                # Quantified for exp5's recovery-cost analysis.
                 rc.threshold_failures += 1
-                # the aborted cluster still exchanged its
-                # per-round Shamir shares (distribution precedes dropout
-                # knowledge), and its reserved key slice is DISCARDED, not
-                # returned (single-use discipline - safe against partial
-                # derivation). Both are ledgered so this record reconciles
-                # with aux['bits_intra_consumed'].
-                # Drops are detected by non-arrival, so the abort notice
-                # follows payload collection: a client masks against all
-                # its partners before it can know who dropped - which is
-                # precisely why the reveal leg exists - so the survivor
-                # of a below-threshold cluster has already sent. Charge
-                # its payload as well as the notice; the cluster's
-                # contribution is discarded, not its traffic.
+                # Charge the shares already exchanged, the survivor's
+                # payload and abort notice, and the discarded key slice.
                 rc.payload_bytes += (survivors_count * n_params
                                      * BYTES_PER_MASKED_WORD)
                 rc.downlink_bytes += survivors_count * BYTES_ABORT_NOTICE
                 rc.share_bytes += (len(cluster) * (len(cluster) - 1)
                                    * BYTES_PER_SHAMIR_SHARE)
                 rc.key_bits_intra += 3 * bits_per_mask
-                # Pool audit: the discarded slice is BURNED (single-use
-                # discipline) - register it so any later reuse of these
-                # offsets hard-fails too.
+                # Pool audit: register the discarded slice so any later
+                # reuse of these offsets fails too.
                 audit_intra.consume(_cluster_base, 3 * bits_per_mask)
                 for _i in range(3):
                     _a, _b = int(cluster[_i]), int(cluster[(_i + 1) % 3])
@@ -1611,29 +1353,10 @@ def run_multitriangle_fl(
         distinguisher_log.append(round_distinguishable)
         recovery_log.append(any_recovery)
 
-        # Step 4: Inter-triangle aggregation.
-        #
-        # Every cell submits its sum MASKED and the masks cancel only in
-        # the aggregator's total, so no cell sum is ever exposed. Masks
-        # sit on the edges of a spanning tree over the cell dual: each
-        # edge's mask is added by one endpoint and subtracted by the
-        # other, so it survives in both submissions and vanishes from
-        # their sum. A spanning tree gives every cell degree >= 1, so
-        # every submitted value carries at least one fresh uniform mask.
-        #
-        # This is Bonawitz et al. (2017) applied a second time, with the
-        # cells as its parties: the pairwise-cancelling construction is
-        # theirs, and a connected mask graph is what their cancellation
-        # argument requires. K-1 edges is the minimum connected graph on
-        # K cells, so this costs no more key than the hop-by-hop scheme
-        # it replaces.
-        #
-        # The earlier scheme unmasked at each hop, handing the aggregator
-        # every cell sum. With overlapping cells those sums form a linear
-        # system in the individual updates; at and above 12 clients it has
-        # full rank, so every client's update was solvable with no
-        # collusion. Masking through to the total removes that system:
-        # the aggregator observes one number.
+        # Step 4: Inter-triangle aggregation. Cell sums are masked on
+        # the edges of a spanning tree over the cell dual (added at one
+        # endpoint, subtracted at the other) and cancel only in the
+        # aggregator's total, so no cell sum is exposed.
         _t_tree0 = time.perf_counter()
         if num_triangles == 1:
             global_aggregate = triangle_aggs[0]
@@ -1645,13 +1368,8 @@ def run_multitriangle_fl(
                 edge_bits = _slice_pool(pool_inter, inter_off, bits_per_mask,
                                         auditor=audit_inter)
                 inter_off += bits_per_mask
-                # One edge-pool consumption per mask edge per round. The
-                # mask's key demand is assigned to the PHYSICAL shared
-                # edge between the two cells (Delaunay dual edge = two
-                # shared vertices) - inter-cell masks do not get implicit
-                # dedicated hardware; a shared physical edge serving a
-                # cell pair as well as its own triangles fills
-                # correspondingly slower.
+                # Key demand is assigned to the physical shared edge
+                # between the two cells.
                 rc.key_bits_inter += bits_per_mask
                 _shared = sorted(int(v) for v in
                                  (set(triangles[parent]) & set(triangles[child])))
@@ -1660,10 +1378,9 @@ def run_multitriangle_fl(
                 else:
                     # Non-adjacent tree edge (does not occur on a Delaunay
                     # dual, where parent and child share a side). Assign
-                    # the mask to the lexicographically first PHYSICAL
-                    # cross link between the two triangles. The candidate
-                    # set excludes self-loops and pairs with no
-                    # distillation hardware / key pool.
+                    # the mask to the lexicographically first physical
+                    # cross link between the two triangles, excluding
+                    # self-loops and pairs with no key pool.
                     _cross = sorted(
                         tuple(sorted((int(a), int(b))))
                         for a in triangles[parent] for b in triangles[child]
@@ -1703,26 +1420,20 @@ def run_multitriangle_fl(
             new_params = global_params + global_aggregate / included_weight
             set_model_params(global_model, new_params)
 
-        # Round communication/latency record
-        # += not =: abort notices for threshold-failed clusters were
-        # already added in step 3.
+        # Round communication/latency record. Downlink is accumulated
+        # because abort notices were already added in step 3.
         rc.downlink_bytes += (len(client_updates) * n_params
                               * BYTES_PER_MODEL_WORD)
         rc.local_compute_s = _local_compute_s
-        # Masking = step-3 wall time minus the cluster-level aggregator
-        # work (aggregator_time_s minus the tree stage, which ran after
-        # _step3_s closed) minus the distinguisher instrumentation
-        #.
+        # Masking time: step-3 wall time minus the cluster-level
+        # aggregator work (aggregator_time_s less the tree stage, which
+        # ran after _step3_s closed) minus the distinguisher
+        # instrumentation.
         rc.masking_s = max(0.0, _step3_s
                            - (rc.aggregator_time_s - _tree_s)
                            - _instr_s)
-        # Key-distillation wait: the slowest physical edge's pool-fill
-        # time. Edges distil concurrently on dedicated optics, so the
-        # round waits on the worst ratio of bits demanded to that edge's
-        # own rate - not on the worst demand at a shared rate. An edge's
-        # rate depends on its length and on how many ways each endpoint
-        # splits its source, so the two factors compound: a long edge
-        # between two well-connected nodes is the usual binding one.
+        # Key wait: the slowest physical edge's pool-fill time at its
+        # own rate.
         if rc.key_bits_per_edge:
             rc.key_wait_s = max(
                 bits / max(edge_secret_rates.get(e, secret_rate_bps), 1.0)
@@ -1748,9 +1459,9 @@ def run_multitriangle_fl(
 
     wall_clock = time.time() - start_time
 
-    # Pool-reuse hard audit: every consumed slice must be
-    # disjoint (enforced en route - any overlap raised immediately) and
-    # the audited totals must equal the ledgered burns exactly.
+    # Pool-reuse audit: every consumed slice must be disjoint (overlap
+    # raised en route) and the audited totals must equal the ledgered
+    # consumption exactly.
     assert audit_intra.bits_consumed == intra_off, (
         f"intra pool audit mismatch: {audit_intra.bits_consumed} audited "
         f"!= {intra_off} ledgered")
@@ -1797,37 +1508,14 @@ def run_multitriangle_fl_legacy(
     triangles=None, tree_edges=None,
     device='cpu', verbose=True,
 ):
-    """Legacy hierarchical driver; run_multitriangle_fl is the maintained
-    driver and adds modular OTP masking, pre-sized distilled-key pools,
-    the two-mask design, and per-round dropout sampling. No callers;
-    retained for reference.
-
-    Run federated learning with multi-triangle hierarchical aggregation.
-
-    Protocol:
-      1. All clients train locally -> produce gradient updates
-      2. Intra-triangle: Bonawitz pairwise masking within each triangle
-         -> triangle aggregates (individual gradients hidden)
-      3. Inter-triangle: hierarchical aggregation along tree with masking.
-         Child SENDS masked payload; parent RECEIVES and unmasks.
-         Wire payloads are recorded for eavesdropper verification.
-      4. Root produces global aggregate -> FedAvg update
-
-    Args:
-        triangles: Optional pre-computed triangle list (from Module 3 Delaunay).
-                   Falls back to define_triangle_topology() if None.
-        tree_edges: Optional pre-computed aggregation tree edges.
-
-    Returns:
-        FLResult with training metrics.
-        eavesdrop_stats: dict with per-round eavesdropper analysis.
+    """Legacy hierarchical driver with float PRNG masks and hop-by-hop
+    unmasking; no callers. Returns (FLResult, eavesdrop_stats).
     """
     if triangles is None or tree_edges is None:
         triangles, _, tree_edges = define_triangle_topology(num_clients)
     num_triangles = len(triangles)
 
-    # Same seed-before-model order as the live drivers: keeps this reference implementation reproducible if
-    # it is ever revived.
+    # Seed before the first model_fn(), as in the live drivers.
     torch.manual_seed(42)
     global_model = model_fn()
     n_params = sum(p.numel() for p in global_model.parameters())
@@ -1843,7 +1531,7 @@ def run_multitriangle_fl_legacy(
     start_time = time.time()
     rng = np.random.default_rng(42)
 
-    # Pre-generate symmetric pairwise seeds for ALL client pairs
+    # Pre-generate symmetric pairwise seeds for all client pairs
     max_client = max(max(t) for t in triangles)
     all_seeds = rng.integers(0, 2**31, size=(num_rounds, max_client+1, max_client+1))
     for r in range(num_rounds):
@@ -1917,12 +1605,11 @@ def run_multitriangle_fl_legacy(
                     pair_seed = int(inter_seeds[round_idx, min(parent, child), max(parent, child)])
                     inter_mask = generate_prng_mask(n_params, pair_seed)
 
-                    # CHILD NODE scope: only sees own aggregate + shared key
+                    # Child node: sees only its own aggregate and the shared key.
                     wire_payload = agg[child] + inter_mask  # transmitted over network
 
-                    # Eavesdropper verification: analyze wire payload
-                    # An eavesdropper intercepting wire_payload should learn nothing
-                    # about agg[child]. Measure information leakage:
+                    # Eavesdropper check: wire_payload should carry no
+                    # information about agg[child].
                     true_agg = agg[child]
                     cos_sim = torch.nn.functional.cosine_similarity(
                         wire_payload.unsqueeze(0), true_agg.unsqueeze(0)
@@ -1936,7 +1623,7 @@ def run_multitriangle_fl_legacy(
                     round_cosines.append(cos_sim)
                     round_corrs.append(pearson)
 
-                    # PARENT NODE scope: only sees wire_payload + shared key
+                    # Parent node: sees only wire_payload and the shared key.
                     child_recovered = wire_payload - inter_mask
                     agg[parent] = agg[parent] + child_recovered
 

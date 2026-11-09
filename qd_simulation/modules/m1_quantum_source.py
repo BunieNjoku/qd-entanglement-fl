@@ -10,21 +10,10 @@ matrix is used as a tractable noise model for the partially-mixed Bell
 state; the Bell weight is derived from the measured entanglement
 negativity in config.py.
 
-Co-located architecture matching the rack system: QD source at one node,
-both photons collected through one in-situ fiber objective and separated
-by wavelength; Photon 1 is detected locally, Photon 2 travels native
-780 nm single-mode fiber (780HP class) to the partner node. No quantum
-frequency conversion: at campus distances the PPLN insertion loss
-(~4.6 dB) exceeds the 780 nm fiber loss it would save.
-
-This module produces correlated bit pairs at the two endpoints. Under the
-trusted-source assumption (Assumption B), the CHSH S-parameter > 2 verifies
-that the prepared state is genuinely entangled rather than degraded or
-mis-set (source fault / drift). Established concept: an ENTANGLEMENT
-WITNESS (Horodecki 1996; Terhal 2000) used as a calibration/QA diagnostic.
-It is not self-testing, not device-independent, and not an eavesdropper
-bound - there is no eavesdropper in the declared threat model
-(source-model secret-key agreement).
+Co-located architecture: QD source at one node, photon 1 detected
+locally, photon 2 sent over native 780 nm fiber to the partner node. The
+CHSH check is an entanglement witness used as a source diagnostic, not
+an eavesdropper bound.
 """
 import numpy as np
 from dataclasses import dataclass
@@ -75,11 +64,8 @@ def compute_chsh_s(rho):
     S = |E(a1,b1) - E(a1,b2)| + |E(a2,b1) + E(a2,b2)|
     where E(a,b) = P(same) - P(different)
 
-    SIMULATION HONESTY NOTE: S is computed analytically from the programmed
-    density matrix, not estimated from sampled measurement statistics - so
-    within this simulation the entanglement-witness check is tautological.
-    A hardware implementation must estimate S from the Bell-test duty-cycle
-    sample, with finite-statistics uncertainty.
+    Exact S from the density matrix; sample_chsh_s gives the
+    finite-statistics estimate.
     """
     a_angles = [0, np.pi / 4]                    # 0 deg, 45 deg
     b_angles = [np.pi / 8, 3 * np.pi / 8]        # 22.5 deg, 67.5 deg
@@ -117,13 +103,9 @@ def simulate_source(
 ):
     """Simulate entangled photon pair source with all noise contributions.
 
-    coupling_efficiency is the per-photon arm transmission from the dot to
-    the detector input (collection into the fiber objective, module and
-    projection optics), calibrated in config.py from the measured singles
-    rate; it applies to BOTH photons because both are collected through
-    the same in-situ fiber objective before wavelength separation.
-    local_optics_efficiency is an extra local-arm-only factor kept for
-    model flexibility (1.0 by default: the calibration absorbs it).
+    coupling_efficiency is the per-photon arm transmission from dot to
+    detector input and applies to both photons; local_optics_efficiency
+    is an extra local-arm factor (1.0 by default).
 
     Args:
         duration_s: Simulation duration in seconds (default 1s).
@@ -166,13 +148,8 @@ def simulate_source(
         alice_efficiency = total_link_efficiency
         bob_efficiency = total_link_efficiency
 
-    # Each photon independently survives with its respective probability;
-    # a coincidence therefore occurs per emission with probability
-    # alice_efficiency * bob_efficiency. The binomial draw is
-    # distribution-identical to per-emission Bernoulli sampling (detection
-    # is polarization-independent in this model) and keeps memory O(1) in
-    # n_emitted, which matters at the anchored per-pair detection
-    # probability of order 1e-5.
+    # Binomial coincidence draw: identical in distribution to per-emission
+    # Bernoulli sampling and O(1) memory in n_emitted.
     n_true_coinc = int(rng.binomial(n_emitted,
                                     alice_efficiency * bob_efficiency))
 
@@ -182,7 +159,7 @@ def simulate_source(
     n_accidental = rng.poisson(
         dark_rate_per_window * n_emitted * (alice_efficiency + bob_efficiency)
     )
-    n_accidental = min(n_accidental, n_true_coinc // 2)  # Cap at reasonable fraction
+    n_accidental = min(n_accidental, n_true_coinc // 2)
 
     # Step 4: Polarization measurement
     rho = werner_state(fidelity)
@@ -290,17 +267,11 @@ def werner_weight_for_negativity(two_n):
     return (2.0 * two_n + 1.0) / 3.0
 
 
-# ENTANGLEMENT VS EMISSION DELAY (FSS PRECESSION)
-#
-# In the XX-X cascade the two-photon state after an X-state dwell time
-# tau is (|HH> + exp(i*Omega*tau)|VV>)/sqrt(2) with Omega = FSS/hbar:
-# maximally entangled at every exact tau, with a tau-dependent phase
-# (Winik et al., PRB 95, 235435; Hopfmann et al., PRB 103, 075413 -
-# both fit full 36-basis tomography with this model and essentially no
-# free parameters). Finite two-photon timing resolution mixes phases
-# within the detected-delay bin, and an acceptance window integrates
-# over a phase spread; both reduce the polarization coherence and hence
-# the negativity. tau is exponentially distributed with mean T1.
+# FSS precession: after an X-state dwell time tau the two-photon state
+# is (|HH> + exp(i*Omega*tau)|VV>)/sqrt(2), Omega = FSS/hbar (Winik et
+# al., PRB 95, 235435; Hopfmann et al., PRB 103, 075413). Timing jitter
+# and the acceptance window average over the phase and reduce the
+# negativity. tau ~ Exp(T1).
 
 HBAR_EV_S = 6.582119569e-16  # reduced Planck constant, eV*s (CODATA)
 
@@ -333,12 +304,9 @@ def delay_window_coherence(t_lo_s, t_hi_s, t1_s, sigma_s, omega_rad_s,
         c        = E[a(tau) e^(i Omega tau)] / E[a(tau)],
         captured = E[a(tau)],       tau ~ Exp(T1).
 
-    |c| is the coherence surviving the window when the deterministic
-    phase is compensated to the window centroid (standard eigenbasis
-    alignment, cf. the polarization-projection calibration in the
-    source papers). The windowed negativity is 2n = v0 * |c| with v0 a
-    delay-independent visibility calibrated to a measured anchor
-    (calibrate_visibility).
+    |c| is the coherence surviving the window with the deterministic
+    phase compensated to the window centroid. The windowed negativity is
+    2n = v0 * |c| with v0 from calibrate_visibility.
 
     Returns (c complex, captured fraction in [0, 1]).
     """
@@ -394,17 +362,9 @@ def compute_coincidence_rate(
         return source_rep_rate_hz * source_brightness * link_eff ** 2
 
 
-# NOISE-MODEL SENSITIVITY AND FINITE-STATISTICS CHSH
-#
-# The Werner state is the tractable default noise model, but it is not
-# physically accurate for QDs (system_description flags depolarizing or
-# amplitude damping as closer for F > 0.95). One-sided depolarizing on
-# half of |phi+> IS the Werner family - D_p(rho_B) = (1-p)rho + p I/2
-# applied to one qubit of a maximally entangled state gives exactly
-# werner_state(1-p) in this file's Bell-weight parametrization - so
-# the informative alternative is
-# amplitude damping, which is non-unital and breaks the e_x = e_z
-# symmetry the Werner model enjoys.
+# Alternative noise model: one-sided depolarizing is the Werner family
+# itself, so amplitude damping (non-unital, e_x != e_z) is the
+# informative comparison.
 
 
 def amplitude_damping_state(gamma):
@@ -478,27 +438,13 @@ def sample_chsh_s(rho, n_events, rng=None, n_repeats=10):
     return float(np.mean(estimates)), float(np.std(estimates))
 
 
-# BBM92 MEASUREMENT LAYER
-#
-# Same source, fiber, and detection physics as simulate_source; the delta
-# is measurement-side only (Bennett, Brassard & Mermin, PRL 68, 557, 1992):
-# each site adds a passive basis choice between Z (0 deg) and X (45 deg)
-# analyzers, matched-basis events are kept (sifting), and the X-X subset
-# estimates the phase error rate of the Z-Z key (squashing argument:
-# Beaudry, Moroder & Lutkenhaus, PRL 101, 093601, 2008). Asymmetric basis
-# probabilities follow Lo, Chau & Ardehali (J. Cryptology 18, 133, 2005).
-# With p_z_alice = p_z_bob = 1.0 this reduces to the fixed-basis
-# source-model measurement of simulate_source (keep fraction 1, no test
-# set) - exp14 uses that limit as its fixed-basis arm so both protocol
-# arms share one sampling path.
-#
-# The intercept-resend adversary models a tap on the FIBER photon
-# (photon 2) only: for a tapped coincidence, Eve measures photon 2 in her
-# basis and resends the corresponding eigenstate. Standard analysis
-# (Bennett & Brassard 1984; Gisin et al., Rev. Mod. Phys. 74, 145, 2002,
-# sec. II.C.3): an Eve fixed in the key basis is invisible to a
-# fixed-basis protocol and learns the key; against BBM92 the tapped
-# fraction f contributes ~f/2 error in the conjugate basis.
+# BBM92 measurement layer (Bennett, Brassard & Mermin, PRL 68, 557):
+# passive Z/X basis choice per site, matched-basis sifting, X-X subset
+# for phase-error estimation (Beaudry, Moroder & Lutkenhaus, PRL 101,
+# 093601), asymmetric basis probabilities (Lo, Chau & Ardehali 2005).
+# p_z = 1 reduces to the fixed-basis measurement of simulate_source.
+# Intercept-resend taps the fiber photon only (Gisin et al., RMP 74,
+# 145, sec. II.C.3).
 
 @dataclass
 class Bbm92Result:
@@ -550,21 +496,12 @@ def simulate_bbm92(
 ):
     """Simulate one edge under BBM92 measurement with optional tap.
 
-    Reuses simulate_source's pair-generation, transmission, dark-count,
-    and extinction models bit for bit; only the measurement stage differs.
-    p_z_*: probability the passive splitter routes a photon to the Z
-    analyzer (0 deg). The X analyzer sits at 45 deg. Bob's analyzers are
-    additionally rotated by the sampled birefringence offset, so channel
-    rotation errs both bases equally (the e_x = e_z property exp13's
-    tests pin analytically).
-
-    eve_basis_mode: 'none', 'z' (Eve fixed in the Z basis - the attack a
-    fixed-basis protocol cannot see), or 'random' (basis guessed 50/50
-    per photon). eve_fraction is the tapped fraction of fiber photons.
-
-    Returns Bbm92Result. Accidentals join the stream with uniform random
-    bases and bits on both sides, as dark counts land in whichever
-    analyzer fires.
+    Same pair-generation, transmission, dark-count and extinction models
+    as simulate_source; only the measurement stage differs. p_z_*: Z
+    analyzer probability (X at 45 deg); Bob's analyzers carry the sampled
+    birefringence offset. eve_basis_mode: 'none', 'z' or 'random';
+    eve_fraction is the tapped fraction of fiber photons. Accidentals
+    join with uniform random bases and bits.
     """
     if rng is None:
         rng = np.random.default_rng(42)
@@ -774,36 +711,10 @@ def simulate_bbm92(
     )
 
 
-# SYMMETRIC BEAMSPLITTER-MULTIPLEXED EDGE KEYING
-#
-# Architecture (matches the cost model: 1 QD + 1 two-way optical switch per
-# node per triangle membership):
-#
-#   Each node hosts ONE QD source serving BOTH of its incident triangle edges.
-#   For each emitted pair, Photon 1 is detected locally; Photon 2 is routed by
-#   a two-way optical switch (beamsplitter / Pockels cell) to ONE of the node's
-#   two neighbours, chosen at random per pair.
-#
-# Consequence - availability and role symmetry (under the trusted-source
-# model this is an availability/fairness property, NOT a security mechanism):
-#
-#   Edge (i,j) accumulates shared bits from node i's source (on pairs its
-#   switch routes toward j) AND from node j's source (on pairs its switch
-#   routes toward i). Every edge is therefore keyed from BOTH endpoints.
-#
-#   No node is the privileged pair-generator on any edge. Source-hosting
-#   confers no asymmetric position, because both endpoints host. There is no
-#   external entanglement source that all parties must trust. This holds by
-#   construction (hardware layout), not by protocol convention.
-#
-# Rate consequence:
-#
-#   A 50/50 switch sends ~R/2 of each source's pairs toward each neighbour.
-#   Edge (i,j) receives ~R_i/2 from i plus ~R_j/2 from j. For homogeneous
-#   nodes this nets to ~R per edge - the two-way keying compensates for the
-#   multiplexing split. Bits from the two directions are CONCATENATED into
-#   the edge's pool (they are independent Bell-pair measurements on the same
-#   node pair, so both endpoints hold both halves after reconciliation).
+# Symmetric beamsplitter-multiplexed edge keying: each node's source
+# serves both incident edges through a two-way switch, so edge (i, j) is
+# keyed from both endpoints at ~R_i/2 + ~R_j/2 and the two directions
+# are concatenated into one pool.
 
 def edge_key_rate_symmetric(
     per_source_coincidence_rate_hz,
@@ -816,8 +727,8 @@ def edge_key_rate_symmetric(
     this edge. Both endpoints contribute, so the edge rate is the sum.
 
     Args:
-        per_source_coincidence_rate_hz: Coincidence rate of ONE node's source
-            when all its pairs are routed to a single partner (i.e. the
+        per_source_coincidence_rate_hz: Coincidence rate of one node's source
+            when all its pairs are routed to a single partner (the
             unmultiplexed link rate from compute_coincidence_rate()).
         switch_split: Fraction of a source's pairs routed to this edge.
             0.5 for a symmetric 2-way switch.
@@ -837,9 +748,8 @@ def edge_key_rate_symmetric(
         "rate_from_endpoint_i_hz": rate_from_i,
         "rate_from_endpoint_j_hz": rate_from_j,
         "edge_total_rate_hz": rate_from_i + rate_from_j,
-        # Symmetry witness: fraction of the edge's key material contributed by
-        # the node that "hosts" it. 0.5 == perfectly symmetric == no privileged
-        # generator. Any deviation from 0.5 is source-asymmetry on this edge.
+        # Fraction of the edge's key material contributed by endpoint i.
+        # 0.5 means no privileged generator on this edge.
         "source_symmetry_ratio": rate_from_i / (rate_from_i + rate_from_j)
         if (rate_from_i + rate_from_j) > 0 else 0.0,
         "switch_split": switch_split,
@@ -853,17 +763,10 @@ def simulate_symmetric_edge(
     rng=None,
     **source_kwargs,
 ):
-    """Simulate one triangle edge keyed from BOTH endpoints.
-
-    Runs the source model twice - once for each endpoint's QD - with each
-    contributing `switch_split` of its pairs to this edge. The two resulting
-    bit strings are concatenated into the edge's shared pool.
-
-    Both endpoints hold both halves: for pairs sourced at i, node i measured
-    Photon 1 locally and j measured Photon 2; for pairs sourced at j, the
-    roles reverse. After reconciliation each endpoint holds the full pool.
-
-    Returns a SourceResult for the combined edge, plus a symmetry witness.
+    """Simulate one triangle edge keyed from both endpoints: the source
+    model runs once per endpoint at `switch_split` of its pairs and the
+    two bit strings are concatenated. Returns a SourceResult for the
+    combined edge with a symmetry ratio in params.
     """
     if rng is None:
         rng = np.random.default_rng(42)
@@ -877,9 +780,9 @@ def simulate_symmetric_edge(
         duration_s=duration_s * switch_split, rng=rng, **source_kwargs
     )
 
-    # Concatenate both directions into the edge pool.
-    # Convention: "alice" = the endpoint we are accounting for; for pairs
-    # sourced at j, that endpoint held the REMOTE photon, so we swap.
+    # Concatenate both directions into the edge pool. "alice" is the
+    # endpoint being accounted for; for pairs sourced at j that endpoint
+    # held the remote photon, so the roles swap.
     edge_bits_i = np.concatenate([res_i.raw_bits_alice, res_j.raw_bits_bob])
     edge_bits_j = np.concatenate([res_i.raw_bits_bob, res_j.raw_bits_alice])
 
@@ -902,7 +805,7 @@ def simulate_symmetric_edge(
             **res_i.params,
             "bits_from_endpoint_i": n_i,
             "bits_from_endpoint_j": n_j,
-            # 0.5 => neither endpoint is the privileged generator on this edge.
+            # 0.5 means neither endpoint is the privileged generator.
             "source_symmetry_ratio": symmetry,
             "switch_split": switch_split,
         },
